@@ -36,6 +36,19 @@ graph TB
         AMP[amp - Anthropic MCP]
         Claude[claude-cli]
         OpenCode[opencode]
+        Copilot[GitHub Copilot CLI]
+    end
+    
+    subgraph "Swarm Orchestration"
+        SwarmMgr[Swarm Manager]
+        AgentRegistry[Agent Registry]
+        TaskBoard[Task Board]
+        Inbox[Message Inbox]
+    end
+
+    subgraph "Sandbox Environment"
+        Docker[Docker Engine]
+        Container[Sandbox Container]
     end
     
     subgraph "State Detection"
@@ -66,6 +79,8 @@ graph TB
     Deps --> AMP
     Deps --> Claude
     Deps --> OpenCode
+    Deps --> Copilot
+    Deps --> Docker
     
     Validate --> Loop
     
@@ -81,6 +96,15 @@ graph TB
     AITool --> AMP
     AITool --> Claude
     AITool --> OpenCode
+    AITool --> Copilot
+    
+    AITool --> Container
+    Container -.-> Docker
+    
+    Loop --> SwarmMgr
+    SwarmMgr --> AgentRegistry
+    SwarmMgr --> TaskBoard
+    SwarmMgr --> Inbox
     
     AITool --> Validator
     Validator --> PRD
@@ -117,6 +141,8 @@ graph TB
     style Loop fill:#fff4e1
     style AITool fill:#f0e1ff
     style Trigger fill:#ffe1e1
+    style SwarmMgr fill:#e1ffe1
+    style Container fill:#ffe1ff
 ```
 
 ## Data Flow Sequence
@@ -253,18 +279,25 @@ flowchart TD
     InstallCore --> Git[Install Git]
     InstallCore --> JQ[Install jq]
     InstallCore --> MD5[Install md5sum]
+    InstallCore --> Docker{Check Docker}
     
-    MD5 --> PromptAI{Which AI Tools?}
+    Docker -->|Found| PromptAI
+    Docker -->|Missing| WarnDocker[Warn: Sandbox Unavailable]
+    WarnDocker --> PromptAI
+    
+    PromptAI{Which AI Tools?}
     
     PromptAI -->|amp| InstallAMP[Install amp via npm]
     PromptAI -->|claude-cli| InstallClaude[Install claude-cli via npm]
     PromptAI -->|opencode| InstallOpenCode[Install opencode via curl]
+    PromptAI -->|copilot| InstallCopilot[Install copilot via npm]
     PromptAI -->|All| InstallAll[Install all tools]
     PromptAI -->|Skip| Complete
     
     InstallAMP --> Complete([Setup Complete])
     InstallClaude --> Complete
     InstallOpenCode --> Complete
+    InstallCopilot --> Complete
     InstallAll --> Complete
 ```
 
@@ -305,8 +338,39 @@ graph LR
     
     Continue --> PRD1
 
+```
     style Check fill:#fff4e1
     style Archive fill:#ffe1e1
+```
+
+## Swarm Directory Structure
+
+```mermaid
+graph TD
+    SwarmRoot[.ralph/swarm/]
+    Config[config.json]
+    AgentsDir[agents/]
+    TasksDir[tasks/]
+    
+    SwarmRoot --> Config
+    SwarmRoot --> AgentsDir
+    SwarmRoot --> TasksDir
+    
+    subgraph "Agent Registry"
+        AgentsDir --> AgentID[<agent_id>/]
+        AgentID --> Profile[profile.json]
+        AgentID --> Status[status]
+        AgentID --> Inbox[inbox/]
+        Inbox --> Msg[<timestamp>_<from>.txt]
+    end
+    
+    subgraph "Task Board"
+        TasksDir --> TaskFile[<task_id>.json]
+    end
+    
+    style SwarmRoot fill:#e1ffe1
+    style AgentsDir fill:#e1ffe1
+    style TasksDir fill:#e1ffe1
 ```
 
 This diagram system shows:
@@ -316,5 +380,6 @@ This diagram system shows:
 3. **State Tracking**: The state machine showing how Ralph detects and responds to stalls and loops
 4. **Dependency Installation**: The setup process for different operating systems
 5. **File Management**: How archiving and branch tracking work
+6. **Swarm Directory Structure**: The file-based coordination structure for multi-agent swarms
 
 The architecture implements a sophisticated "Grounded Architecture" pattern where the agent maintains consistency across three key artifacts (PRD, Plan, Diagram) while using reflexion techniques to detect and break out of unproductive loops.
