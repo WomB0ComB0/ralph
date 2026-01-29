@@ -209,6 +209,22 @@ create_temp_file() {
 }
 
 #######################################
+# Ensure common local bin directories are in PATH
+#######################################
+ensure_local_paths() {
+    local common_paths=("$HOME/go/bin" "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin")
+    
+    for p in "${common_paths[@]}"; do
+        if [[ -d "$p" ]] && [[ ":$PATH:" != *":$p:"* ]]; then
+            export PATH="$p:$PATH"
+        fi
+    done
+}
+
+# Initialize paths immediately
+ensure_local_paths
+
+#######################################
 # Check if a command exists in PATH (including local bins)
 # Arguments:
 #   $1 - Command name to check
@@ -294,6 +310,8 @@ check_dependencies() {
             pacman)
                 # Map commands to pacman packages if different
                 local packages=()
+                local install_bd=false
+                
                 for tool in "${missing_tools[@]}"; do
                     case "$tool" in
                         python3) packages+=("python") ;;
@@ -301,6 +319,12 @@ check_dependencies() {
                             # Bun installation usually via curl for Arch if not in AUR/extra
                             log_setup "Installing bun via curl..."
                             curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || true
+                            ;;
+                        bd)
+                            install_bd=true
+                            if ! command_exists go; then
+                                packages+=("go")
+                            fi
                             ;;
                         *) packages+=("$tool") ;;
                     esac
@@ -310,8 +334,15 @@ check_dependencies() {
                     log_info "Requesting sudo for system packages: ${packages[*]}"
                     if ! sudo -n pacman -S --noconfirm "${packages[@]}" >/dev/null 2>&1; then
                         log_warning "Non-interactive sudo failed. Trying interactive sudo..."
-                        sudo pacman -S --noconfirm "${packages[@]}" || log_error "Failed to install system packages. Please install manually: sudo pacman -S ${packages[*]}"
+                        if ! sudo pacman -S --noconfirm "${packages[@]}"; then
+                            log_error "Failed to install system packages. Please install manually: sudo pacman -S ${packages[*]}"
+                            return 1
+                        fi
                     fi
+                fi
+                
+                if [[ "$install_bd" == "true" ]]; then
+                    install_beads || return 1
                 fi
                 ;;
             *)
@@ -879,6 +910,18 @@ parse_arguments() {
                 log_error "Unknown option: $1"
                 echo "Use --help for usage information"
                 exit 1
+                ;;
+            init)
+                export INIT_MODE=true
+                shift
+                ;;
+            setup)
+                export SETUP_MODE=true
+                shift
+                ;;
+            test)
+                export TEST_MODE=true
+                shift
                 ;;
             *)
                 # Legacy support: assume it's max_iterations if it's a number
