@@ -443,18 +443,22 @@ load_config() {
     MAX_ITERATIONS="${MAX_ITERATIONS:-10}"
     SANDBOX_MODE="${SANDBOX_MODE:-false}"
     VERBOSE="${VERBOSE:-false}"
+    PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
     CONTEXT_FILES=()
     
-    # Artifact defaults
-    ARTIFACT_DIR="${ARTIFACT_DIR:-.ralph/artifacts}"
-    mkdir -p "$ARTIFACT_DIR"
+    # Artifact and State directory
+    readonly _RALPH_DIR="$PROJECT_DIR/.ralph"
+    ARTIFACT_DIR="${ARTIFACT_DIR:-$_RALPH_DIR/artifacts}"
+    STATE_DIR="${STATE_DIR:-$_RALPH_DIR/state}"
+    mkdir -p "$ARTIFACT_DIR" "$STATE_DIR"
     
-    PROGRESS_FILE="${PROGRESS_FILE:-$ARTIFACT_DIR/ralph_progress.log}"
+    PROGRESS_FILE="${PROGRESS_FILE:-$STATE_DIR/progress.log}"
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
-    LOG_FILE="${LOG_FILE:-$ARTIFACT_DIR/ralph.log}"
-    PROJECT_DIR="${PROJECT_DIR:-.}"
+    LOG_FILE="${LOG_FILE:-$STATE_DIR/ralph.log}"
+    METRICS_FILE="${METRICS_FILE:-$STATE_DIR/metrics.json}"
+    ARCHIVE_DIR="${ARCHIVE_DIR:-$_RALPH_DIR/archives}"
 
     local config_loaded=false
     
@@ -525,7 +529,7 @@ load_config() {
 #######################################
 save_checkpoint() {
     local iteration="$1"
-    local checkpoint_file="${ARTIFACT_DIR:-.ralph/artifacts}/checkpoint.txt"
+    local checkpoint_file="${STATE_DIR:-.ralph/state}/checkpoint.txt"
     
     if [[ ! "$iteration" =~ ^[0-9]+$ ]]; then
         log_error "Invalid checkpoint iteration: $iteration"
@@ -546,7 +550,7 @@ save_checkpoint() {
 # Returns: Last iteration number, or 0 if none exists
 #######################################
 get_checkpoint() {
-    local checkpoint_file="${ARTIFACT_DIR:-.ralph/artifacts}/checkpoint.txt"
+    local checkpoint_file="${STATE_DIR:-.ralph/state}/checkpoint.txt"
     
     if [[ -f "$checkpoint_file" ]]; then
         local checkpoint
@@ -965,7 +969,7 @@ EOF
 #######################################
 track_current_branch() {
     local prd_file="${PRD_FILE:-prd.json}"
-    local branch_file="${ARTIFACT_DIR:-.ralph/artifacts}/.ralph_last_branch"
+    local branch_file="${STATE_DIR:-.ralph/state}/.ralph_last_branch"
     
     if [[ ! -f "$prd_file" ]]; then
         log_debug "PRD file not found, skipping branch tracking"
@@ -996,7 +1000,10 @@ track_current_branch() {
 smart_init() {
     print_banner "Smart Initializing Project" "${_RALPH_COLOR_BLUE}"
     
-    local prd_file="prd.json"
+    # Load paths
+    load_config >/dev/null 2>&1 || true
+    
+    local prd_file="${PRD_FILE:-.ralph/artifacts/prd.json}"
     local config_file="ralph.json"
     
     # Detect Project Type

@@ -507,8 +507,32 @@ Ralph maintains three synchronized artifacts:
 # Interactive mode (pause between iterations)
 ./ralph.sh --interactive
 
+# Run internal tests
+./ralph.sh --test
+
+# Run in Docker sandbox
+./ralph.sh --sandbox
+
+# Add context files
+./ralph.sh --context docs/api.md --context lib/utils.sh
+
+# Include recent git diffs in context
+./ralph.sh --diff-context
+
 # Disable archiving
 ./ralph.sh --no-archive
+```
+
+### Copilot Integration
+```bash
+# Run an agentic task with Copilot
+./ralph.sh copilot run "Refactor the login function"
+
+# Ask for an explanation
+./ralph.sh copilot explain "How does the event bus work?"
+
+# Authenticate Copilot
+./ralph.sh copilot auth
 ```
 
 ### Setup

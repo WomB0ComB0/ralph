@@ -853,10 +853,10 @@ execute_iteration() {
     log_debug "Log signature: $current_log_signature"
     
     # Read user's task prompt
-    if [[ -f "$PROJECT_DIR/CLAUDE.md" ]]; then
-        prompt_content=$(cat "$PROJECT_DIR/CLAUDE.md")
-    elif [[ -f "$PROJECT_DIR/prompt.md" ]]; then
-        prompt_content=$(cat "$PROJECT_DIR/prompt.md")
+    if [[ -f "${PROJECT_DIR:-.}/CLAUDE.md" ]]; then
+        prompt_content=$(cat "${PROJECT_DIR:-.}/CLAUDE.md")
+    elif [[ -f "${PROJECT_DIR:-.}/prompt.md" ]]; then
+        prompt_content=$(cat "${PROJECT_DIR:-.}/prompt.md")
     else
         log_error "No prompt file found (CLAUDE.md or prompt.md)"
         return 1
@@ -1676,8 +1676,9 @@ DOLT_BIN=$(command -v dolt || true)
 # Initialize Task Database
 #######################################
 init_task_engine() {
-    if [[ ! -d ".beads" ]]; then
-        mkdir -p ".beads"
+    local beads_dir="${_RALPH_DIR:-.ralph}/beads"
+    if [[ ! -d "$beads_dir" ]]; then
+        mkdir -p "$beads_dir"
         
         # Determine backend: prefer Dolt if available
         local backend="sqlite"
@@ -1687,9 +1688,9 @@ init_task_engine() {
         fi
 
         # Ensure we are in a git repo or at least init beads
-        if ! "$BD_BIN" info >/dev/null 2>&1; then
-            "$BD_BIN" init --prefix tk --db-type "$backend"
-            log_debug "Beads Task Engine ($backend) initialized."
+        if ! "$BD_BIN" --db "$beads_dir/tasks.db" info >/dev/null 2>&1; then
+            "$BD_BIN" init --prefix tk --db-type "$backend" --db "$beads_dir/tasks.db"
+            log_debug "Beads Task Engine ($backend) initialized at $beads_dir."
         fi
     fi
 }
@@ -1765,8 +1766,9 @@ get_ready_tasks() {
 # Returns: 0 if all tasks are closed, 1 if incomplete tasks remain
 #######################################
 verify_beads_complete() {
-    # If .beads doesn't exist, assume complete (no tasks were ever created)
-    if [[ ! -d ".beads" ]]; then
+    # If beads directory doesn't exist, assume complete
+    local beads_dir="${_RALPH_DIR:-.ralph}/beads"
+    if [[ ! -d "$beads_dir" ]]; then
         return 0
     fi
     
