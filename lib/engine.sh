@@ -535,6 +535,7 @@ generate_system_prompt() {
     local recent_changes="$7"
     local resource_context="$8"
     local user_provided_context="$9"
+    local project_instructions="${10:-}"
     
     local role_instructions
     role_instructions=$(get_role_instructions "${RALPH_ROLE:-engineer}")
@@ -542,6 +543,10 @@ generate_system_prompt() {
     cat <<EOF
 <system_prompt>
 $role_instructions
+
+<project_instructions>
+${project_instructions:-No project-specific instructions provided. Follow general best practices and project conventions.}
+</project_instructions>
 
 <cognitive_process>
 At the start of every response, you MUST use a internal monologue or <thought> block to:
@@ -815,6 +820,7 @@ execute_iteration() {
     local recent_changes=""
     local resource_context=""
     local user_provided_context=""
+    local project_instructions=""
     local prompt_content structured_prompt output
     
     # Display iteration header
@@ -876,6 +882,11 @@ execute_iteration() {
     else
         diagram_context="No architecture diagrams found. Create one for complex systems or multi-component features."
     fi
+
+    if [[ -f "${AGENTS_FILE:-agents.md}" ]]; then
+        project_instructions=$(cat "${AGENTS_FILE:-agents.md}")
+        log_debug "Loaded project-specific instructions from ${AGENTS_FILE:-agents.md}"
+    fi
     
     # Load system resources and user context
     resource_context=$(get_resource_usage)
@@ -923,7 +934,8 @@ execute_iteration() {
         "$reflection_instruction" \
         "$recent_changes" \
         "$resource_context" \
-        "$user_provided_context")
+        "$user_provided_context" \
+        "$project_instructions")
     
     # Estimate token count
     local est_tokens

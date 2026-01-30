@@ -487,6 +487,7 @@ load_config() {
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
+    AGENTS_FILE="${AGENTS_FILE:-agents.md}"
     LOG_FILE="${LOG_FILE:-$STATE_DIR/ralph.log}"
     METRICS_FILE="${METRICS_FILE:-$STATE_DIR/metrics.json}"
     ARCHIVE_DIR="${ARCHIVE_DIR:-$_RALPH_DIR/archives}"

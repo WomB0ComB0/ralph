@@ -442,10 +442,11 @@ flowchart LR
 ## Key Features
 
 ### 1. Grounded Architecture
-Ralph maintains three synchronized artifacts:
+Ralph maintains synchronized artifacts for consistent execution:
 - **prd.json**: Product requirements in JSON format
 - **ralph_plan.md**: Human-readable execution plan synced from Beads
 - **ralph_architecture.md**: Mermaid diagrams of system architecture
+- **agents.md**: Project-specific instructions and conventions (highly effective for agent alignment)
 
 ### 2. Time-Travel Task Management
 - Uses **Beads** (`bd` CLI) for dependency-aware task tracking
@@ -650,6 +651,7 @@ Every agent response follows:
 │   ├── engine.sh            # Core iteration engine
 │   └── tools.sh             # Tool integrations
 ├── prd.json                 # Product requirements
+├── agents.md                # Project-specific instructions
 ├── ralph_plan.md            # Execution plan (synced from Beads)
 ├── ralph_architecture.md    # System diagrams
 ├── progress.txt             # Run metadata
