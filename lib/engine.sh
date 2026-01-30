@@ -859,12 +859,10 @@ execute_iteration() {
     log_debug "Log signature: $current_log_signature"
     
     # Read user's task prompt
-    if [[ -f "${PROJECT_DIR:-.}/CLAUDE.md" ]]; then
-        prompt_content=$(cat "${PROJECT_DIR:-.}/CLAUDE.md")
-    elif [[ -f "${PROJECT_DIR:-.}/prompt.md" ]]; then
-        prompt_content=$(cat "${PROJECT_DIR:-.}/prompt.md")
+    if [[ -f "${PROJECT_DIR:-.}/AGENTS.md" ]]; then
+        prompt_content=$(cat "${PROJECT_DIR:-.}/AGENTS.md")
     else
-        log_error "No prompt file found (CLAUDE.md or prompt.md)"
+        log_error "No prompt file found (AGENTS.md)"
         return 1
     fi
     
@@ -883,9 +881,9 @@ execute_iteration() {
         diagram_context="No architecture diagrams found. Create one for complex systems or multi-component features."
     fi
 
-    if [[ -f "${AGENTS_FILE:-agents.md}" ]]; then
-        project_instructions=$(cat "${AGENTS_FILE:-agents.md}")
-        log_debug "Loaded project-specific instructions from ${AGENTS_FILE:-agents.md}"
+    if [[ -f "${AGENTS_FILE:-AGENTS.md}" ]]; then
+        project_instructions=$(cat "${AGENTS_FILE:-AGENTS.md}")
+        log_debug "Loaded project-specific instructions from ${AGENTS_FILE:-AGENTS.md}"
     fi
     
     # Load system resources and user context

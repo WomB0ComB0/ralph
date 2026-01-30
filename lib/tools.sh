@@ -1098,7 +1098,7 @@ spawn_agent() {
     local shared_paths=""
     [[ -f "$registry" ]] && shared_paths=$(cat "$registry")
 
-    cat > "$agent_work_dir/CLAUDE.md" <<EOF
+    cat > "$agent_work_dir/AGENTS.md" <<EOF
 # Role: $role
 You are a specialized sub-agent in a Ralph Swarm.
 Parent Agent: $parent_id
@@ -1127,7 +1127,7 @@ EOF
         ulimit -v 2097152  # Max 2GB virtual memory
         ulimit -t "$AGENT_CPU_TIME_LIMIT" # Max CPU time
         
-        RALPH_AGENT_ID="$agent_id" ralph --max-iterations "$AGENT_MAX_ITERATIONS" --tool "${TOOL:-opencode}" --model "${SELECTED_MODEL:-google/gemini-2.0-flash-exp}" --no-archive --context "CLAUDE.md" > "$log_file" 2>&1
+        RALPH_AGENT_ID="$agent_id" ralph --max-iterations "$AGENT_MAX_ITERATIONS" --tool "${TOOL:-opencode}" --model "${SELECTED_MODEL:-google/gemini-2.0-flash-exp}" --no-archive --context "AGENTS.md" > "$log_file" 2>&1
         echo "OFF" > "$swarm_root/agents/$agent_id/status"
         emit_event "agent_finished" "{\"agent_id\": \"$agent_id\"}"
         rm -f "$pid_file"
