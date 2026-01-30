@@ -111,7 +111,28 @@ log_debug() {
 }
 
 log_metrics() {
-    [[ -n "${METRICS_FILE:-}" ]] && echo "$*" >> "$METRICS_FILE" 2>/dev/null || true
+    # Ensure metrics file exists and is writable
+    if [[ -n "${METRICS_FILE:-}" ]]; then
+        local metrics_dir
+        metrics_dir=$(dirname "$METRICS_FILE")
+        if [[ ! -d "$metrics_dir" ]]; then
+            mkdir -p "$metrics_dir" 2>/dev/null
+        fi
+        echo "$*" >> "$METRICS_FILE" 2>/dev/null || true
+    fi
+}
+
+#######################################
+# Get high-resolution timestamp (seconds since epoch with decimals)
+# Returns: Current timestamp
+#######################################
+get_high_res_time() {
+    if [[ "$OS_TYPE" == "macos" ]]; then
+        # macOS date doesn't support %N, use python as fallback
+        python3 -c 'import time; print(time.time())' 2>/dev/null || date +%s
+    else
+        date +%s.%N 2>/dev/null || date +%s
+    fi
 }
 
 #######################################

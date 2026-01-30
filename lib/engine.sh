@@ -31,6 +31,7 @@ estimate_tokens() {
             line_count=$(echo "$content" | wc -l | xargs)
             
             # Detect code content (has common programming patterns)
+            # IMPROVEMENT: Consider using a more comprehensive regex or a dedicated tool like 'cloc' for better language-agnostic code detection
             code_count=$(echo "$content" | grep -cE '^\s*(function|def|class|import|const|let|var|if|for|while|\{|\}|;)' || true)
             
             # Constants for estimation
@@ -941,10 +942,16 @@ execute_iteration() {
     log_debug "Estimated prompt tokens: $est_tokens"
     
     # Execute AI tool
+    local start_ts end_ts iteration_latency
+    start_ts=$(get_high_res_time)
+    
     if ! run_ai_tool "$TOOL" "$SELECTED_MODEL" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
         log_error "AI tool execution failed"
         return 1
     fi
+    
+    end_ts=$(get_high_res_time)
+    iteration_latency=$(echo "$end_ts - $start_ts" | bc 2>/dev/null || echo "0")
     
     # Read output
     output=$(cat "$temp_output" 2>/dev/null || echo "")
@@ -976,8 +983,10 @@ execute_iteration() {
         LAZY_STREAK=0
     fi
     
-    # Log metrics
-    log_metrics "$(date +%Y-%m-%dT%H:%M:%S) | Iter: $iteration | Lazy: $LAZY_STREAK | Hash: $project_hash_after | Tokens: $est_tokens"
+    # Log metrics (JSONL format)
+    local timestamp
+    timestamp=$(date +%Y-%m-%dT%H:%M:%S)
+    log_metrics "{\"timestamp\": \"$timestamp\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": $iteration_latency, \"tokens\": $est_tokens, \"lazy_streak\": $LAZY_STREAK, \"project_hash\": \"$project_hash_after\"}"
     
     # Save checkpoint
     save_checkpoint "$iteration"
