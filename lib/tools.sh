@@ -489,7 +489,66 @@ run_internal_tests() {
         log_error "Git diff exclusion parsing failed"
         ((failed += 1))
     fi
-    
+
+    # Test Retry With Backoff (durability)
+    log_info "Testing retry_with_backoff..."
+    local _rc_counter
+    _rc_counter=$(create_temp_file)
+    : > "$_rc_counter"
+    if retry_with_backoff 3 0 -- bash -c "echo x >> $_rc_counter; exit 7"; then
+        log_error "retry_with_backoff should have reported failure"
+        failed=$((failed+1))
+    else
+        local _attempts
+        _attempts=$(wc -l < "$_rc_counter" | tr -d ' ')
+        if [[ "$_attempts" == "3" ]]; then
+            log_success "retry_with_backoff retried 3 times then failed"
+            passed=$((passed+1))
+        else
+            log_error "retry_with_backoff attempted $_attempts times (expected 3)"
+            failed=$((failed+1))
+        fi
+    fi
+
+    # Test Recovery State round-trip (crash recovery)
+    log_info "Testing recovery state persistence..."
+    if ! command_exists jq; then
+        log_warning "Skipping recovery state test (jq unavailable)"
+    else
+        local _rec_dir
+        _rec_dir=$(mktemp -d)
+        if (
+            export STATE_DIR="$_rec_dir"
+            export LAZY_STREAK=4 PREVIOUS_LOG_HASH="deadbeef" NEXT_INSTRUCTION="fix tests"
+            save_recovery_state 9 >/dev/null 2>&1
+            export LAZY_STREAK=0 PREVIOUS_LOG_HASH="" NEXT_INSTRUCTION=""
+            load_recovery_state >/dev/null 2>&1
+            [[ "$LAZY_STREAK" == "4" && "$PREVIOUS_LOG_HASH" == "deadbeef" && "$NEXT_INSTRUCTION" == "fix tests" ]]
+        ); then
+            log_success "recovery state round-trips correctly"
+            passed=$((passed+1))
+        else
+            log_error "recovery state round-trip failed"
+            failed=$((failed+1))
+        fi
+        rm -rf "$_rec_dir"
+    fi
+
+    # Test Secret Scanner (safety)
+    log_info "Testing scan_for_secrets..."
+    local _sec_file _clean_file
+    _sec_file=$(create_temp_file)
+    _clean_file=$(create_temp_file)
+    printf 'aws = AKIAIOSFODNN7EXAMPLE\n' > "$_sec_file"
+    printf 'just=config\nport=8080\n' > "$_clean_file"
+    if scan_for_secrets "$_sec_file" && ! scan_for_secrets "$_clean_file"; then
+        log_success "scan_for_secrets flags secrets and passes clean files"
+        passed=$((passed+1))
+    else
+        log_error "scan_for_secrets behaved incorrectly"
+        failed=$((failed+1))
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
@@ -787,24 +846,41 @@ run_in_sandbox() {
         "--rm"                          # Remove container after exit
         "--interactive"
         "--tty"
-        "--read-only"                   # Make root filesystem read-only for security
+        "--read-only"                   # Read-only root FS; the /app volume below stays writable
         "--tmpfs" "/tmp:rw,noexec,nosuid,size=1g"  # Writable tmp with restrictions
         "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,size=500m"  # npm cache
-        "-v" "$project_dir:/app:ro"     # Mount project directory as read-only
-        "-v" "$project_dir/output:/app/output:rw"  # Separate writable output directory
+        # Mount the project READ-WRITE so the agent can actually edit code. The
+        # remaining hardening (read-only rootfs, cap-drop, non-root, resource caps)
+        # still contains it. This is the whole point of the sandbox.
+        "-v" "$project_dir:/app:rw"
         "-w" "/app"
-        "--network" "none"              # No network access by default (adjust as needed)
+        # Networking: the agent needs to reach its model endpoint + git remote, so
+        # full isolation (--network none) makes the sandbox non-functional. Default
+        # to a normal bridge; true egress allow-listing requires an HTTP proxy or
+        # host firewall and is out of scope here. Override via RALPH_SANDBOX_NETWORK.
+        "--network" "${RALPH_SANDBOX_NETWORK:-bridge}"
         "--user" "ralph"                # Run as non-root user
         "--cap-drop=ALL"                # Drop all capabilities for security
+        "-e" "RALPH_IN_SANDBOX=true"    # Tell the inner Ralph it is already contained
         "--memory=${DOCKER_DEFAULT_MEMORY}"
         "--cpus=${DOCKER_DEFAULT_CPUS}"
         "--pids-limit=${DOCKER_PIDS_LIMIT}"
     )
     
-    # Add environment file if it exists (with security warning)
+    # Add environment file if it exists. Scan for secrets first and fail closed:
+    # only inject a credential-bearing .env when explicitly authorized.
     if [[ -f "$project_dir/.env" ]]; then
-        log_warning "Loading .env file into sandbox. Ensure it doesn't contain sensitive credentials."
-        docker_args+=("--env-file" "$project_dir/.env")
+        if scan_for_secrets "$project_dir/.env"; then
+            if [[ "${RALPH_ALLOW_ENV_SECRETS:-false}" == "true" ]]; then
+                log_warning "Injecting .env containing likely secrets (RALPH_ALLOW_ENV_SECRETS=true)."
+                docker_args+=("--env-file" "$project_dir/.env")
+            else
+                log_warning "Detected likely secrets in .env; NOT injecting into sandbox."
+                log_info "Set RALPH_ALLOW_ENV_SECRETS=true to override if this is intentional."
+            fi
+        else
+            docker_args+=("--env-file" "$project_dir/.env")
+        fi
     fi
     
     # Allow specific environment variables to pass through (whitelist approach)

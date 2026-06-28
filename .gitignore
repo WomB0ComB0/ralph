@@ -1,3 +1,37 @@
+# --- Secrets / credentials (never commit these) ---
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.p12
+credentials.json
+service-account*.json
+
+# --- Ralph runtime state & artifacts ---
 .ralph/
-db.sqlite
+ralph.log
+metrics.json
+progress.txt
+.ralph_checkpoint
+.last-branch
+archives/
+Dockerfile.ralph
+
+# --- Task databases ---
 .beads/
+db.sqlite
+*.sqlite
+*.sqlite3
+
+# --- Dependency / build noise ---
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+target/
