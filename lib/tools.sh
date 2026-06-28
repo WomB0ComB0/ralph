@@ -1482,7 +1482,7 @@ update_task() {
     local task_id="$1"
     local status="$2"
     
-    "$BD_BIN" update "$task_id" --status "$status"
+    _bd update "$task_id" --status "$status"
     log_success "Task $task_id updated to $status"
 }
 
@@ -1575,9 +1575,9 @@ handle_swarm_command() {
             local backoff=1
             local max_backoff=60
             
-            while "$BD_BIN" ready --quiet | grep -q "[0-9]"; do
+            while _bd ready --quiet | grep -q "[0-9]"; do
                 local task_id
-                task_id=$("$BD_BIN" ready --pretty | head -n 1 | awk '{print $2}')
+                task_id=$(_bd ready --pretty | head -n 1 | awk '{print $2}')
                 
                 if [[ -z "$task_id" ]]; then
                     log_debug "No ready tasks, waiting ${backoff}s..."

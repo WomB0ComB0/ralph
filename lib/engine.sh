@@ -1009,10 +1009,32 @@ execute_iteration() {
         LAZY_STREAK=0
     fi
     
-    # Log metrics (JSONL format)
-    local timestamp
+    # Log metrics (JSONL). Build with jq so special chars in TOOL/SELECTED_MODEL
+    # can't emit malformed JSON that would later break review_run's parsing.
+    local timestamp metrics_payload
     timestamp=$(date +%Y-%m-%dT%H:%M:%S)
-    log_metrics "{\"timestamp\": \"$timestamp\", \"run_id\": \"${RUN_ID:-}\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": $iteration_latency, \"tokens\": $est_tokens, \"lazy_streak\": $LAZY_STREAK, \"project_hash\": \"$project_hash_after\"}"
+    # Normalize numerics (bc can emit ".5" without a leading zero -> invalid JSON).
+    [[ "$iteration_latency" =~ ^[0-9]+(\.[0-9]+)?$ ]] || iteration_latency=0
+    [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
+    metrics_payload=""
+    if command_exists jq; then
+        metrics_payload=$(jq -nc \
+            --arg timestamp "$timestamp" \
+            --arg run_id "${RUN_ID:-}" \
+            --argjson iteration "${iteration:-0}" \
+            --arg tool "$TOOL" \
+            --arg model "$SELECTED_MODEL" \
+            --argjson latency "${iteration_latency:-0}" \
+            --argjson tokens "${est_tokens:-0}" \
+            --argjson lazy_streak "${LAZY_STREAK:-0}" \
+            --arg project_hash "$project_hash_after" \
+            '{timestamp:$timestamp, run_id:$run_id, iteration:$iteration, tool:$tool, model:$model, latency:$latency, tokens:$tokens, lazy_streak:$lazy_streak, project_hash:$project_hash}' 2>/dev/null)
+    fi
+    if [[ -n "$metrics_payload" ]]; then
+        log_metrics "$metrics_payload"
+    else
+        log_metrics "{\"timestamp\": \"$timestamp\", \"run_id\": \"${RUN_ID:-}\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": ${iteration_latency:-0}, \"tokens\": ${est_tokens:-0}, \"lazy_streak\": ${LAZY_STREAK:-0}, \"project_hash\": \"$project_hash_after\"}"
+    fi
     
     # Save checkpoint
     save_checkpoint "$iteration"
@@ -1044,7 +1066,7 @@ execute_iteration() {
         else
             log_warning "Agent signaled completion but incomplete tasks remain in Beads"
             local ready_tasks
-            ready_tasks=$($BD_BIN ready --pretty)
+            ready_tasks=$(_bd ready --pretty)
             export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:\n$ready_tasks"
         fi
     fi
@@ -1836,6 +1858,17 @@ export BD_BIN
 DOLT_BIN=$(command -v dolt || true)
 
 #######################################
+# Beads CLI wrapper that ALWAYS targets Ralph's task DB.
+# init_task_engine creates the DB at a non-default path (.ralph/beads/tasks.db),
+# so every operation must pass --db or bd looks in the wrong place and silently
+# reports an empty/incorrect database. Centralizing it keeps all call sites correct.
+# Arguments: $@ - bd subcommand and args
+#######################################
+_bd() {
+    "$BD_BIN" --db "${_RALPH_DIR:-.ralph}/beads/tasks.db" "$@"
+}
+
+#######################################
 # Initialize Task Database
 #######################################
 init_task_engine() {
@@ -1867,9 +1900,9 @@ commit_task_state() {
     local msg="${1:-Agent iteration sync}"
     
     # Check if we are using Dolt backend
-    if "$BD_BIN" info 2>/dev/null | grep -q "Backend: dolt"; then
+    if _bd info 2>/dev/null | grep -q "Backend: dolt"; then
         log_debug "Committing task state to Dolt..."
-        "$BD_BIN" vc commit -m "$msg"
+        _bd vc commit -m "$msg"
     fi
 }
 
@@ -1887,7 +1920,7 @@ hi_create_task() {
     local deps="${3:-}"
     local assignee="${4:-}"
     
-    local cmd=("$BD_BIN" create "$title" -d "$desc" --silent)
+    local cmd=(_bd create "$title" -d "$desc" --silent)
     
     # Handle dependencies (ensure they are comma-separated for bd)
     if [[ -n "$deps" ]]; then
@@ -1912,7 +1945,7 @@ hi_create_task() {
 #######################################
 hi_close_task() {
     local task_id="$1"
-    "$BD_BIN" close "$task_id"
+    _bd close "$task_id"
     emit_event "task_closed" "{\"id\": \"$task_id\"}"
 }
 
@@ -1921,7 +1954,7 @@ hi_close_task() {
 #######################################
 get_ready_tasks() {
     # Show unblocked open tasks
-    "$BD_BIN" ready --unassigned --limit 10
+    _bd ready --unassigned --limit 10
 }
 
 #######################################
@@ -1936,9 +1969,9 @@ verify_beads_complete() {
     fi
     
     local open_count in_progress_count blocked_count
-    open_count=$("$BD_BIN" count --status open --quiet)
-    in_progress_count=$("$BD_BIN" count --status in_progress --quiet)
-    blocked_count=$("$BD_BIN" count --status blocked --quiet)
+    open_count=$(_bd count --status open --quiet)
+    in_progress_count=$(_bd count --status in_progress --quiet)
+    blocked_count=$(_bd count --status blocked --quiet)
     
     local total_incomplete=$((open_count + in_progress_count + blocked_count))
     
@@ -1961,15 +1994,15 @@ sync_plan_file() {
         echo "Generated: $(date)"
         echo ""
         echo "## Ready Tasks (Unblocked)"
-        "$BD_BIN" ready --pretty
+        _bd ready --pretty
         
         echo ""
         echo "## All Open Tasks"
-        "$BD_BIN" list --status open --pretty
+        _bd list --status open --pretty
         
         echo ""
         echo "## Recently Closed"
-        "$BD_BIN" list --status closed --limit 5 --pretty
+        _bd list --status closed --limit 5 --pretty
     } > "$plan_file"
 }
 
@@ -1989,17 +2022,18 @@ _recommend_lazy_threshold() {
         return 0
     fi
 
-    # Bound to a recent window so stale history can't asymptotically freeze the signal.
+    # Bound to a recent window (streamed via tail, so the whole history file is not
+    # loaded into memory) so stale history can't asymptotically freeze the signal.
     local window=200
     local total stalls
-    total=$(jq -s ".[-${window}:] | length" "$metrics" 2>/dev/null || echo 0)
+    total=$(tail -n "$window" "$metrics" 2>/dev/null | jq -s 'length' 2>/dev/null || echo 0)
     [[ "$total" =~ ^[0-9]+$ ]] || total=0
     if [[ "$total" -eq 0 ]]; then
         echo "$default_threshold"
         return 0
     fi
 
-    stalls=$(jq -s ".[-${window}:] | [.[] | select((.lazy_streak // 0) > 0)] | length" "$metrics" 2>/dev/null || echo 0)
+    stalls=$(tail -n "$window" "$metrics" 2>/dev/null | jq -s '[.[] | select((.lazy_streak // 0) > 0)] | length' 2>/dev/null || echo 0)
     [[ "$stalls" =~ ^[0-9]+$ ]] || stalls=0
 
     local pct=$(( stalls * 100 / total ))
@@ -2033,14 +2067,14 @@ review_run() {
 
     local window=200
     local total stalls pct threshold
-    total=$(jq -s ".[-${window}:] | length" "$metrics" 2>/dev/null || echo 0)
+    total=$(tail -n "$window" "$metrics" 2>/dev/null | jq -s 'length' 2>/dev/null || echo 0)
     [[ "$total" =~ ^[0-9]+$ ]] || total=0
     if [[ "$total" -eq 0 ]]; then
         log_info "No metric samples to review"
         return 0
     fi
 
-    stalls=$(jq -s ".[-${window}:] | [.[] | select((.lazy_streak // 0) > 0)] | length" "$metrics" 2>/dev/null || echo 0)
+    stalls=$(tail -n "$window" "$metrics" 2>/dev/null | jq -s '[.[] | select((.lazy_streak // 0) > 0)] | length' 2>/dev/null || echo 0)
     [[ "$stalls" =~ ^[0-9]+$ ]] || stalls=0
     pct=$(( stalls * 100 / total ))
     threshold=$(_recommend_lazy_threshold "$metrics")
@@ -2065,10 +2099,10 @@ backlog_drained() {
     { [[ -x "$BD_BIN" ]] || command -v "$BD_BIN" >/dev/null 2>&1; } || return 1
 
     local open inprog blocked closed
-    open=$("$BD_BIN" count --status open --quiet 2>/dev/null || echo 0)
-    inprog=$("$BD_BIN" count --status in_progress --quiet 2>/dev/null || echo 0)
-    blocked=$("$BD_BIN" count --status blocked --quiet 2>/dev/null || echo 0)
-    closed=$("$BD_BIN" count --status closed --quiet 2>/dev/null || echo 0)
+    open=$(_bd count --status open --quiet 2>/dev/null || echo 0)
+    inprog=$(_bd count --status in_progress --quiet 2>/dev/null || echo 0)
+    blocked=$(_bd count --status blocked --quiet 2>/dev/null || echo 0)
+    closed=$(_bd count --status closed --quiet 2>/dev/null || echo 0)
     [[ "$open" =~ ^[0-9]+$ ]] || open=0
     [[ "$inprog" =~ ^[0-9]+$ ]] || inprog=0
     [[ "$blocked" =~ ^[0-9]+$ ]] || blocked=0
