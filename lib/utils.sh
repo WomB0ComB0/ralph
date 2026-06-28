@@ -143,44 +143,85 @@ declare -a TEMP_FILES=()
 readonly _RALPH_TEMP_REGISTRY="${TMPDIR:-/tmp}/.ralph_temps_$$"
 
 #######################################
-# Default directories to exclude from hashing
+# Default directory NAMES to exclude from project hashing.
+# Project-oriented only (build/dep/cache dirs) — NOT $HOME clutter (the old list
+# carried Downloads/Pictures/VirtualBox VMs/etc. from a home-dir scan). Extend via
+# the RALPH_HASH_EXCLUDES env var (space/comma separated) or a .ralph/excludes file.
 #######################################
-declare -ax DEFAULT_HASH_EXCLUDES=(
-    -name node_modules
-    -o -name .git
-    -o -name .next
-    -o -name dist
-    -o -name build
-    -o -name vendor
-    -o -name target
-    -o -name bin
-    -o -name obj
-    -o -name .idea
-    -o -name .vscode
-    -o -name __pycache__
-    -o -name .pytest_cache
-    -o -name coverage
-    -o -name .turbo
-    -o -name .cache
-    -o -name .local
-    -o -name "VirtualBox VMs"
-    -o -name drive
-    -o -name Downloads
-    -o -name Android
-    -o -name Applications
-    -o -name .bun
-    -o -name .npm
-    -o -name .cargo
-    -o -name .rustup
-    -o -name .arduino15
-    -o -name .gradle
-    -o -name .m2
-    -o -name .nvm
-    -o -name .ollama
-    -o -name Pictures
-    -o -name Videos
-    -o -name Music
+declare -ax RALPH_HASH_EXCLUDE_DEFAULTS=(
+    node_modules .git .hg .svn
+    .next .nuxt .svelte-kit .turbo .parcel-cache
+    dist build out target bin obj
+    vendor __pycache__ .pytest_cache .mypy_cache .ruff_cache
+    .venv venv .tox coverage .nyc_output
+    .gradle .m2 .cargo .idea .vscode .cache
 )
+
+#######################################
+# Emit the final set of hash-exclude directory names (one per line, deduped),
+# combining the built-in defaults with the RALPH_HASH_EXCLUDES env var and an
+# optional override file (default: <project>/.ralph/excludes).
+# Arguments:
+#   $1 - (Optional) override file (one dir name per line; '#' comments allowed)
+#######################################
+hash_exclude_names() {
+    local override_file="${1:-${_RALPH_DIR:-.ralph}/excludes}"
+    local names=("${RALPH_HASH_EXCLUDE_DEFAULTS[@]}")
+
+    # Env extension. A scoped IFS on the read makes it split regardless of the
+    # caller's IFS (engine.sh sets IFS to newline/tab). `|| true` avoids a set -e
+    # abort on read's EOF return.
+    if [[ -n "${RALPH_HASH_EXCLUDES:-}" ]]; then
+        local extra=()
+        IFS=$' \t\n,' read -r -a extra <<< "$RALPH_HASH_EXCLUDES" || true
+        names+=("${extra[@]}")
+    fi
+
+    # File extension (one name per line; strips '#' comments + surrounding space).
+    if [[ -f "$override_file" ]]; then
+        local line
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%%#*}"
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -n "$line" ]] && names+=("$line")
+        done < "$override_file"
+    fi
+
+    # Emit unique names in first-seen order.
+    local n
+    declare -A _seen
+    for n in "${names[@]}"; do
+        [[ -z "$n" ]] && continue
+        if [[ -z "${_seen[$n]:-}" ]]; then
+            _seen["$n"]=1
+            printf '%s\n' "$n"
+        fi
+    done
+}
+
+#######################################
+# Resolve the gitdiff-exclude file to use, by precedence:
+#   1. an explicit GITDIFF_EXCLUDE (env / --gitdiff-exclude)
+#   2. a repo-root  gitdiff-exclude  shipped with the project
+#   3. the user's   ~/.config/git/gitdiff-exclude
+# Arguments:
+#   $1 - (Optional) project dir (default: PROJECT_DIR or cwd)
+# Returns: the chosen path on stdout, or empty if none
+#######################################
+resolve_gitdiff_exclude() {
+    if [[ -n "${GITDIFF_EXCLUDE:-}" ]]; then
+        printf '%s\n' "$GITDIFF_EXCLUDE"
+        return 0
+    fi
+    local proj="${1:-${PROJECT_DIR:-$(pwd)}}"
+    if [[ -f "$proj/gitdiff-exclude" ]]; then
+        printf '%s\n' "$proj/gitdiff-exclude"
+    elif [[ -f "$HOME/.config/git/gitdiff-exclude" ]]; then
+        printf '%s\n' "$HOME/.config/git/gitdiff-exclude"
+    fi
+    return 0
+}
 
 #######################################
 # Cleanup function for temporary files and processes
@@ -537,6 +578,11 @@ load_config() {
 
     # Apply persisted self-tuning (e.g. LAZY_THRESHOLD) from a prior review_run.
     load_tuning "$STATE_DIR" || true
+
+    # Default the gitdiff-exclude file (repo-root then ~/.config/git). A CLI
+    # --gitdiff-exclude still wins, since parse_arguments runs after load_config.
+    GITDIFF_EXCLUDE="$(resolve_gitdiff_exclude "$PROJECT_DIR")"
+    export GITDIFF_EXCLUDE
 
     local config_loaded=false
     
@@ -995,7 +1041,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
-                              (default: ~/.config/git/gitdiff-exclude)
+                              (default: ./gitdiff-exclude, then ~/.config/git/gitdiff-exclude)
     ${_RALPH_COLOR_GREEN}--no-archive${_RALPH_COLOR_NC}            Skip archiving previous runs
     ${_RALPH_COLOR_GREEN}--verbose${_RALPH_COLOR_NC}               Enable verbose/debug output
     ${_RALPH_COLOR_GREEN}-i, --interactive${_RALPH_COLOR_NC}        Pause for user input between iterations
@@ -1057,7 +1103,13 @@ ${_RALPH_COLOR_YELLOW}Gitdiff Exclude:${_RALPH_COLOR_NC}
     Syntax:  Supports glob patterns and file paths
     Example: node_modules/*, *.log, dist/
     
-    Default location: ~/.config/git/gitdiff-exclude
+    Default location: ./gitdiff-exclude (repo root), else ~/.config/git/gitdiff-exclude
+
+${_RALPH_COLOR_YELLOW}List Overrides (better defaults + override):${_RALPH_COLOR_NC}
+    RALPH_HASH_EXCLUDES     Extra dir names to skip when hashing (also .ralph/excludes file)
+    RALPH_HEALTH_PORTS      Ports to probe for running services (default broadened)
+    RALPH_MODEL_FAMILIES    Preferred model-family regex for routing (default: gemini|glm|claude)
+    RALPH_SANDBOX_ALLOW_ENV Extra env vars to pass through into the sandbox
 
 EOF
     exit 0
