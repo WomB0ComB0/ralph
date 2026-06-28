@@ -752,8 +752,8 @@ EOF
 #######################################
 generate_stalling_instruction() {
     local lazy_streak=$1
-    
-    if [[ $lazy_streak -ge 2 ]]; then
+
+    if [[ $lazy_streak -ge "${LAZY_THRESHOLD:-2}" ]]; then
         cat <<EOF
 <reflexion_trigger>
 CRITICAL WARNING: No progress detected for $lazy_streak consecutive iterations.
@@ -920,7 +920,7 @@ execute_iteration() {
         # Priority: Use explicit instruction from previous iteration
         reflection_instruction="$NEXT_INSTRUCTION"
         export NEXT_INSTRUCTION=""
-    elif [[ "${LAZY_STREAK:-0}" -ge 2 ]]; then
+    elif [[ "${LAZY_STREAK:-0}" -ge "${LAZY_THRESHOLD:-2}" ]]; then
         # Detect stalling
         reflection_instruction=$(generate_stalling_instruction "$LAZY_STREAK")
     elif [[ -n "${PREVIOUS_LOG_HASH:-}" ]] && [[ "$current_log_signature" == "$PREVIOUS_LOG_HASH" ]]; then
@@ -957,7 +957,12 @@ execute_iteration() {
     if ! retry_with_backoff "$ai_attempts" "${AI_RETRY_BASE_DELAY:-5}" -- \
             run_ai_tool "$TOOL" "$SELECTED_MODEL" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
         log_error "AI tool execution failed after ${ai_attempts} attempt(s)"
-        emit_event "iteration_failed" "{\"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\"}"
+        # Build the payload with jq so special characters in TOOL/SELECTED_MODEL cannot
+        # produce malformed JSON.
+        local fail_payload
+        fail_payload=$(jq -n --argjson iteration "$iteration" --arg tool "$TOOL" --arg model "$SELECTED_MODEL" \
+            '{iteration: $iteration, tool: $tool, model: $model}' 2>/dev/null || echo '{}')
+        emit_event "iteration_failed" "$fail_payload"
         store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $SELECTED_MODEL)."
         return 2
     fi
@@ -967,9 +972,18 @@ execute_iteration() {
     
     # Read output
     output=$(cat "$temp_output" 2>/dev/null || echo "")
-    
+
     if [[ -z "$output" ]]; then
         log_warning "AI tool produced no output"
+    fi
+
+    # Persist a per-step trace (prompt in, output out) for post-hoc observability.
+    if [[ -n "${RUN_DIR:-}" ]]; then
+        local step_dir="$RUN_DIR/steps/iter-$iteration"
+        if mkdir -p "$step_dir" 2>/dev/null; then
+            printf '%s' "$structured_prompt" > "$step_dir/prompt.txt" 2>/dev/null || true
+            printf '%s' "$output" > "$step_dir/output.txt" 2>/dev/null || true
+        fi
     fi
     
     # Validate artifacts and queue corrections for next iteration
@@ -998,7 +1012,7 @@ execute_iteration() {
     # Log metrics (JSONL format)
     local timestamp
     timestamp=$(date +%Y-%m-%dT%H:%M:%S)
-    log_metrics "{\"timestamp\": \"$timestamp\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": $iteration_latency, \"tokens\": $est_tokens, \"lazy_streak\": $LAZY_STREAK, \"project_hash\": \"$project_hash_after\"}"
+    log_metrics "{\"timestamp\": \"$timestamp\", \"run_id\": \"${RUN_ID:-}\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": $iteration_latency, \"tokens\": $est_tokens, \"lazy_streak\": $LAZY_STREAK, \"project_hash\": \"$project_hash_after\"}"
     
     # Save checkpoint
     save_checkpoint "$iteration"
@@ -1083,7 +1097,13 @@ main() {
         run_internal_tests
         exit $?
     fi
-    
+
+    # Handle review mode: analyze metrics history, update tuning.json, exit.
+    if [[ "${REVIEW_MODE:-false}" == "true" ]]; then
+        review_run
+        exit $?
+    fi
+
     # Validate configuration
     validate_config || exit 1
 
@@ -1116,21 +1136,31 @@ main() {
     # its own bind-mounted container over the same lock file.
     if command_exists flock; then
         local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock"
-        if ! mkdir -p "$(dirname "$lock_file")" 2>/dev/null; then
-            log_warning "Cannot create lock directory for $lock_file; skipping singleton lock."
+        mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
+        # Guard the FD redirect: a bare `exec 9>file` aborts the whole script under
+        # set -e if the file exists but is not writable. The brace group scopes the
+        # `2>/dev/null` to the open attempt only — without it, `exec` (no command)
+        # would make the stderr redirect PERMANENT and blackhole all later logs.
+        if ! { exec 9>"$lock_file"; } 2>/dev/null; then
+            log_warning "Cannot open lock file $lock_file; skipping singleton lock."
+        elif ! flock -n 9; then
+            log_error "Another Ralph instance is already running for this project (lock: $lock_file)."
+            log_info "Use a separate git worktree for parallel runs, or wait for the current run to finish."
+            exit 1
         else
-            # mkdir succeeded, so the lock file is creatable and `exec 9>` will not abort.
-            exec 9>"$lock_file"
-            if ! flock -n 9; then
-                log_error "Another Ralph instance is already running for this project (lock: $lock_file)."
-                log_info "Use a separate git worktree for parallel runs, or wait for the current run to finish."
-                exit 1
-            fi
             log_debug "Acquired singleton lock: $lock_file"
         fi
     else
         log_warning "flock unavailable: cannot guarantee single-instance execution; concurrent runs may corrupt state."
     fi
+
+    # Allocate this run's directory here (only on the iterating path, so
+    # --review/--test/--help/--setup/--init don't litter empty run dirs) and
+    # prune old runs to bound disk growth.
+    mkdir -p "$RUN_DIR/steps" 2>/dev/null || true
+    chmod 700 "$RUN_DIR" 2>/dev/null || true   # step traces may contain prompt secrets
+    ln -sfn "$RUN_DIR" "$_RALPH_DIR/runs/latest" 2>/dev/null || true
+    prune_old_runs "$_RALPH_DIR/runs" "${RALPH_RUN_RETENTION:-20}"
 
     # Loud warning when iterating autonomously on the host without isolation.
     if ! running_in_container && [[ "${SANDBOX_MODE:-false}" != "true" ]]; then
@@ -1164,6 +1194,7 @@ main() {
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
     local CONSECUTIVE_FAILURES=0
+    local DRAIN_STREAK=0
 
     # Determine starting iteration
     local start_iter=1
@@ -1216,6 +1247,7 @@ main() {
             log_success "║   Ralph completed all tasks! 🎉     ║"
             log_success "╚══════════════════════════════════════╝"
             log_success "Completed at iteration $i of $MAX_ITERATIONS"
+            review_run
             exit 0
         elif [[ $iter_rc -eq 2 ]]; then
             CONSECUTIVE_FAILURES=$(( CONSECUTIVE_FAILURES + 1 ))
@@ -1232,6 +1264,34 @@ main() {
             log_info "Iteration $i complete. Continuing..."
             sleep 2
         fi
+
+        # Stop early once the backlog is provably drained for TWO consecutive
+        # iterations (work done, nothing open). The streak avoids exiting on a
+        # transient empty queue between task phases. Only after a normal iteration.
+        if [[ $iter_rc -eq 1 ]] && backlog_drained; then
+            DRAIN_STREAK=$(( DRAIN_STREAK + 1 ))
+            if [[ $DRAIN_STREAK -ge 2 ]]; then
+                log_success "Task backlog drained for 2 iterations — all tracked work is complete."
+                review_run
+                exit 0
+            fi
+            log_info "Backlog appears drained (streak ${DRAIN_STREAK}/2); confirming on next iteration."
+        else
+            DRAIN_STREAK=0
+        fi
+
+        # Single-iteration mode: let an external scheduler (cron/systemd) own cadence.
+        if [[ "${RUN_ONCE:-false}" == "true" ]]; then
+            log_info "Single-iteration mode (--once): stopping. Use --resume to continue."
+            if [[ $iter_rc -eq 2 ]]; then
+                # The in-process circuit breaker cannot accumulate across cron ticks,
+                # so alert here on a hard failure instead of exiting silently non-zero.
+                send_notification "Ralph (--once) failed" "Iteration $i tool failure; check logs" "critical"
+                exit 1
+            fi
+            review_run
+            exit 0
+        fi
     done
     
     # Max iterations reached
@@ -1243,7 +1303,8 @@ main() {
     log_warning "Completed $MAX_ITERATIONS iterations"
     log_info "Review '$PLAN_FILE' for remaining tasks"
     log_info "Use --resume to continue from checkpoint"
-    
+
+    review_run
     exit 1
 }
 
@@ -1910,5 +1971,109 @@ sync_plan_file() {
         echo "## Recently Closed"
         "$BD_BIN" list --status closed --limit 5 --pretty
     } > "$plan_file"
+}
+
+#######################################
+# Recommend a lazy-streak threshold from historical metrics.
+# Stall-heavy history -> intervene sooner (2); rarely-stalling -> give more room (3).
+# Arguments:
+#   $1 - Metrics file (JSONL)
+# Returns: recommended integer threshold on stdout
+#######################################
+_recommend_lazy_threshold() {
+    local metrics="$1"
+    local default_threshold=2
+
+    if [[ ! -f "$metrics" ]] || ! command_exists jq; then
+        echo "$default_threshold"
+        return 0
+    fi
+
+    # Bound to a recent window so stale history can't asymptotically freeze the signal.
+    local window=200
+    local total stalls
+    total=$(jq -s ".[-${window}:] | length" "$metrics" 2>/dev/null || echo 0)
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    if [[ "$total" -eq 0 ]]; then
+        echo "$default_threshold"
+        return 0
+    fi
+
+    stalls=$(jq -s ".[-${window}:] | [.[] | select((.lazy_streak // 0) > 0)] | length" "$metrics" 2>/dev/null || echo 0)
+    [[ "$stalls" =~ ^[0-9]+$ ]] || stalls=0
+
+    local pct=$(( stalls * 100 / total ))
+    if [[ $pct -ge 50 ]]; then
+        echo 2          # frequently stuck -> reflexion should trigger sooner
+    elif [[ $pct -le 20 ]]; then
+        echo 3          # rarely stuck -> give the agent more room before nagging
+    else
+        echo "$default_threshold"
+    fi
+}
+
+#######################################
+# Review the run: derive a tuning recommendation from metrics history and persist
+# it to tuning.json (consumed by load_tuning on the next run). Closes the
+# write-only-metrics feedback gap.
+# Returns: 0
+#######################################
+review_run() {
+    local metrics="${METRICS_FILE:-${STATE_DIR:-.ralph/state}/metrics.json}"
+    local state_dir="${STATE_DIR:-.ralph/state}"
+
+    if ! command_exists jq; then
+        log_warning "jq unavailable; skipping run review"
+        return 0
+    fi
+    if [[ ! -f "$metrics" ]]; then
+        log_info "No metrics history to review yet"
+        return 0
+    fi
+
+    local window=200
+    local total stalls pct threshold
+    total=$(jq -s ".[-${window}:] | length" "$metrics" 2>/dev/null || echo 0)
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    if [[ "$total" -eq 0 ]]; then
+        log_info "No metric samples to review"
+        return 0
+    fi
+
+    stalls=$(jq -s ".[-${window}:] | [.[] | select((.lazy_streak // 0) > 0)] | length" "$metrics" 2>/dev/null || echo 0)
+    [[ "$stalls" =~ ^[0-9]+$ ]] || stalls=0
+    pct=$(( stalls * 100 / total ))
+    threshold=$(_recommend_lazy_threshold "$metrics")
+
+    if write_tuning "$state_dir" "$threshold" "$pct" "$total"; then
+        log_success "Review: $total samples, ${pct}% stalled -> lazy_threshold=$threshold (saved to tuning.json)"
+    else
+        log_warning "Review computed lazy_threshold=$threshold but could not persist tuning.json"
+    fi
+    return 0
+}
+
+#######################################
+# True only once the task backlog is provably drained: at least one task closed
+# AND nothing open/in-progress/blocked. Stricter than verify_beads_complete so it
+# never fires at bootstrap (when no tasks exist yet).
+# Returns: 0 if drained, 1 otherwise
+#######################################
+backlog_drained() {
+    local beads_dir="${_RALPH_DIR:-.ralph}/beads"
+    [[ -d "$beads_dir" ]] || return 1
+    { [[ -x "$BD_BIN" ]] || command -v "$BD_BIN" >/dev/null 2>&1; } || return 1
+
+    local open inprog blocked closed
+    open=$("$BD_BIN" count --status open --quiet 2>/dev/null || echo 0)
+    inprog=$("$BD_BIN" count --status in_progress --quiet 2>/dev/null || echo 0)
+    blocked=$("$BD_BIN" count --status blocked --quiet 2>/dev/null || echo 0)
+    closed=$("$BD_BIN" count --status closed --quiet 2>/dev/null || echo 0)
+    [[ "$open" =~ ^[0-9]+$ ]] || open=0
+    [[ "$inprog" =~ ^[0-9]+$ ]] || inprog=0
+    [[ "$blocked" =~ ^[0-9]+$ ]] || blocked=0
+    [[ "$closed" =~ ^[0-9]+$ ]] || closed=0
+
+    [[ "$closed" -gt 0 && $(( open + inprog + blocked )) -eq 0 ]]
 }
 
