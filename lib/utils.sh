@@ -174,17 +174,21 @@ hash_exclude_names() {
     if [[ -n "${RALPH_HASH_EXCLUDES:-}" ]]; then
         local extra=()
         IFS=$' \t\n,' read -r -a extra <<< "$RALPH_HASH_EXCLUDES" || true
-        names+=("${extra[@]}")
+        ((${#extra[@]})) && names+=("${extra[@]}")
     fi
 
     # File extension (one name per line; strips '#' comments + surrounding space).
+    # Reject path separators and glob metacharacters so an override file can only
+    # contribute plain directory names.
     if [[ -f "$override_file" ]]; then
         local line
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line%%#*}"
             line="${line#"${line%%[![:space:]]*}"}"
             line="${line%"${line##*[![:space:]]}"}"
-            [[ -n "$line" ]] && names+=("$line")
+            if [[ -n "$line" && "$line" != */* && "$line" != *[\*\?\[]* ]]; then
+                names+=("$line")
+            fi
         done < "$override_file"
     fi
 

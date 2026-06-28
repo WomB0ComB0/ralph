@@ -1714,7 +1714,8 @@ verify_runtime() {
     # Checks common dev ports
     local ports=()
     IFS=$' \t\n,' read -r -a ports <<< "${RALPH_HEALTH_PORTS:-8080 3000 5000 8000 8443 4000 5173 3001 8888}" || true
-    for port in "${ports[@]}"; do
+    for port in ${ports[@]+"${ports[@]}"}; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue   # ignore junk tokens from RALPH_HEALTH_PORTS
         if command_exists ss; then
             if ss -tuln | grep -q ":$port "; then
                 log_success "Service detected on port $port"
