@@ -264,8 +264,19 @@ command_exists() {
             return 0
         fi
     done
-    
+
     return 1
+}
+
+#######################################
+# Detect whether we are running inside a container (Docker/Podman).
+# Uses filesystem markers a repo cannot forge (unlike the RALPH_IN_SANDBOX env
+# var, which a project-controlled .ralphrc could spoof). Used to decide whether
+# the hardened-sandbox isolation is actually in effect.
+# Returns: 0 if inside a container, 1 otherwise
+#######################################
+running_in_container() {
+    [[ -f /.dockerenv ]] || [[ -f /run/.containerenv ]]
 }
 
 #######################################
@@ -621,6 +632,137 @@ get_checkpoint() {
 }
 
 #######################################
+# Retry a command with bounded exponential backoff
+# Arguments:
+#   $1 - Max attempts (>=1)
+#   $2 - Base delay in seconds (0 disables sleeping; used in tests)
+#   -- - Optional separator
+#   $@ - Command and arguments to run
+# Returns: 0 if the command eventually succeeds, else the last non-zero exit code
+#######################################
+retry_with_backoff() {
+    local max_attempts="${1:-1}"
+    local base_delay="${2:-1}"
+    shift 2
+    [[ "${1:-}" == "--" ]] && shift
+
+    local attempt=1 rc=0 delay
+    while true; do
+        # Note: capture the command's own exit code directly. A bare
+        # `if "$@"; then ...; fi` would leave $? as the if's status (0), not
+        # the command's, so we use `&& return` and read $? on the failure path.
+        "$@" && return 0
+        rc=$?
+
+        if [[ $attempt -ge $max_attempts ]]; then
+            log_warning "Command failed after ${attempt} attempt(s) (exit ${rc}): ${1:-?}"
+            return "$rc"
+        fi
+
+        delay=$(( base_delay * (1 << (attempt - 1)) ))
+        [[ $delay -gt 300 ]] && delay=300
+        log_warning "Attempt ${attempt}/${max_attempts} failed (exit ${rc}); retrying in ${delay}s..."
+        [[ $delay -gt 0 ]] && sleep "$delay"
+        attempt=$(( attempt + 1 ))
+    done
+}
+
+#######################################
+# Persist recovery state BEFORE a risky operation so a crash can resume cleanly.
+# Captures the in-flight iteration plus the loop-control variables that main()
+# would otherwise hard-reset on restart.
+# Arguments:
+#   $1 - Current iteration number
+# Returns: 0 on success, 1 if state could not be written
+#######################################
+save_recovery_state() {
+    local iteration="${1:-0}"
+    local recovery_file="${STATE_DIR:-.ralph/state}/recovery.json"
+
+    if ! command_exists jq; then
+        log_debug "jq unavailable; cannot persist recovery state"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$recovery_file")" 2>/dev/null
+
+    local tmp
+    tmp=$(mktemp) || return 1
+    if jq -n \
+        --argjson iteration "${iteration:-0}" \
+        --argjson lazy_streak "${LAZY_STREAK:-0}" \
+        --arg prev_hash "${PREVIOUS_LOG_HASH:-}" \
+        --arg next_instruction "${NEXT_INSTRUCTION:-}" \
+        '{iteration: $iteration, lazy_streak: $lazy_streak, previous_log_hash: $prev_hash, next_instruction: $next_instruction}' \
+        > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$recovery_file"
+        log_debug "Saved recovery state (iteration ${iteration})"
+        return 0
+    fi
+
+    rm -f "$tmp"
+    log_warning "Failed to save recovery state"
+    return 1
+}
+
+#######################################
+# Restore loop-control variables persisted by save_recovery_state.
+# Sets/exports LAZY_STREAK, PREVIOUS_LOG_HASH, NEXT_INSTRUCTION.
+# Returns: 0 if state was restored, 1 if no usable state exists
+#######################################
+load_recovery_state() {
+    local recovery_file="${STATE_DIR:-.ralph/state}/recovery.json"
+
+    if [[ ! -f "$recovery_file" ]] || ! command_exists jq; then
+        log_debug "No recovery state to restore"
+        return 1
+    fi
+
+    # `|| echo` fallbacks keep this safe under set -e even on a corrupt recovery.json
+    # (jq exits non-zero on parse error, which the `// 0` alternative does not cover).
+    LAZY_STREAK=$(jq -r '.lazy_streak // 0' "$recovery_file" 2>/dev/null || echo 0)
+    PREVIOUS_LOG_HASH=$(jq -r '.previous_log_hash // ""' "$recovery_file" 2>/dev/null || echo "")
+    NEXT_INSTRUCTION=$(jq -r '.next_instruction // ""' "$recovery_file" 2>/dev/null || echo "")
+    export LAZY_STREAK PREVIOUS_LOG_HASH NEXT_INSTRUCTION
+
+    log_debug "Restored recovery state (lazy_streak=${LAZY_STREAK})"
+    return 0
+}
+
+#######################################
+# Scan a file or directory for high-confidence secret patterns.
+# Used to fail closed before loading credentials into a sandbox / committing.
+# Arguments:
+#   $1 - Path to scan
+# Returns: 0 if a likely secret is found, 1 if clean / path missing
+#######################################
+scan_for_secrets() {
+    local target="$1"
+    [[ -e "$target" ]] || return 1
+
+    # Matched case-insensitively (grep -i): real .env files use UPPERCASE keys.
+    local patterns=(
+        'AKIA[0-9A-Z]{16}'                                                                       # AWS access key id
+        'BEGIN[[:space:]][A-Z0-9 ]*PRIVATE KEY'                                                   # PEM private key block
+        'xox[baprs]-[0-9A-Za-z-]{10,}'                                                            # Slack token
+        'gh[pousr]_[0-9A-Za-z]{20,}'                                                              # GitHub token
+        'sk-[0-9A-Za-z_-]{20,}'                                                                   # OpenAI / Anthropic (sk-, sk-ant-) key
+        'AIza[0-9A-Za-z_-]{30,}'                                                                  # Google API key
+        'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'                                               # JWT
+        # generic: a key NAME containing a secret-ish word, then = / :, then a 12+ char value
+        '[A-Za-z0-9_]*(secret|api[_-]?key|access[_-]?key|token|password|passwd|credential|private[_-]?key)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*["'"'"']?[^[:space:]"'"'"']{12,}'
+    )
+
+    local p
+    for p in "${patterns[@]}"; do
+        if grep -riIEq "$p" "$target" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+#######################################
 # Get system resource usage information
 # Returns: Formatted string with system stats
 #######################################
@@ -760,6 +902,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--context${_RALPH_COLOR_NC} FILE          Add file to context (repeatable)
     ${_RALPH_COLOR_GREEN}--sandbox${_RALPH_COLOR_NC}               Run in Docker sandbox (requires Docker)
     ${_RALPH_COLOR_GREEN}--no-sandbox${_RALPH_COLOR_NC}            Force run without sandbox
+    ${_RALPH_COLOR_GREEN}--unattended${_RALPH_COLOR_NC}            Autonomous mode: enable Docker sandbox isolation (recommended for cron)
     ${_RALPH_COLOR_GREEN}-h, --help${_RALPH_COLOR_NC}              Show this help message
 
 ${_RALPH_COLOR_YELLOW}Commands:${_RALPH_COLOR_NC}
@@ -923,6 +1066,10 @@ parse_arguments() {
                 ;;
             --no-sandbox)
                 export SANDBOX_MODE=false
+                shift
+                ;;
+            --unattended)
+                export UNATTENDED=true
                 shift
                 ;;
             -h|--help)

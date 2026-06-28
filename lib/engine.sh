@@ -910,6 +910,11 @@ execute_iteration() {
         user_provided_context+=$'\n'"Available opencode skills: $available_skills (Activate via: opencode run \"activate skill <name>\")"
     fi
 
+    # Persist recovery state for THIS iteration BEFORE the queued correction is
+    # consumed below, so a crash during the LLM call resumes (--resume) with the
+    # correction and loop-control state intact.
+    save_recovery_state "$iteration" || true
+
     # Generate reflection instructions based on agent state
     if [[ -n "${NEXT_INSTRUCTION:-}" ]]; then
         # Priority: Use explicit instruction from previous iteration
@@ -944,10 +949,17 @@ execute_iteration() {
     # Execute AI tool
     local start_ts end_ts iteration_latency
     start_ts=$(get_high_res_time)
-    
-    if ! run_ai_tool "$TOOL" "$SELECTED_MODEL" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
-        log_error "AI tool execution failed"
-        return 1
+
+    # Bounded retry so a transient tool/API failure is NOT mistaken for
+    # "no work left to do". On exhaustion we return a distinct code (2) and
+    # emit a durable failure event instead of silently continuing.
+    local ai_attempts="${AI_RETRY_ATTEMPTS:-3}"
+    if ! retry_with_backoff "$ai_attempts" "${AI_RETRY_BASE_DELAY:-5}" -- \
+            run_ai_tool "$TOOL" "$SELECTED_MODEL" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
+        log_error "AI tool execution failed after ${ai_attempts} attempt(s)"
+        emit_event "iteration_failed" "{\"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\"}"
+        store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $SELECTED_MODEL)."
+        return 2
     fi
     
     end_ts=$(get_high_res_time)
@@ -990,10 +1002,14 @@ execute_iteration() {
     
     # Save checkpoint
     save_checkpoint "$iteration"
-    
+
     # Update loop detection state
     PREVIOUS_LOG_HASH="$current_log_signature"
-    
+
+    # Persist recovery state for the NEXT iteration (updated lazy streak, loop
+    # hash, and any queued correction) so --resume picks up exactly where we left off.
+    save_recovery_state "$iteration" || true
+
     # Sync human-readable plan (Beads style)
     sync_plan_file
     
@@ -1070,12 +1086,56 @@ main() {
     
     # Validate configuration
     validate_config || exit 1
-    
-    # Handle sandbox mode
+
+    # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
+    # Skip when already inside the sandbox container (we are the isolation boundary).
+    if [[ "${UNATTENDED:-false}" == "true" && "${SANDBOX_MODE:-false}" != "true" ]] && ! running_in_container; then
+        if command_exists docker; then
+            log_info "Unattended mode: enabling Docker sandbox for isolation"
+            export SANDBOX_MODE=true
+        else
+            log_warning "Unattended mode requested but Docker is unavailable; running on host."
+            log_warning "Install Docker, or pass --no-sandbox to explicitly accept host execution."
+        fi
+    fi
+
+    # Handle sandbox mode. run_in_sandbox RETURNS (it does not exit), so we must
+    # terminate here — otherwise control falls through and the loop runs AGAIN,
+    # unsandboxed, on the host after the container finishes.
     if [[ "${SANDBOX_MODE:-false}" == "true" ]]; then
         setup_sandbox || exit 1
         run_in_sandbox "$@"
-        # run_in_sandbox exits, so we won't reach here
+        exit $?
+    fi
+
+    # --- Below runs in the process that actually iterates (host or container) ---
+
+    # Singleton lock: prevent concurrent runs from corrupting shared state
+    # (.ralph/state, checkpoint, recovery.json, task DB, plan file). Acquired here
+    # (not before the sandbox exec) so the host wrapper does not deadlock against
+    # its own bind-mounted container over the same lock file.
+    if command_exists flock; then
+        local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock"
+        if ! mkdir -p "$(dirname "$lock_file")" 2>/dev/null; then
+            log_warning "Cannot create lock directory for $lock_file; skipping singleton lock."
+        else
+            # mkdir succeeded, so the lock file is creatable and `exec 9>` will not abort.
+            exec 9>"$lock_file"
+            if ! flock -n 9; then
+                log_error "Another Ralph instance is already running for this project (lock: $lock_file)."
+                log_info "Use a separate git worktree for parallel runs, or wait for the current run to finish."
+                exit 1
+            fi
+            log_debug "Acquired singleton lock: $lock_file"
+        fi
+    else
+        log_warning "flock unavailable: cannot guarantee single-instance execution; concurrent runs may corrupt state."
+    fi
+
+    # Loud warning when iterating autonomously on the host without isolation.
+    if ! running_in_container && [[ "${SANDBOX_MODE:-false}" != "true" ]]; then
+        log_warning "No sandbox isolation: the agent runs with full host permissions."
+        log_warning "For unattended use prefer './ralph.sh --unattended' (Docker-isolated)."
     fi
     
     # Display startup information
@@ -1099,21 +1159,30 @@ main() {
         exit 1
     }
     
-    # Initialize state variables
+    # Initialize state variables (fresh-run defaults)
     export LAZY_STREAK=0
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
-    
+    local CONSECUTIVE_FAILURES=0
+
     # Determine starting iteration
     local start_iter=1
-    
+
     if [[ "${RESUME_FLAG:-false}" == "true" ]]; then
         local last_checkpoint
         last_checkpoint=$(get_checkpoint)
-        
+
         if [[ "$last_checkpoint" =~ ^[0-9]+$ ]] && [[ $last_checkpoint -gt 0 ]]; then
             log_info "Resuming from checkpoint: Iteration $last_checkpoint"
             start_iter=$((last_checkpoint + 1))
+
+            # Restore loop-control state so a resumed run keeps its lazy streak,
+            # loop-detection hash, and any queued correction instead of forgetting them.
+            if load_recovery_state; then
+                local _has_correction="no"
+                [[ -n "${NEXT_INSTRUCTION:-}" ]] && _has_correction="yes"
+                log_info "Restored recovery state (lazy_streak=$LAZY_STREAK, queued correction: $_has_correction)"
+            fi
         else
             log_warning "No valid checkpoint found, starting from beginning"
         fi
@@ -1137,18 +1206,32 @@ main() {
             fi
         fi
         
-        # Execute iteration
-        if execute_iteration "$i"; then
+        # Execute iteration. Return codes: 0=complete, 1=continue, 2=hard tool failure.
+        local iter_rc=0
+        execute_iteration "$i" || iter_rc=$?
+
+        if [[ $iter_rc -eq 0 ]]; then
             echo ""
             log_success "╔══════════════════════════════════════╗"
             log_success "║   Ralph completed all tasks! 🎉     ║"
             log_success "╚══════════════════════════════════════╝"
             log_success "Completed at iteration $i of $MAX_ITERATIONS"
             exit 0
+        elif [[ $iter_rc -eq 2 ]]; then
+            CONSECUTIVE_FAILURES=$(( CONSECUTIVE_FAILURES + 1 ))
+            log_error "Iteration $i: AI tool failed after retries (consecutive failures: $CONSECUTIVE_FAILURES)."
+            if [[ $CONSECUTIVE_FAILURES -ge ${MAX_CONSECUTIVE_FAILURES:-3} ]]; then
+                log_error "Aborting: ${CONSECUTIVE_FAILURES} consecutive tool failures. Check connectivity, auth, or model availability."
+                send_notification "Ralph stopped" "Aborted after ${CONSECUTIVE_FAILURES} consecutive tool failures" "critical"
+                exit 1
+            fi
+            log_warning "Backing off before re-attempting the loop..."
+            sleep 5
+        else
+            CONSECUTIVE_FAILURES=0
+            log_info "Iteration $i complete. Continuing..."
+            sleep 2
         fi
-        
-        log_info "Iteration $i complete. Continuing..."
-        sleep 2
     done
     
     # Max iterations reached
