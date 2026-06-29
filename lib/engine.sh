@@ -675,7 +675,7 @@ run_ai_tool() {
         # A session exists but this tool has no safe headless resume — run fresh, note once.
         if [[ -z "${_RALPH_RESUME_UNSUPPORTED_WARNED:-}" ]]; then
             log_warning "RALPH_RESUME_SESSION: '$tool' has no safe headless resume; each iteration runs fresh"
-            export _RALPH_RESUME_UNSUPPORTED_WARNED=1
+            _RALPH_RESUME_UNSUPPORTED_WARNED=1   # plain global; internal state, no need to export
         fi
     fi
 
@@ -728,7 +728,8 @@ run_ai_tool() {
     if [[ $exit_code -eq 0 ]]; then
         log_success "Iteration $iteration: AI Response Received"
         # A successful call establishes a session the next iteration can --continue.
-        [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] && export _RALPH_SESSION_ESTABLISHED=1
+        # Plain global (run_ai_tool runs in-process across iterations); no need to export.
+        [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] && _RALPH_SESSION_ESTABLISHED=1
     else
         log_error "Iteration $iteration: AI Tool Failed (Exit $exit_code)"
     fi
