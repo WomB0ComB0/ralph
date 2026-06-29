@@ -29,6 +29,14 @@ _signal_epoch() {
         || echo 0
 }
 
+# sha1 hex digest from stdin. Portable: sha1sum (Linux), shasum -a 1 (macOS),
+# cksum as a last-resort stable-ish fallback.
+_signal_sha1() {
+    if command_exists sha1sum; then sha1sum
+    elif command_exists shasum; then shasum -a 1
+    else cksum; fi
+}
+
 # Comma-separated string -> trimmed JSON array (empty -> []).
 _signal_csv_to_json() {
     local csv="$1"
@@ -92,12 +100,12 @@ _signal_theme_key() {
     if [[ "$full_norm" != "$trimmed" ]]; then
         # Truncated (>8 tokens): disambiguate so distinct long signatures sharing
         # an 8-token prefix don't false-merge onto one key.
-        normsig="${trimmed}-$(printf '%s' "$full_norm" | sha1sum 2>/dev/null | cut -c1-8)"
+        normsig="${trimmed}-$(printf '%s' "$full_norm" | _signal_sha1 2>/dev/null | cut -c1-8)"
     fi
 
     local key="${type_slug}--${normsig}"
     if [[ ${#key} -gt 100 ]]; then
-        key="${key:0:91}-$(printf '%s' "$full_norm" | sha1sum 2>/dev/null | cut -c1-8)"
+        key="${key:0:91}-$(printf '%s' "$full_norm" | _signal_sha1 2>/dev/null | cut -c1-8)"
     fi
     printf '%s\n' "$key"
 }
@@ -252,6 +260,7 @@ _signal_auto_resolve_family() {
 recall_signals() {
     command_exists jq || return 0
     local limit="${1:-${RALPH_SIGNAL_RECALL:-5}}"
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=5   # a bad RALPH_SIGNAL_RECALL must not break jq's slice
     local dir="${SIGNAL_DIR:-.ralph/artifacts/signals}"
     [[ -d "$dir" ]] || return 0
 
@@ -336,6 +345,9 @@ prune_signals() {
         last=$(jq -r '.last_seen // ""' "$f" 2>/dev/null)
         sev=$(jq -r '.severity // "low"' "$f" 2>/dev/null)
         last_epoch=$(_signal_epoch "$last")
+        # Skip files with an unparseable/missing date rather than treating epoch 0 as
+        # ancient and wrongly archiving a recent-but-corrupt signal.
+        [[ "$last_epoch" =~ ^[0-9]+$ && "$last_epoch" -gt 0 ]] || continue
         age_days=$(( (now_epoch - last_epoch) / 86400 ))
         if [[ "$status" != "open" && $age_days -ge $ttl ]]; then
             mv -f "$f" "$archive/" 2>/dev/null || true
