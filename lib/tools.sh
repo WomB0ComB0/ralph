@@ -1168,7 +1168,11 @@ reap_dead_agents() {
         status=$(cat "$d/status" 2>/dev/null || echo OFF)
         [[ "$status" == "RUNNING" ]] || continue
         pid=$(cat "$d/pid" 2>/dev/null || echo "")
-        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        # No pid file yet => the agent is mid-spawn (status is set RUNNING just before
+        # the background pid is recorded); skip it so a starting agent is never reaped.
+        # Only reap a RUNNING agent whose recorded pid is gone.
+        [[ -n "$pid" ]] || continue
+        if ! kill -0 "$pid" 2>/dev/null; then
             echo "OFF" > "$d/status" 2>/dev/null || true
             rm -f "$d/pid" 2>/dev/null || true
             id=$(basename "$d")
@@ -1796,8 +1800,7 @@ handle_swarm_command() {
             # Step 2: Engineer & Tester per ready task, with a per-task retry cap so a
             # task that never closes can't spin the drain loop forever.
             log_setup "Phase 2: Execution & Verification"
-            local backoff=1 max_backoff=60 cycles=0 empty_streak=0
-            declare -A _soo_attempts
+            local backoff=1 max_backoff=60 cycles=0 empty_streak=0 last_task="" same_count=0
             while _bd ready --quiet | grep -q "[0-9]"; do
                 # Global backstop: bound total cycles regardless of task-id parsing,
                 # so an unparseable/unstable `bd ready` format can't spin forever.
@@ -1829,16 +1832,22 @@ handle_swarm_command() {
                 empty_streak=0
                 backoff=1
 
-                local attempts="${_soo_attempts[$task_id]:-0}"
-                if [[ $attempts -ge ${RALPH_SWARM_MAX_RETRIES:-3} ]]; then
+                # Per-task retry cap WITHOUT an associative array (Bash 3.2 safe):
+                # a task that never closes stays the top ready task, so count
+                # consecutive repeats of the same id.
+                if [[ "$task_id" == "$last_task" ]]; then
+                    same_count=$((same_count + 1))
+                else
+                    last_task="$task_id"; same_count=1
+                fi
+                if [[ $same_count -gt ${RALPH_SWARM_MAX_RETRIES:-3} ]]; then
                     log_warning "Task $task_id still ready after ${RALPH_SWARM_MAX_RETRIES:-3} attempts; aborting SoO to avoid an infinite loop. Investigate it manually."
                     swarm_history_append gaveup "$task_id" "max retries"
                     break
                 fi
-                _soo_attempts[$task_id]=$((attempts + 1))
 
-                log_info "Working on Task: $task_id (attempt $((attempts + 1)))"
-                swarm_history_append task_start "$task_id" "attempt=$((attempts + 1))"
+                log_info "Working on Task: $task_id (attempt $same_count)"
+                swarm_history_append task_start "$task_id" "attempt=$same_count"
                 spawn_agent "engineer" "Complete task $task_id" >/dev/null
                 wait
                 spawn_agent "tester" "Verify task $task_id" >/dev/null
