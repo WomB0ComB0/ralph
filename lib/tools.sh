@@ -671,6 +671,29 @@ run_internal_tests() {
         rm -rf "$_kd"
     fi
 
+    # Test Swarm scheduler primitives (reaping + active count)
+    log_info "Testing swarm scheduler..."
+    local _swd _dead
+    _swd=$(mktemp -d)
+    { sleep 5 & _dead=$!; } 2>/dev/null   # a reliably-dead pid (started then killed)
+    kill "$_dead" 2>/dev/null || true
+    wait "$_dead" 2>/dev/null || true
+    mkdir -p "$_swd/live" "$_swd/dead"
+    echo RUNNING > "$_swd/live/status"; echo $$ > "$_swd/live/pid"          # $$ is alive
+    echo RUNNING > "$_swd/dead/status"; echo "$_dead" > "$_swd/dead/pid"    # killed -> dead
+    # Subshell isolates RALPH_SWARM_ROOT so reap's emit_event/history writes hit the
+    # temp dir, not the live .ralph/swarm.
+    if ( export RALPH_SWARM_ROOT="$_swd"
+         [[ "$(swarm_active_count "$_swd")" == "1" ]] || exit 1
+         reap_dead_agents "$_swd"
+         [[ "$(cat "$_swd/dead/status")" == "OFF" && "$(cat "$_swd/live/status")" == "RUNNING" ]] ); then
+        log_success "swarm reaps dead agents and counts only live ones"
+        passed=$((passed+1))
+    else
+        log_error "swarm scheduler test failed"; failed=$((failed+1))
+    fi
+    rm -rf "$_swd"
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
@@ -1093,7 +1116,92 @@ _get_root() {
 #######################################
 # Swarm Paths (Internal)
 #######################################
-_get_swarm_root() { echo "$(_get_root)/.ralph/swarm"; }
+_get_swarm_root() { echo "${RALPH_SWARM_ROOT:-$(_get_root)/.ralph/swarm}"; }
+
+#######################################
+# Append a structured line to the swarm run-history (.ralph/swarm/history.jsonl).
+# Arguments: $1 event, [$2 agent_id], [$3 detail]
+#######################################
+swarm_history_append() {
+    local event="$1" agent="${2:-}" detail="${3:-}"
+    local hist; hist="$(_get_swarm_root)/history.jsonl"
+    mkdir -p "$(dirname "$hist")" 2>/dev/null || true
+    local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if command_exists jq; then
+        jq -nc --arg ts "$ts" --arg ev "$event" --arg ag "$agent" --arg d "$detail" \
+            '{ts: $ts, event: $ev, agent: $ag, detail: $d}' >> "$hist" 2>/dev/null || true
+    else
+        echo "{\"ts\":\"$ts\",\"event\":\"$event\",\"agent\":\"$agent\",\"detail\":\"$detail\"}" >> "$hist" 2>/dev/null || true
+    fi
+}
+
+#######################################
+# Count swarm agents that are RUNNING with a live PID.
+# Arguments: [$1 agents dir]
+#######################################
+swarm_active_count() {
+    local agents_dir="${1:-$(_get_swarm_root)/agents}"
+    [[ -d "$agents_dir" ]] || { echo 0; return 0; }
+    local n=0 d status pid
+    for d in "$agents_dir"/*; do
+        [[ -d "$d" ]] || continue
+        status=$(cat "$d/status" 2>/dev/null || echo OFF)
+        [[ "$status" == "RUNNING" ]] || continue
+        pid=$(cat "$d/pid" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            n=$((n + 1))
+        fi
+    done
+    echo "$n"
+}
+
+#######################################
+# Mark RUNNING agents whose PID is gone as OFF (crash/exit recovery).
+# Arguments: [$1 agents dir]
+#######################################
+reap_dead_agents() {
+    local agents_dir="${1:-$(_get_swarm_root)/agents}"
+    [[ -d "$agents_dir" ]] || return 0
+    local d status pid id
+    for d in "$agents_dir"/*; do
+        [[ -d "$d" ]] || continue
+        status=$(cat "$d/status" 2>/dev/null || echo OFF)
+        [[ "$status" == "RUNNING" ]] || continue
+        pid=$(cat "$d/pid" 2>/dev/null || echo "")
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            echo "OFF" > "$d/status" 2>/dev/null || true
+            rm -f "$d/pid" 2>/dev/null || true
+            id=$(basename "$d")
+            emit_event "agent_reaped" "{\"agent_id\": \"$id\"}" 2>/dev/null || true
+            swarm_history_append reaped "$id" "dead pid" 2>/dev/null || true
+        fi
+    done
+}
+
+#######################################
+# Block until fewer than $max agents are active, reaping dead ones each poll.
+# Arguments: [$1 max concurrent] [$2 agents dir]
+# Returns: 0 when a slot is free, 1 on timeout
+#######################################
+swarm_wait_for_slot() {
+    # NOTE: a parked spawner still counts toward the active total, so deeply nested
+    # peer-spawners can stall each other up to RALPH_SWARM_SLOT_TIMEOUT before the
+    # timeout lets them proceed. Acceptable for the flat leader->workers topology here.
+    local max="${1:-${RALPH_SWARM_MAX_CONCURRENT:-3}}"
+    local agents_dir="${2:-$(_get_swarm_root)/agents}"
+    local timeout="${RALPH_SWARM_SLOT_TIMEOUT:-600}"
+    local waited=0 active
+    while :; do
+        reap_dead_agents "$agents_dir"
+        active=$(swarm_active_count "$agents_dir")
+        [[ "$active" -lt "$max" ]] && return 0
+        if [[ $waited -ge $timeout ]]; then
+            log_warning "swarm: timed out waiting for a free slot (active=$active, max=$max)"
+            return 1
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+}
 _get_registry()   { echo "$(_get_swarm_root)/paths.json"; }
 _get_bus()        { echo "$(_get_swarm_root)/bus.db"; }
 
@@ -1298,6 +1406,10 @@ spawn_agent() {
         done
     fi
 
+    # Bounded concurrency: wait for a free slot (reaping dead agents first) so the
+    # swarm can't spawn unboundedly.
+    swarm_wait_for_slot "${RALPH_SWARM_MAX_CONCURRENT:-3}" "$swarm_root/agents" || log_warning "Swarm full; spawning anyway after slot-wait timeout."
+
     log_info "Spawning agent: $agent_id ($role)"
     register_agent "$agent_id" "$role" "Sub-agent spawned by $parent_id"
     echo "RUNNING" > "$swarm_root/agents/$agent_id/status"
@@ -1343,12 +1455,14 @@ EOF
         RALPH_AGENT_ID="$agent_id" ralph --max-iterations "$AGENT_MAX_ITERATIONS" --tool "${TOOL:-opencode}" --model "${SELECTED_MODEL:-google/gemini-2.0-flash-exp}" --no-archive --context "AGENTS.md" > "$log_file" 2>&1
         echo "OFF" > "$swarm_root/agents/$agent_id/status"
         emit_event "agent_finished" "{\"agent_id\": \"$agent_id\"}"
+        swarm_history_append finished "$agent_id" ""
         rm -f "$pid_file"
     ) &
-    
+
     local bg_pid=$!
     echo "$bg_pid" > "$pid_file"
-    
+    swarm_history_append spawn "$agent_id" "role=$role pid=$bg_pid"
+
     log_success "Spawned agent $agent_id (PID: $bg_pid)"
     echo "$agent_id"
 }
@@ -1656,44 +1770,83 @@ handle_swarm_command() {
         list|ls)
             list_teammates
             ;;
-            
+
+        reap)
+            reap_dead_agents
+            log_success "Reaped dead agents."
+            ;;
+
+        history)
+            local _h _n; _h="$(_get_swarm_root)/history.jsonl"; _n="${1:-20}"
+            [[ "$_n" =~ ^[0-9]+$ ]] || _n=20
+            if [[ -f "$_h" ]]; then tail -n "$_n" "$_h"; else echo "No swarm history."; fi
+            ;;
+
         soo|orchestrate)
             # Series of Orchestrations: Auto-pilot for the whole swarm
             log_info "Starting Ralph Series of Orchestrations (SoO)..."
-            
-            # Step 1: Planner
+            local agents_dir; agents_dir="$(_get_swarm_root)/agents"
+            swarm_history_append soo_start "leader" ""
+
+            # Step 1: Planner (must complete before execution)
             log_setup "Phase 1: Planning"
-            spawn_agent "planner" "Decompose the current project requirements into Beads tasks."
-            wait # Simplified for now, in reality we'd monitor status
-            
-            # Step 2: Loop Engineer & Tester
+            spawn_agent "planner" "Decompose the current project requirements into Beads tasks." >/dev/null
+            wait
+
+            # Step 2: Engineer & Tester per ready task, with a per-task retry cap so a
+            # task that never closes can't spin the drain loop forever.
             log_setup "Phase 2: Execution & Verification"
-            
-            local backoff=1
-            local max_backoff=60
-            
+            local backoff=1 max_backoff=60 cycles=0 empty_streak=0
+            declare -A _soo_attempts
             while _bd ready --quiet | grep -q "[0-9]"; do
+                # Global backstop: bound total cycles regardless of task-id parsing,
+                # so an unparseable/unstable `bd ready` format can't spin forever.
+                cycles=$((cycles + 1))
+                if [[ $cycles -gt ${RALPH_SWARM_MAX_CYCLES:-50} ]]; then
+                    log_warning "SoO reached the cycle cap (${RALPH_SWARM_MAX_CYCLES:-50}); aborting to avoid an unbounded loop."
+                    swarm_history_append gaveup "leader" "cycle cap"
+                    break
+                fi
+
                 local task_id
                 task_id=$(_bd ready --pretty | head -n 1 | awk '{print $2}')
-                
+
                 if [[ -z "$task_id" ]]; then
+                    # Ready reported but nothing parseable: bound this too.
+                    empty_streak=$((empty_streak + 1))
+                    if [[ $empty_streak -ge ${RALPH_SWARM_MAX_STALLS:-5} ]]; then
+                        log_warning "SoO: ready tasks reported but none parseable for $empty_streak cycles; aborting."
+                        swarm_history_append gaveup "leader" "unparseable ready task"
+                        break
+                    fi
+                    reap_dead_agents "$agents_dir"
                     log_debug "No ready tasks, waiting ${backoff}s..."
                     sleep "$backoff"
                     backoff=$((backoff * 2))
                     [[ $backoff -gt $max_backoff ]] && backoff=$max_backoff
                     continue
                 fi
-                
-                # Reset backoff on successful task
+                empty_streak=0
                 backoff=1
-                
-                log_info "Working on Task: $task_id"
-                spawn_agent "engineer" "Complete task $task_id"
+
+                local attempts="${_soo_attempts[$task_id]:-0}"
+                if [[ $attempts -ge ${RALPH_SWARM_MAX_RETRIES:-3} ]]; then
+                    log_warning "Task $task_id still ready after ${RALPH_SWARM_MAX_RETRIES:-3} attempts; aborting SoO to avoid an infinite loop. Investigate it manually."
+                    swarm_history_append gaveup "$task_id" "max retries"
+                    break
+                fi
+                _soo_attempts[$task_id]=$((attempts + 1))
+
+                log_info "Working on Task: $task_id (attempt $((attempts + 1)))"
+                swarm_history_append task_start "$task_id" "attempt=$((attempts + 1))"
+                spawn_agent "engineer" "Complete task $task_id" >/dev/null
                 wait
-                
-                spawn_agent "tester" "Verify task $task_id"
+                spawn_agent "tester" "Verify task $task_id" >/dev/null
                 wait
             done
+
+            reap_dead_agents "$agents_dir"
+            swarm_history_append soo_complete "leader" ""
             log_success "Series of Orchestrations complete."
             ;;
 
@@ -1724,7 +1877,7 @@ handle_swarm_command() {
             
         *)
             log_error "Unknown swarm command: $cmd"
-            echo "Available commands: init, spawn, msg, inbox, list, task"
+            echo "Available commands: init, spawn, msg, inbox, list, reap, history, task, soo"
             return 1
             ;;
     esac
