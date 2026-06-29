@@ -15,15 +15,15 @@ working tree.
 | File | Covers |
 |------|--------|
 | `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, sandbox, secret scan, flock singleton (21 cases) |
-| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation (14) |
+| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral (17) |
 | `test_lists.sh` | Configurable excludes + list defaults: `hash_exclude_names`, health-port / model-family / sandbox-env overrides, `gitdiff-exclude` (12) |
 | `test_signals.sh` | Signal + LOG.md compounding: `theme_key` normalization/dedup, lifecycle (open/ack/resolved, regressed-reopen), bounded recall, prune, co-occurrence (`related`) links (39) |
 | `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** (32) |
 | `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
-| `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (12) |
-| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy, headless flags, stdin vs positional, subshell-scoped env, agy flag-order, per-call timeout, codex (exec/sandbox), tool validity, stderr/stdout capture separation, claude fallback/budget/auth (52) |
-| `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude/amp aliases, agy `agy models`, param-count guard, alias validation (13) |
-| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 17 cases) |
+| `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (13) |
+| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy / codex, headless flags, stdin vs positional, subshell-scoped env, agy flag-order + --model, per-call timeout, codex (exec/sandbox), tool validity, stderr/stdout capture separation, claude fallback/budget/auth (56) |
+| `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude alias, amp/codex self-select, agy `agy models`, determine_model source precedence, param-count guard, alias validation (16) |
+| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 18 cases) |
 
 ## Writing tests
 

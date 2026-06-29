@@ -734,7 +734,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 223 cases total
+# Run every suite (9 unit harnesses + the native --test) — 233 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

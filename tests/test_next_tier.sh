@@ -50,5 +50,14 @@ load_tuning "$TMP/nostate"; rc=$?
 assert_rc "load_tuning missing -> rc 1" 1 "$rc"
 assert_eq "LAZY_THRESHOLD untouched when missing" "unset" "${LAZY_THRESHOLD:-unset}"
 
+echo "== entry-point: light invocations must NOT be gated by check_dependencies =="
+# ralph.sh must defer the dependency gate to main() (iterating path only), so --help and
+# the read-only subcommands work on hosts missing the full toolchain (bc/bd/go/etc.).
+grep -qE '^[[:space:]]*check_dependencies' "$R/ralph.sh" && bad "ralph.sh still calls check_dependencies before main (gates --help/subcommands)" || ok "ralph.sh defers check_dependencies to main"
+HELP_RC=0; bash "$R/ralph.sh" --help >/dev/null 2>&1 || HELP_RC=$?
+assert_rc "ralph.sh --help exits 0 without full deps" 0 "$HELP_RC"
+SIG_RC=0; bash "$R/ralph.sh" signal ls >/dev/null 2>&1 || SIG_RC=$?
+assert_rc "ralph.sh signal ls exits 0 without full deps" 0 "$SIG_RC"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
