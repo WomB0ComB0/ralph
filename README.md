@@ -527,13 +527,13 @@ Ralph maintains synchronized artifacts for consistent execution:
 - Full task history and ability to replay states
 - Tasks automatically synced to human-readable plan file
 
-### 3. Intelligent Model Routing
-- Automatically routes requests to optimal models based on role:
-  - **Planner/Thinker**: High-reasoning models (Gemini 2.0 Pro/Thinking)
-  - **Engineer**: High-speed implementation (Gemini 2.0 Flash)
-  - **Tester**: Efficient verification models
-- Dynamic model discovery and caching
-- Fallback chains for unavailable models
+### 3. Intelligent Model Routing (dynamic, tool-aware)
+- Resolves the model **live, per tool + role** — preferring each tool's own source over any pinned string (`resolve_model_for_tool`):
+  - **agy** (Google Antigravity — the gemini CLI is deprecated/archived): live-lists via `agy models` and picks the newest model for the role (e.g. Planner → newest reasoning tier like Claude Opus 4.6; Tester → an efficient flash tier); empty ⇒ agy auto-selects latest.
+  - **claude / amp**: tier **aliases** (`opus` for planner/thinker, `sonnet` otherwise) that resolve to the latest server-side — never a pinned date.
+  - **opencode**: dynamic discovery via the `opencode models` router.
+- Role tiers and "newest" are chosen by version (dominant) then capability keyword; `RALPH_MODEL_FAMILIES` still tunes opencode family preference.
+- No hardcoded `…-2.0-…`/dated-model pins on the hot path.
 
 ### 4. Reflexion & Loop Detection
 - **Lazy Detection**: Identifies when agent isn't making progress (no file changes)
@@ -727,7 +727,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (8 unit harnesses + the native --test) — 174 cases total
+# Run every suite (9 unit harnesses + the native --test) — 187 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
