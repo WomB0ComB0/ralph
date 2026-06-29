@@ -21,7 +21,7 @@ working tree.
 | `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** (32) |
 | `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
 | `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (12) |
-| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy, headless flags, stdin vs positional, subshell-scoped env, agy flag-order, per-call timeout, codex (exec/sandbox), tool validity (41) |
+| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy, headless flags, stdin vs positional, subshell-scoped env, agy flag-order, per-call timeout, codex (exec/sandbox), tool validity, stderr/stdout capture separation (45) |
 | `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude/amp aliases, agy `agy models`, param-count guard, alias validation (13) |
 | `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 17 cases) |
 
