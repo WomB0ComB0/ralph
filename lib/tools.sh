@@ -714,6 +714,28 @@ run_internal_tests() {
         rm -rf "$_ld"
     fi
 
+    # Test signal co-occurrence linking is set -e safe even with a corrupt file present
+    log_info "Testing signal co-occurrence linking..."
+    if ! command_exists jq || ! declare -F link_related_signals >/dev/null; then
+        log_warning "Skipping related-link test (jq or signals.sh unavailable)"
+    else
+        local _rd
+        _rd=$(mktemp -d)
+        if ( export SIGNAL_DIR="$_rd/s" RUN_ID="rl-1"
+             init_signals
+             x=$(record_signal validation_failure "a" "alpha pair link" "f")
+             record_signal runtime_failure "b" "beta pair link" "f" >/dev/null
+             printf '{bad' > "$SIGNAL_DIR/corrupt.json"   # must not abort link under set -e
+             link_related_signals
+             [[ "$(jq -r '.related | length' "$SIGNAL_DIR/$x.json")" -ge 1 ]] ); then
+            log_success "co-occurrence linking is set -e safe and links shared-run signals"
+            passed=$((passed+1))
+        else
+            log_error "related-link test failed"; failed=$((failed+1))
+        fi
+        rm -rf "$_rd"
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
