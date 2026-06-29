@@ -207,21 +207,18 @@ get_default_model_for_tool() {
     local tool="$1"
     
     case "$tool" in
-        amp)
-            echo "claude-3-5-sonnet-20241022"
-            ;;
-        claude)
-            echo "claude-3-5-sonnet-20241022"
+        amp|claude)
+            echo "sonnet"   # tier alias resolves to the latest server-side (not a pinned date)
             ;;
         opencode)
-            echo "google/gemini-2.0-flash-001"
+            echo "google/gemini-2.0-flash-001"   # last-resort only; real path is the live opencode-models router
             ;;
         agy)
-            echo "default"   # Antigravity (agy) manages its own model; no --model flag
+            echo ""   # Antigravity self-selects the latest; resolve_model_for_tool live-lists via `agy models`
             ;;
         *)
             log_warning "Unknown tool: $tool, using generic default"
-            echo "claude-3-5-sonnet-20241022"
+            echo "sonnet"
             ;;
     esac
 }
@@ -347,22 +344,76 @@ get_model_for_role() {
 }
 
 #######################################
+# Pick the newest model for a role from a live model list (one model per line). PURE.
+# Scores each line by version number (dominant) then a role-tier keyword rank, so the
+# latest model in the right capability tier wins. Lines with no tier keyword are
+# ignored (so e.g. a "120B" param count can't masquerade as a version). Empty if none.
+# Arguments: $1 role (planner|thinker|engineer|tester), $2 newline-separated list
+#######################################
+_pick_latest_model() {
+    local role="$1" list="$2"
+    [[ -n "$list" ]] || return 0
+    local kws
+    case "$role" in
+        planner|thinker) kws="opus|ultra|pro|thinking|reasoning" ;;
+        tester)          kws="lite|mini|low|haiku|small|flash" ;;
+        *)               kws="sonnet|flash|code|coder|pro" ;;   # engineer (default)
+    esac
+    printf '%s\n' "$list" | awk -v kws="$kws" '
+        BEGIN{ n=split(tolower(kws),a,"|") }   # split the constant keyword list once, not per line
+        { line=$0
+          if (line ~ /^[[:space:]]*$/) next
+          vs=line; gsub(/[0-9]+[bB]/,"",vs)   # drop param-count tokens (70B/120b) so they cannot pose as a version
+          ver=0; if (match(vs, /[0-9]+(\.[0-9]+)?/)) ver=substr(vs,RSTART,RLENGTH)+0
+          rank=0; ll=tolower(line)
+          for(i=1;i<=n;i++){ if(ll ~ ("(^|[^a-z])" a[i] "([^a-z]|$)")){ r=n-i+1; if(r>rank) rank=r } }
+          if(rank==0) next
+          score=ver*1000+rank
+          if(best=="" || score>bestscore){ bestscore=score; best=line } }
+        END{ if(best!="") print best }'
+}
+
+#######################################
+# Resolve a model for the active tool + role, preferring each tool's OWN live source
+# over any pinned string (gemini CLI is deprecated; agy/Antigravity is Google's CLI).
+#   agy       -> `agy models` then newest-for-role (empty => agy auto-selects latest)
+#   claude/amp-> tier alias (opus|sonnet) which resolves to the latest server-side
+#   opencode  -> existing dynamic opencode-models router
+# Arguments: $1 tool (default $TOOL), $2 role (default engineer)
+#######################################
+resolve_model_for_tool() {
+    local tool="${1:-${TOOL:-opencode}}" role="${2:-engineer}"
+    case "$tool" in
+        agy)
+            local list; list=$(agy models 2>/dev/null) || list=""
+            _pick_latest_model "$role" "$list"
+            ;;
+        claude|amp)
+            case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
+            ;;
+        opencode|*)
+            get_model_for_role "$role"
+            ;;
+    esac
+}
+
+#######################################
 # Determine which model to use
-# Respects SELECTED_MODEL override, otherwise auto-selects based on role
+# Respects SELECTED_MODEL override, otherwise auto-selects based on tool + role
 # Sets global SELECTED_MODEL variable
 # Returns: 0 on success, 1 on failure
 #######################################
 determine_model() {
     local current_role="${RALPH_ROLE:-engineer}"
-    
+
     # If model explicitly specified via CLI, use it (highest priority)
     if [[ -n "${SELECTED_MODEL:-}" && "${SELECTED_MODEL_SOURCE:-}" == "CLI" ]]; then
         log_debug "Using CLI-specified model: $SELECTED_MODEL"
         return 0
     fi
-    
+
     local auto_selected_model
-    auto_selected_model=$(get_model_for_role "$current_role")
+    auto_selected_model=$(resolve_model_for_tool "${TOOL:-opencode}" "$current_role")
     
     SELECTED_MODEL="$auto_selected_model"
     export SELECTED_MODEL
@@ -402,9 +453,9 @@ validate_model_availability() {
             ;;
             
         amp|claude)
-            # For Anthropic models, we can't easily validate without API call
-            # Just check if it looks like a valid model identifier
-            if [[ "$model" =~ ^claude-[0-9]+-[a-z]+-[0-9]+ ]]; then
+            # Can't validate without an API call; accept tier aliases (opus/sonnet/haiku,
+            # which resolve to the latest server-side) or a dated claude- identifier.
+            if [[ "$model" =~ ^(opus|sonnet|haiku|claude-) ]]; then
                 log_debug "Model format looks valid: $model"
                 return 0
             else

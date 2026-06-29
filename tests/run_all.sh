@@ -36,6 +36,7 @@ run skills   "$DIR/test_skills.sh"
 run swarm    "$DIR/test_swarm.sh"
 run lint     "$DIR/test_lint.sh"
 run ai-tools "$DIR/test_ai_tools.sh"
+run models   "$DIR/test_models.sh"
 run native   "$DIR/run_internal_tests.sh"
 
 echo
