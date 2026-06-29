@@ -91,6 +91,7 @@ grep -q DIAG "$lf" && ok "stderr captured in the log" || bad "stderr missing fro
 grep -q DIAG "$of" && bad "stderr leaked into output_file" || ok "stderr NOT in output_file"
 # guard against regressing to 2>&1 in run_ai_tool
 grep -q '2>&1 | tee -a "\$log_file"' "$R/lib/engine.sh" && bad "run_ai_tool still merges stderr (2>&1) into output" || ok "run_ai_tool separates stderr from the result file"
+rm -rf "$cdir"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
