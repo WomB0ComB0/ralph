@@ -21,6 +21,7 @@ working tree.
 | `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** (32) |
 | `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
 | `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (12) |
+| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy, headless flags, stdin vs positional (14) |
 | `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 17 cases) |
 
 ## Writing tests

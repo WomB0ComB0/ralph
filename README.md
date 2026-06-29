@@ -39,6 +39,7 @@ graph TB
         OpenCode[opencode - Primary]
         AMP[amp - Anthropic MCP]
         Claude[claude-cli]
+        Agy[agy - Google Antigravity]
         Copilot[GitHub Copilot]
     end
     
@@ -130,6 +131,7 @@ graph TB
     AITool --> OpenCode
     AITool --> AMP
     AITool --> Claude
+    AITool --> Agy
     AITool --> Copilot
     
     BeadsDB --> Dolt
@@ -725,7 +727,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (7 unit harnesses + the native --test) — 158 cases total
+# Run every suite (8 unit harnesses + the native --test) — 172 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

@@ -216,6 +216,9 @@ get_default_model_for_tool() {
         opencode)
             echo "google/gemini-2.0-flash-001"
             ;;
+        agy)
+            echo "default"   # Antigravity (agy) manages its own model; no --model flag
+            ;;
         *)
             log_warning "Unknown tool: $tool, using generic default"
             echo "claude-3-5-sonnet-20241022"
@@ -651,6 +654,36 @@ EOF
 #   $5 - Output file path
 # Returns: Exit code from tool
 #######################################
+#######################################
+# Build the argv for an AI tool into _AI_CMD[] and set _AI_STDIN (1 = prompt piped on
+# stdin, 0 = prompt passed as the final positional arg). PURE — no execution — so each
+# tool's invocation is unit-testable. Verified against every CLI's --help:
+#   amp      stdin-piped, --dangerously-allow-all
+#   claude   -p/--print (REQUIRED for headless — without it claude 2.x goes interactive),
+#            --permission-mode bypassPermissions, --model
+#   opencode  opencode run --model <provider/model>
+#   agy      --print --dangerously-skip-permissions  (Google Antigravity CLI; no --model flag)
+# Arguments: $1 tool, $2 model
+# Returns: 0 and sets _AI_CMD/_AI_STDIN; 1 for an unknown tool.
+#######################################
+_build_ai_cmd() {
+    local tool="$1" model="$2"
+    _AI_CMD=(); _AI_STDIN=0
+    case "$tool" in
+        amp)
+            _AI_CMD=(amp --dangerously-allow-all); _AI_STDIN=1 ;;
+        claude)
+            _AI_CMD=(claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model "$model") ;;
+        opencode)
+            _AI_CMD=(opencode run --model "$model") ;;
+        agy)
+            _AI_CMD=(agy --print --dangerously-skip-permissions) ;;
+        *)
+            return 1 ;;
+    esac
+    return 0
+}
+
 run_ai_tool() {
     local tool="$1"
     local model="$2"
@@ -662,28 +695,28 @@ run_ai_tool() {
     log_debug "Prompt length: ${#prompt} characters"
     
     local pid i exit_code
-    
-    # Start tool in background with proper error handling
+
+    # Build the argv (testable; no execution), then launch in the background.
+    if ! _build_ai_cmd "$tool" "$model"; then
+        log_error "Unknown tool: $tool"
+        return 1
+    fi
+    # Per-tool environment side effects (not part of the argv).
     case "$tool" in
-        amp)
-            (printf '%s\n' "$prompt" | amp --dangerously-allow-all 2>&1 | tee -a "$log_file" > "$output_file") &
-            pid=$!
-            ;;
         claude)
             export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
             export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:11434}"
-            (claude --dangerously-skip-permissions --permission-mode bypassPermissions --model "$model" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
-            pid=$!
             ;;
         opencode)
-            (export CI=true; opencode run --model "$model" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
-            pid=$!
-            ;;
-        *)
-            log_error "Unknown tool: $tool"
-            return 1
+            export CI=true
             ;;
     esac
+    if [[ "$_AI_STDIN" == "1" ]]; then
+        (printf '%s\n' "$prompt" | "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
+    else
+        ("${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
+    fi
+    pid=$!
     
     # Animated spinner while tool runs
     local i=0
