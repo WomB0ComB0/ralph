@@ -274,22 +274,31 @@ link_related_signals() {
     [[ -d "$dir" ]] || return 0
     local max="${RALPH_SIGNAL_RELATED_MAX:-8}"; [[ "$max" =~ ^[0-9]+$ ]] || max=8
 
-    # Sanitize per-file FIRST (one corrupt JSON must not abort the whole slurp, matching
-    # recall_signals' corrupt-resilience), then compute the graph in a single jq pass.
     # related(X) = other signals whose runs[] intersect X's runs[]  ( A ∩ B == A - (A - B) ).
-    local tmpin f pairs
-    tmpin=$(mktemp) || return 0
-    for f in "$dir"/*.json; do
-        [[ -f "$f" ]] || continue
-        jq -c '{theme: (.theme_key // ""), runs: (.runs // [])} | select(.theme != "")' "$f" 2>/dev/null >> "$tmpin" || true
-    done
+    # FAST PATH: one slurp over all files (cheapest — a single jq). If any file is corrupt
+    # the slurp aborts (empty result), so fall back to a per-file sanitize that skips bad
+    # files (recall_signals-style resilience) at the cost of one jq per file.
+    local pairs tmpin f
     pairs=$(jq -rs '
-        [ .[] ] as $s
+        [ .[] | {theme: (.theme_key // ""), runs: (.runs // [])} | select(.theme != "") ] as $s
         | $s[] as $x
         | [ $s[] | select(.theme != $x.theme) | select(((.runs) - ((.runs) - ($x.runs))) | length > 0) | .theme ] as $rel
         | "\($x.theme)\t\($rel | unique | join(","))"
-    ' "$tmpin" 2>/dev/null) || { rm -f "$tmpin"; return 0; }
-    rm -f "$tmpin"
+    ' "$dir"/*.json 2>/dev/null) || pairs=""   # corrupt file aborts the slurp; fall back below (set -e safe)
+    if [[ -z "$pairs" ]]; then
+        tmpin=$(mktemp) || return 0
+        for f in "$dir"/*.json; do
+            [[ -f "$f" ]] || continue
+            jq -c '{theme: (.theme_key // ""), runs: (.runs // [])} | select(.theme != "")' "$f" 2>/dev/null >> "$tmpin" || true
+        done
+        pairs=$(jq -rs '
+            [ .[] ] as $s
+            | $s[] as $x
+            | [ $s[] | select(.theme != $x.theme) | select(((.runs) - ((.runs) - ($x.runs))) | length > 0) | .theme ] as $rel
+            | "\($x.theme)\t\($rel | unique | join(","))"
+        ' "$tmpin" 2>/dev/null) || { rm -f "$tmpin"; return 0; }
+        rm -f "$tmpin"
+    fi
     [[ -n "$pairs" ]] || return 0
 
     local theme rel file reljson tmp

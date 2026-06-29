@@ -133,7 +133,7 @@ link_related_signals
 echo "== related: a no-longer-co-occurring signal gets .related cleared (no stale) =="
 rm -rf "$SIGNAL_DIR"; init_signals
 s1=$(RUN_ID=run-S1 record_signal validation_failure "fs" "SOLO problem here" "fix")
-tmpj=$(mktemp); jq '.related=["stale-theme-xyz"]' "$SIGNAL_DIR/$s1.json" > "$tmpj" && mv "$tmpj" "$SIGNAL_DIR/$s1.json"
+tmpj="$TMP/tmpj.json"; jq '.related=["stale-theme-xyz"]' "$SIGNAL_DIR/$s1.json" > "$tmpj" && mv "$tmpj" "$SIGNAL_DIR/$s1.json"
 link_related_signals
 eq "stale related cleared to []" "[]" "$(jq -c '.related' "$SIGNAL_DIR/$s1.json" 2>/dev/null)"
 
