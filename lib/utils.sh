@@ -2104,13 +2104,27 @@ setup_dependencies() {
 
     
 
-    # 1. opencode
+    # 1. opencode (default tool + model router)
 
     if ! command_exists opencode; then
 
         install_opencode >/dev/null 2>&1 || log_warning "opencode installation failed"
 
     fi
+
+    # 1b. The SELECTED AI tool, if it isn't opencode and is missing.
+
+    case "${TOOL:-opencode}" in
+
+        claude) command_exists claude || install_claude_cli >/dev/null 2>&1 || log_warning "claude installation failed" ;;
+
+        amp)    command_exists amp    || install_amp >/dev/null 2>&1        || log_warning "amp installation failed" ;;
+
+        codex)  command_exists codex  || install_codex >/dev/null 2>&1      || log_warning "codex installation failed" ;;
+
+        agy)    command_exists agy    || log_warning "agy (Antigravity) must be installed manually (not on npm)" ;;
+
+    esac
 
     
 
