@@ -1077,6 +1077,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--sandbox${_RALPH_COLOR_NC}               Run in Docker sandbox (requires Docker)
     ${_RALPH_COLOR_GREEN}--no-sandbox${_RALPH_COLOR_NC}            Force run without sandbox
     ${_RALPH_COLOR_GREEN}--unattended${_RALPH_COLOR_NC}            Autonomous mode: enable Docker sandbox isolation (recommended for cron)
+    ${_RALPH_COLOR_GREEN}--continue-session${_RALPH_COLOR_NC}      Resume the tool's conversation across iterations of one run (claude/opencode/agy; not across --once ticks)
     ${_RALPH_COLOR_GREEN}--once${_RALPH_COLOR_NC}                  Run a single iteration then exit (let cron/systemd own cadence; pair with --resume)
     ${_RALPH_COLOR_GREEN}--review${_RALPH_COLOR_NC}                Analyze metrics history, update self-tuning (tuning.json), and exit
     ${_RALPH_COLOR_GREEN}-h, --help${_RALPH_COLOR_NC}              Show this help message
@@ -1260,6 +1261,10 @@ parse_arguments() {
             -v|--version)
                 echo "ralph $(git -C "${SCRIPT_DIR:-.}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
                 exit 0
+                ;;
+            --continue-session)
+                export RALPH_RESUME_SESSION=1
+                shift
                 ;;
             --once)
                 export RUN_ONCE=true
