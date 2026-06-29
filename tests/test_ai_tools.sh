@@ -55,6 +55,11 @@ export RALPH_TOOL_TIMEOUT=0; _build_ai_cmd agy "m"
 [[ "${_AI_CMD[*]}" != *"--print-timeout"* ]] && ok "timeout disabled -> no --print-timeout" || bad "print-timeout present when disabled"
 unset RALPH_TOOL_TIMEOUT
 
+echo "== _timeout_bin: prefers timeout, falls back to gtimeout (macOS coreutils) =="
+tb=$(_timeout_bin)
+[[ "$tb" == "timeout" || "$tb" == "gtimeout" || -z "$tb" ]] && ok "_timeout_bin returns a valid value ([$tb])" || bad "unexpected _timeout_bin: $tb"
+{ [[ -z "$tb" ]] || command -v "$tb" >/dev/null; } && ok "_timeout_bin names an installed binary (or none)" || bad "_timeout_bin named a missing binary: $tb"
+
 echo "== per-tool env is subshell-scoped (must NOT leak to the parent) =="
 unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"

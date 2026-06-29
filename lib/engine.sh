@@ -726,6 +726,14 @@ _ai_timeout_secs() {
     echo "$d"
 }
 
+# Name of the available GNU timeout binary (macOS+Homebrew coreutils ships it as gtimeout).
+# Echoes "timeout" | "gtimeout" | "" (none).
+_timeout_bin() {
+    if command_exists timeout; then echo timeout
+    elif command_exists gtimeout; then echo gtimeout
+    else echo ""; fi
+}
+
 _build_ai_cmd() {
     local tool="$1" model="$2"
     _AI_CMD=(); _AI_STDIN=0
@@ -783,12 +791,12 @@ run_ai_tool() {
     fi
     # Hard wall-clock backstop so a hung tool can't block the loop forever (exit 124 on
     # timeout, which the retry/circuit-breaker then treats as a failed iteration).
-    local -a tmo=(); local _dur; _dur=$(_ai_timeout_secs)
+    local -a tmo=(); local _dur _to; _dur=$(_ai_timeout_secs); _to=$(_timeout_bin)
     if [[ "$_dur" -gt 0 ]]; then
-        if command_exists timeout; then
-            tmo=(timeout --kill-after=15 "$_dur")
+        if [[ -n "$_to" ]]; then
+            tmo=("$_to" --kill-after=15 "$_dur")
         elif [[ -z "${_RALPH_TIMEOUT_WARNED:-}" ]]; then
-            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but 'timeout' is not installed; AI tool calls have no wall-clock backstop (install coreutils)"
+            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but neither 'timeout' nor 'gtimeout' is installed; AI tool calls have no wall-clock backstop (install coreutils)"
             _RALPH_TIMEOUT_WARNED=1
         fi
     fi
