@@ -684,6 +684,20 @@ _build_ai_cmd() {
     return 0
 }
 
+# Apply per-tool environment side effects. MUST be called inside the launch subshell so
+# CI/ANTHROPIC_* do not leak into the parent shell or later iterations.
+_apply_tool_env() {
+    case "$1" in
+        claude)
+            export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
+            export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:11434}"
+            ;;
+        opencode)
+            export CI=true
+            ;;
+    esac
+}
+
 run_ai_tool() {
     local tool="$1"
     local model="$2"
@@ -701,20 +715,12 @@ run_ai_tool() {
         log_error "Unknown tool: $tool"
         return 1
     fi
-    # Per-tool environment side effects (not part of the argv).
-    case "$tool" in
-        claude)
-            export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
-            export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:11434}"
-            ;;
-        opencode)
-            export CI=true
-            ;;
-    esac
+    # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
+    # leak into the parent shell or later iterations.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        (printf '%s\n' "$prompt" | "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
     else
-        ("${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; "${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
     

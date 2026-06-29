@@ -40,5 +40,10 @@ eq "amp uses stdin" 1 "$_AI_STDIN"
 echo "== unknown tool rejected =="
 _build_ai_cmd bogus "m"; eq "unknown tool rc=1" 1 "$?"
 
+echo "== per-tool env is subshell-scoped (must NOT leak to the parent) =="
+unset CI ANTHROPIC_BASE_URL 2>/dev/null
+( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"
+( _apply_tool_env claude ); [[ -z "${ANTHROPIC_BASE_URL:-}" ]] && ok "claude ANTHROPIC_BASE_URL does not leak" || bad "ANTHROPIC_BASE_URL leaked to parent"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
