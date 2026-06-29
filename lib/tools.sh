@@ -1983,12 +1983,6 @@ run_mini_bench() {
 }
 
 #######################################
-# AST-aware Semantic Editing Library
-# Wraps 'ast-grep' for robust code transformations
-#######################################
-
-
-#######################################
 # Vision Library for Ralph
 # Uses Playwright to visually verify UIs
 #######################################
