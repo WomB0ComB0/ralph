@@ -707,6 +707,8 @@ bd vc log
 - `VERBOSE`: Enable debug logging (true/false)
 - `RALPH_UNATTENDED`: Never pause for interactive input (same as `--unattended`)
 - `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout` so a hung tool can't block it (default 1800; `0` disables; also sets agy's `--print-timeout`)
+- `RALPH_MAX_BUDGET_USD`: Opt-in per-call spend cap for `--tool claude` (`--max-budget-usd`); unset = no cap
+- `RALPH_CLAUDE_FALLBACK_MODEL`: Tier claude falls back to on overload (default `sonnet`; skipped when it equals the primary). For `--tool claude`, do NOT set `ANTHROPIC_BASE_URL` unless you want a local/proxy endpoint — claude uses your normal Anthropic auth by default
 - `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
 - `RALPH_HASH_EXCLUDES`: Extra dir names to exclude from the project hash (also reads `.ralph/excludes`)
 - `GITDIFF_EXCLUDE`: Path to the diff-exclude file used by `--diff-context` (default: `gitdiff-exclude`)
@@ -732,7 +734,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 216 cases total
+# Run every suite (9 unit harnesses + the native --test) — 223 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

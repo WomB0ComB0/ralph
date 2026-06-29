@@ -747,7 +747,14 @@ _build_ai_cmd() {
         amp)
             _AI_CMD=(amp --dangerously-allow-all); _AI_STDIN=1 ;;
         claude)
-            _AI_CMD=(claude -p --dangerously-skip-permissions --permission-mode bypassPermissions --model "$model") ;;
+            # --dangerously-skip-permissions already bypasses; --permission-mode bypassPermissions
+            # was redundant. Add resilience: fall back to a cheaper tier on overload (skip if it
+            # equals the primary) and an opt-in per-call spend cap.
+            _AI_CMD=(claude -p --dangerously-skip-permissions --model "$model")
+            local _fb="${RALPH_CLAUDE_FALLBACK_MODEL:-sonnet}"
+            [[ -n "$_fb" && "$_fb" != "$model" ]] && _AI_CMD+=(--fallback-model "$_fb")
+            [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9.]+$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
+            ;;
         opencode)
             _AI_CMD=(opencode run --model "$model") ;;
         agy)
@@ -776,9 +783,11 @@ _build_ai_cmd() {
 _apply_tool_env() {
     case "$1" in
         claude)
-            export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
-            export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://localhost:11434}"
-            ;;
+            # Respect the user's ANTHROPIC_* env as-is (inherited). Do NOT force a
+            # localhost:11434 default — that misroutes the official claude CLI to an Ollama
+            # port and overrides normal subscription/API-key auth. Opt into a local/proxy
+            # endpoint by exporting ANTHROPIC_BASE_URL yourself before running Ralph.
+            : ;;
         opencode)
             export CI=true
             ;;
