@@ -1852,7 +1852,7 @@ install_opencode() {
             fi
             
             # Verify script looks legitimate (the official installer uses #!/usr/bin/env bash)
-            if ! grep -qE '^#!/(usr/bin/env bash|bin/bash|bin/sh)' "$install_script"; then
+            if ! grep -qE '^#![[:space:]]*/.*(bash|sh)' "$install_script"; then
                 log_error "Downloaded script doesn't look like a bash script"
                 return 1
             fi
