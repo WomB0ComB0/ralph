@@ -9,4 +9,5 @@ source "$R/lib/engine.sh"
 source "$R/lib/tools.sh"
 source "$R/lib/signals.sh"
 source "$R/lib/skills.sh"
+source "$R/lib/lint.sh"
 run_internal_tests

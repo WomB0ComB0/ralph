@@ -694,6 +694,26 @@ run_internal_tests() {
     fi
     rm -rf "$_swd"
 
+    # Test knowledge-lint curator pass (gap detection)
+    log_info "Testing knowledge lint..."
+    if ! command_exists jq || ! declare -F lint_knowledge >/dev/null; then
+        log_warning "Skipping lint test (jq or lint.sh unavailable)"
+    else
+        local _ld
+        _ld=$(mktemp -d)
+        if ( export SIGNAL_DIR="$_ld/signals" SKILL_DIR="$_ld/skills" RUN_ID="t-1-1" RALPH_LINT_MIN_FREQ=2
+             init_signals; init_skills
+             record_signal validation_failure "x fails" "lint gap problem" "fix" >/dev/null
+             record_signal validation_failure "x fails" "lint gap problem" "fix" >/dev/null   # freq 2, no skill
+             lint_knowledge quiet | grep -q '^lint summary: 1 gaps,' ); then
+            log_success "lint detects a recurring open signal with no skill as a gap"
+            passed=$((passed+1))
+        else
+            log_error "lint test failed"; failed=$((failed+1))
+        fi
+        rm -rf "$_ld"
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"

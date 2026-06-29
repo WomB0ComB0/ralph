@@ -488,7 +488,7 @@ Ralph maintains synchronized artifacts for consistent execution:
 - **Signals**: deduplicated "patterns the loop keeps re-hitting" — one git-diffable JSON per signal under `.ralph/artifacts/signals/`, keyed by a normalized `theme_key`, with frequency, severity, and lifecycle (open → ack → resolved, auto-reopen on regression). A bounded digest is surfaced into the prompt each iteration.
 - **LOG.md**: an append-only cross-run narrative at `.ralph/artifacts/LOG.md`.
 - **Guarded Skills**: when a recurring signal is resolved with a note, Ralph auto-authors a *candidate* skill (a proven resolution). Candidates are never surfaced until you `approve` them; approved skills are then injected ("you fixed this before: …") whenever the matching signal is open again.
-- Manage via the `ralph signal` and `ralph skill` CLIs (see Usage).
+- Manage via the `ralph signal`, `ralph skill`, and `ralph lint` (read-only knowledge-hygiene curator: gaps, orphaned/stale skills, approval backlog, unresolved high-severity) CLIs (see Usage).
 
 ### 9. Durable Execution & Bounded Orchestration
 - **Retry/backoff** around the AI call, plus **recovery checkpoints** persisted per run so `--resume` can continue after a crash.
@@ -594,6 +594,9 @@ bd vc log
 ./ralph.sh skill ls
 ./ralph.sh skill approve <theme>     # surface this fix when the matching signal recurs
 ./ralph.sh skill reject <theme>
+
+# Lint — periodic curator sweep over the knowledge store (read-only)
+./ralph.sh lint                      # knowledge gaps, orphaned/stale skills, approval backlog, high-severity
 ```
 
 ### Swarm Commands
@@ -630,6 +633,7 @@ bd vc log
 - `RALPH_HEALTH_PORTS` / `RALPH_MODEL_FAMILIES` / `RALPH_SANDBOX_ALLOW_ENV`: Override the built-in port / model-family / sandbox-env-passthrough lists
 - `RALPH_SIGNAL_RECALL` / `RALPH_SIGNAL_OPEN_TTL_DAYS`: Signal digest size / prune age for open signals
 - `RALPH_SKILL_MIN_FREQ` / `RALPH_SKILL_RECALL` / `RALPH_SKILL_TTL_DAYS`: Skill auto-capture frequency threshold / recall size / prune age
+- `RALPH_LINT_MIN_FREQ` / `RALPH_LINT_STALE_DAYS`: Knowledge-lint gap-frequency threshold / stale-skill idle age
 - `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
 
 ### Configuration File
@@ -646,7 +650,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (6 unit harnesses + the native --test) — 121 cases total
+# Run every suite (7 unit harnesses + the native --test) — 134 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
