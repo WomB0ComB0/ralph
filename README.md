@@ -487,7 +487,7 @@ Ralph maintains synchronized artifacts for consistent execution:
 ### 8. Compounding Artifact Layer
 - **Signals**: deduplicated "patterns the loop keeps re-hitting" — one git-diffable JSON per signal under `.ralph/artifacts/signals/`, keyed by a normalized `theme_key`, with frequency, severity, and lifecycle (open → ack → resolved, auto-reopen on regression). A bounded digest is surfaced into the prompt each iteration.
 - **LOG.md**: an append-only cross-run narrative at `.ralph/artifacts/LOG.md`.
-- **Guarded Skills**: when a recurring signal is resolved with a note, Ralph auto-authors a *candidate* skill (a proven resolution). Candidates are never surfaced until you `approve` them; approved skills are then injected ("you fixed this before: …") whenever the matching signal is open again.
+- **Guarded Skills**: when a recurring signal is resolved with a note, Ralph auto-authors a *candidate* skill (a proven resolution). Candidates are never surfaced until you `approve` them; approved skills are then injected ("you fixed this before: …") whenever the matching signal is open again. An approved skill can be **`globalize`d** into a HOME-global store so the proven fix is recalled in *every* repo (mirrors genetic memory; project-local skills take precedence).
 - Manage via the `ralph signal`, `ralph skill`, and `ralph lint` (read-only knowledge-hygiene curator: gaps, orphaned/stale skills, approval backlog, unresolved high-severity) CLIs (see Usage).
 
 ### 9. Durable Execution & Bounded Orchestration
@@ -594,6 +594,8 @@ bd vc log
 ./ralph.sh skill ls
 ./ralph.sh skill approve <theme>     # surface this fix when the matching signal recurs
 ./ralph.sh skill reject <theme>
+./ralph.sh skill globalize <theme>   # promote a proven fix to the cross-repo store (recalled in EVERY project)
+./ralph.sh skill global              # list global (cross-project) skills
 
 # Lint — periodic curator sweep over the knowledge store (read-only)
 ./ralph.sh lint                      # knowledge gaps, orphaned/stale skills, approval backlog, high-severity
@@ -634,6 +636,7 @@ bd vc log
 - `RALPH_SIGNAL_RECALL` / `RALPH_SIGNAL_OPEN_TTL_DAYS`: Signal digest size / prune age for open signals
 - `RALPH_SKILL_MIN_FREQ` / `RALPH_SKILL_RECALL` / `RALPH_SKILL_TTL_DAYS`: Skill auto-capture frequency threshold / recall size / prune age
 - `RALPH_LINT_MIN_FREQ` / `RALPH_LINT_STALE_DAYS`: Knowledge-lint gap-frequency threshold / stale-skill idle age
+- `RALPH_GLOBAL_SKILL_DIR`: Cross-project (HOME-global) skill store (default: `~/.config/ralph/skills`)
 - `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
 
 ### Configuration File
@@ -650,7 +653,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (7 unit harnesses + the native --test) — 134 cases total
+# Run every suite (7 unit harnesses + the native --test) — 149 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

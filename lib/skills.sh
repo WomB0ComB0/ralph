@@ -118,11 +118,13 @@ _skill_autocapture() {
 recall_skills() {
     command_exists jq || return 0
     local limit="${1:-${RALPH_SKILL_RECALL:-5}}"
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=5
     local sdir="${SIGNAL_DIR:-.ralph/artifacts/signals}"
     local kdir="${SKILL_DIR:-.ralph/artifacts/skills}"
-    [[ -d "$sdir" && -d "$kdir" ]] || return 0
+    local gdir="${RALPH_GLOBAL_SKILL_DIR:-${HOME:-}/.config/ralph/skills}"
+    [[ -d "$sdir" ]] || return 0
 
-    local tmpf sf sstatus theme skillfile status sev freq rank
+    local tmpf sf sstatus theme skillfile pst gst src suffix sev freq rank
     tmpf=$(mktemp) || return 0
     for sf in "$sdir"/*.json; do
         [[ -f "$sf" ]] || continue
@@ -130,17 +132,30 @@ recall_skills() {
         [[ "$sstatus" == "open" || "$sstatus" == "ack" ]] || continue
         theme=$(jq -r '.theme_key // ""' "$sf" 2>/dev/null) || continue
         [[ -n "$theme" ]] || continue
+        # Prefer a project-local APPROVED skill; otherwise fall back to a globalized
+        # one (global skills are pre-vetted — only approved skills can be globalized).
         skillfile="$kdir/$theme.json"
-        [[ -f "$skillfile" ]] || continue
-        status=$(jq -r '.status // ""' "$skillfile" 2>/dev/null) || continue
-        [[ "$status" == "approved" ]] || continue
+        src=""; suffix=""
+        if [[ -f "$skillfile" ]]; then
+            # A local skill is authoritative for this repo: surface it only if approved;
+            # a candidate/rejected local skill SUPPRESSES the global fallback (the local
+            # decision — including an explicit reject — must win).
+            pst=$(jq -r '.status // ""' "$skillfile" 2>/dev/null) || pst=""
+            [[ "$pst" == "approved" ]] && src="$skillfile"
+        elif [[ -f "$gdir/$theme.json" ]]; then
+            # No local skill: fall back to a global one, but verify it is itself approved
+            # (don't trust a hand-edited / older-format / since-rejected global file).
+            gst=$(jq -r '.status // ""' "$gdir/$theme.json" 2>/dev/null) || gst=""
+            [[ "$gst" == "approved" ]] && { src="$gdir/$theme.json"; suffix=" (cross-project fix)"; }
+        fi
+        [[ -n "$src" ]] || continue
         # Rank by the matching signal's severity then frequency so the most urgent
         # problem's fix wins the bounded slots (not alphabetical glob order).
         sev=$(jq -r '.severity // "low"' "$sf" 2>/dev/null) || sev=low
         freq=$(jq -r '.frequency // 0' "$sf" 2>/dev/null) || freq=0
         [[ "$freq" =~ ^[0-9]+$ ]] || freq=0
         case "$sev" in high) rank=3 ;; medium) rank=2 ;; *) rank=1 ;; esac
-        printf '%d%06d\t- %s\n' "$rank" "$freq" "$(jq -r '.theme_key + ": " + .resolution' "$skillfile" 2>/dev/null)" >> "$tmpf" || true
+        printf '%d%06d\t- %s%s\n' "$rank" "$freq" "$(jq -r '(.theme_key // "?") + ": " + (.resolution // "(no resolution)")' "$src" 2>/dev/null)" "$suffix" >> "$tmpf" || true
     done
     local lines
     lines=$(sort -rn "$tmpf" 2>/dev/null | head -n "$limit" | cut -f2-)
@@ -198,7 +213,60 @@ prune_skills() {
 }
 
 #######################################
-# CLI dispatch: ralph skill [ls|show|approve|reject|recall]
+# Promote an APPROVED project skill into the HOME-global store so the proven fix can
+# be recalled in ANY repo (mirrors the cross-project genetic-memory pattern). Only
+# approved skills qualify — globalizing is the cross-project trust gate.
+# Arguments: $1 theme_key
+# Returns: echoes the theme on success; non-zero if the skill is missing/unapproved.
+#######################################
+globalize_skill() {
+    command_exists jq || return 1
+    local theme="$1"
+    [[ -n "$theme" ]] || return 1
+    local src="${SKILL_DIR:-.ralph/artifacts/skills}/$theme.json"
+    [[ -f "$src" ]] || return 1
+    local status; status=$(jq -r '.status // ""' "$src" 2>/dev/null) || status=""
+    [[ "$status" == "approved" ]] || return 1
+
+    local gdir="${RALPH_GLOBAL_SKILL_DIR:-${HOME:-}/.config/ralph/skills}"
+    mkdir -p "$gdir" 2>/dev/null || true
+    local now origin tmp pd
+    now=$(_skill_now)
+    # Provenance from PROJECT_DIR (NOT _RALPH_DIR — its basename is always ".ralph").
+    # Resolve to an absolute path so basename yields a real dir name, not "." or "/".
+    pd="${PROJECT_DIR:-$PWD}"
+    origin=$(basename "$(cd "$pd" 2>/dev/null && pwd || printf '%s' "$pd")" 2>/dev/null) || origin=""
+    [[ -n "$origin" && "$origin" != "." && "$origin" != "/" ]] || origin=unknown
+    tmp=$(mktemp "$gdir/.skill.XXXXXX" 2>/dev/null) || tmp=$(mktemp) || return 1
+    if jq --arg now "$now" --arg origin "$origin" \
+          '.scope = "global" | .globalized_at = $now | .origin_project = (.origin_project // $origin)' \
+          "$src" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$gdir/$theme.json" || { rm -f "$tmp"; return 1; }
+    else
+        rm -f "$tmp"; return 1
+    fi
+    printf '%s\n' "$theme"
+}
+
+#######################################
+# Human-readable global (cross-project) skill table (CLI).
+#######################################
+list_global_skills() {
+    command_exists jq || { echo "jq required"; return 0; }
+    local gdir="${RALPH_GLOBAL_SKILL_DIR:-${HOME:-}/.config/ralph/skills}"
+    [[ -d "$gdir" ]] || { echo "No global skills."; return 0; }
+    local f any=0
+    for f in "$gdir"/*.json; do
+        [[ -f "$f" ]] || continue
+        jq -r '"[global] \(.theme_key) — \(.resolution)  (from \(.origin_project // "?"))"' "$f" 2>/dev/null || continue
+        any=1
+    done
+    [[ $any -eq 0 ]] && echo "No global skills."
+    return 0
+}
+
+#######################################
+# CLI dispatch: ralph skill [ls|show|approve|reject|globalize|global|recall]
 #######################################
 handle_skill_command() {
     local cmd="${1:-ls}"; shift 2>/dev/null || true
@@ -207,7 +275,17 @@ handle_skill_command() {
         show|get) skill_get "${1:-}" ;;
         approve)  if [[ -n "${1:-}" ]]; then approve_skill "$1" && echo "Approved skill: $1"; else echo "Usage: ralph skill approve <theme>"; fi ;;
         reject)   if [[ -n "${1:-}" ]]; then reject_skill "$1" && echo "Rejected skill: $1"; else echo "Usage: ralph skill reject <theme>"; fi ;;
+        globalize)
+            if [[ -z "${1:-}" ]]; then
+                echo "Usage: ralph skill globalize <theme>"
+            elif globalize_skill "$1" >/dev/null; then
+                echo "Globalized skill: $1 (now recalled in every repo)"
+            else
+                echo "Cannot globalize '$1' (must be an existing approved skill)"
+            fi
+            ;;
+        global)   list_global_skills ;;
         recall)   recall_skills ;;
-        *)        echo "Usage: ralph skill [ls|show <theme>|approve <theme>|reject <theme>|recall]" ;;
+        *)        echo "Usage: ralph skill [ls|show <theme>|approve <theme>|reject <theme>|globalize <theme>|global|recall]" ;;
     esac
 }

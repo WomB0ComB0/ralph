@@ -77,5 +77,65 @@ eq "still approved" approved "$(jq -r .status "$SKILL_DIR/theme-x.json")"
 echo "== signal_resolve preserves _signal_set rc (bad key -> non-zero) =="
 signal_resolve "no-such-signal-key" "note" >/dev/null 2>&1 && bad "resolve of missing key returned 0" || ok "resolve of missing key returns non-zero"
 
+echo "== global (cross-project) skills =="
+export SIGNAL_DIR="$TMP/g_sig" SKILL_DIR="$TMP/g_sk" RALPH_GLOBAL_SKILL_DIR="$TMP/g_global"
+export PROJECT_DIR="$TMP/myrepo" _RALPH_DIR="$TMP/myrepo/.ralph"   # provenance source for globalize
+rm -rf "$SIGNAL_DIR" "$SKILL_DIR" "$RALPH_GLOBAL_SKILL_DIR"; init_signals; init_skills
+
+# globalize requires an APPROVED skill
+record_skill "cand-x" "p" "candidate res" >/dev/null   # left candidate
+globalize_skill "cand-x" >/dev/null 2>&1 && bad "globalized a candidate" || ok "globalize refuses a non-approved skill"
+[[ ! -f "$RALPH_GLOBAL_SKILL_DIR/cand-x.json" ]] && ok "no global file for a candidate" || bad "candidate leaked to global"
+
+# globalize an approved skill -> copy into the global store with provenance
+record_skill "appr-x" "p" "approved res" >/dev/null; approve_skill "appr-x"
+globalize_skill "appr-x" >/dev/null
+[[ -f "$RALPH_GLOBAL_SKILL_DIR/appr-x.json" ]] && ok "approved skill globalized" || bad "globalize did not write a global file"
+eq "global scope tagged" global "$(jq -r '.scope // ""' "$RALPH_GLOBAL_SKILL_DIR/appr-x.json" 2>/dev/null)"
+eq "origin_project = repo name (not .ralph)" myrepo "$(jq -r '.origin_project // ""' "$RALPH_GLOBAL_SKILL_DIR/appr-x.json" 2>/dev/null)"
+
+# recall surfaces a GLOBAL skill when only the global copy exists (a different repo)
+gk=$(record_signal validation_failure "z" "CROSSREPO problem" "fix")
+record_skill "$gk" "p" "the cross-repo resolution" >/dev/null; approve_skill "$gk"; globalize_skill "$gk" >/dev/null
+rm -f "$SKILL_DIR/$gk.json"   # simulate: only the global copy is present in this repo
+out=$(recall_skills)
+[[ "$out" == *"the cross-repo resolution"* ]] && ok "recall surfaces a global skill for an open signal" || bad "global skill not recalled"
+[[ "$out" == *"cross-project"* ]] && ok "global skill tagged as cross-project" || bad "global skill not tagged"
+
+# a local project skill takes precedence over a global one for the same theme
+pk=$(record_signal runtime_failure "w" "PRECEDENCE problem" "fix")
+record_skill "$pk" "p" "PROJECT resolution" >/dev/null; approve_skill "$pk"; globalize_skill "$pk" >/dev/null
+tmpj=$(mktemp); jq '.resolution="GLOBAL VERSION"' "$RALPH_GLOBAL_SKILL_DIR/$pk.json" > "$tmpj" && mv "$tmpj" "$RALPH_GLOBAL_SKILL_DIR/$pk.json"
+out2=$(recall_skills)
+[[ "$out2" == *"PROJECT resolution"* ]] && ok "project skill wins over global" || bad "project precedence broken"
+[[ "$out2" != *"GLOBAL VERSION"* ]] && ok "global copy not surfaced when a project skill exists" || bad "global leaked despite project skill"
+
+# list_global_skills
+[[ "$(list_global_skills)" == *"appr-x"* ]] && ok "list_global_skills lists globalized skills" || bad "global list missing entry"
+
+# a locally REJECTED skill suppresses the global fallback (local reject must win)
+rj=$(record_signal validation_failure "v" "REJECTLOCAL problem" "fix")
+record_skill "$rj" "p" "local fix" >/dev/null; reject_skill "$rj"
+printf '%s' "$(jq -n --arg t "$rj" '{theme_key:$t,resolution:"GLOBAL OVERRIDE",status:"approved",scope:"global"}')" > "$RALPH_GLOBAL_SKILL_DIR/$rj.json"
+out3=$(recall_skills)
+[[ "$out3" != *"GLOBAL OVERRIDE"* ]] && ok "locally-rejected theme suppresses the global fallback" || bad "rejected local skill leaked the global copy"
+
+# a NON-approved global skill must never surface
+ng=$(record_signal runtime_failure "u" "NONAPPROVEDGLOBAL problem" "fix")
+printf '%s' "$(jq -n --arg t "$ng" '{theme_key:$t,resolution:"UNAPPROVED GLOBAL",status:"candidate",scope:"global"}')" > "$RALPH_GLOBAL_SKILL_DIR/$ng.json"
+out4=$(recall_skills)
+[[ "$out4" != *"UNAPPROVED GLOBAL"* ]] && ok "non-approved global skill is not surfaced" || bad "unapproved global leaked"
+
+# a skill with a NULL/missing resolution must not break recall (jq + on null throws)
+nr=$(record_signal validation_failure "nr" "NULLRES problem" "fix")
+printf '%s' "$(jq -n --arg t "$nr" '{theme_key:$t,resolution:null,status:"approved",scope:"global"}')" > "$RALPH_GLOBAL_SKILL_DIR/$nr.json"
+out5=$(recall_skills)
+[[ "$out5" == *"(no resolution)"* ]] && ok "null-resolution skill shows a placeholder, not a blank/broken line" || bad "null resolution not handled gracefully"
+
+# PROJECT_DIR="." must resolve to a real dir name, not "." or empty
+( export PROJECT_DIR="."; record_skill "dotrepo-x" p r >/dev/null; approve_skill "dotrepo-x"; globalize_skill "dotrepo-x" >/dev/null )
+odot=$(jq -r '.origin_project // ""' "$RALPH_GLOBAL_SKILL_DIR/dotrepo-x.json" 2>/dev/null)
+[[ -n "$odot" && "$odot" != "." && "$odot" != "/" ]] && ok "PROJECT_DIR=. resolves to a real provenance name" || bad "origin is '.'/'/'/'empty (got [$odot])"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
