@@ -549,6 +549,46 @@ run_internal_tests() {
         failed=$((failed+1))
     fi
 
+    # Test Run ID + Self-Tuning (observability / feedback loop)
+    log_info "Testing run id + self-tuning..."
+    local _rid
+    _rid=$(compute_run_id)
+    if [[ "$_rid" =~ ^[0-9]{8}T[0-9]{6}-[0-9]+-[0-9]+$ ]]; then
+        log_success "compute_run_id format ok: $_rid"
+        passed=$((passed+1))
+    else
+        log_error "compute_run_id bad format: $_rid"
+        failed=$((failed+1))
+    fi
+
+    if ! command_exists jq; then
+        log_warning "Skipping self-tuning tests (jq unavailable)"
+    else
+        local _td
+        _td=$(mktemp -d)
+        printf '{"lazy_streak":1}\n{"lazy_streak":2}\n{"lazy_streak":1}\n' > "$_td/stall.json"
+        printf '{"lazy_streak":0}\n{"lazy_streak":0}\n{"lazy_streak":0}\n' > "$_td/prog.json"
+        if [[ "$(_recommend_lazy_threshold "$_td/stall.json")" == "2" \
+              && "$(_recommend_lazy_threshold "$_td/prog.json")" == "3" ]]; then
+            log_success "lazy-threshold recommendation responds to stall rate"
+            passed=$((passed+1))
+        else
+            log_error "lazy-threshold recommendation incorrect"
+            failed=$((failed+1))
+        fi
+        if ( write_tuning "$_td" 3 10 5 >/dev/null 2>&1
+             unset LAZY_THRESHOLD
+             load_tuning "$_td" >/dev/null 2>&1
+             [[ "${LAZY_THRESHOLD:-}" == "3" ]] ); then
+            log_success "tuning persistence round-trips"
+            passed=$((passed+1))
+        else
+            log_error "tuning persistence failed"
+            failed=$((failed+1))
+        fi
+        rm -rf "$_td"
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
@@ -1442,7 +1482,7 @@ update_task() {
     local task_id="$1"
     local status="$2"
     
-    "$BD_BIN" update "$task_id" --status "$status"
+    _bd update "$task_id" --status "$status"
     log_success "Task $task_id updated to $status"
 }
 
@@ -1535,9 +1575,9 @@ handle_swarm_command() {
             local backoff=1
             local max_backoff=60
             
-            while "$BD_BIN" ready --quiet | grep -q "[0-9]"; do
+            while _bd ready --quiet | grep -q "[0-9]"; do
                 local task_id
-                task_id=$("$BD_BIN" ready --pretty | head -n 1 | awk '{print $2}')
+                task_id=$(_bd ready --pretty | head -n 1 | awk '{print $2}')
                 
                 if [[ -z "$task_id" ]]; then
                     log_debug "No ready tasks, waiting ${backoff}s..."

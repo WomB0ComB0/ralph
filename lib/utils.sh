@@ -509,20 +509,34 @@ load_config() {
     PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
     CONTEXT_FILES=()
     
-    # Artifact and State directory
-    readonly _RALPH_DIR="$PROJECT_DIR/.ralph"
+    # Artifact and State directory. Guard the readonly so load_config stays
+    # re-callable (smart_init re-invokes it); a 2nd `readonly` assignment is a
+    # fatal shell error not catchable by set -e / `|| true`.
+    [[ -n "${_RALPH_DIR:-}" ]] || readonly _RALPH_DIR="$PROJECT_DIR/.ralph"
     ARTIFACT_DIR="${ARTIFACT_DIR:-$_RALPH_DIR/artifacts}"
     STATE_DIR="${STATE_DIR:-$_RALPH_DIR/state}"
     mkdir -p "$ARTIFACT_DIR" "$STATE_DIR"
-    
+
+    # Per-run identity for isolated logs + step traces (observability).
+    # STATE_DIR stays STABLE so cross-run state (checkpoint, recovery, tuning,
+    # metrics history) persists; only run-scoped artifacts live under RUN_DIR.
+    # NOTE: the directory itself is created later, only on the iterating path
+    # (see main), so non-iterating modes don't litter empty run dirs.
+    RUN_ID="${RUN_ID:-$(compute_run_id)}"
+    RUN_DIR="${RUN_DIR:-$_RALPH_DIR/runs/$RUN_ID}"
+    export RUN_ID RUN_DIR
+
     PROGRESS_FILE="${PROGRESS_FILE:-$STATE_DIR/progress.log}"
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
     AGENTS_FILE="${AGENTS_FILE:-AGENTS.md}"
-    LOG_FILE="${LOG_FILE:-$STATE_DIR/ralph.log}"
+    LOG_FILE="${LOG_FILE:-$RUN_DIR/ralph.log}"
     METRICS_FILE="${METRICS_FILE:-$STATE_DIR/metrics.json}"
     ARCHIVE_DIR="${ARCHIVE_DIR:-$_RALPH_DIR/archives}"
+
+    # Apply persisted self-tuning (e.g. LAZY_THRESHOLD) from a prior review_run.
+    load_tuning "$STATE_DIR" || true
 
     local config_loaded=false
     
@@ -730,6 +744,94 @@ load_recovery_state() {
 }
 
 #######################################
+# Compute a unique-ish identifier for this run (timestamp + pid).
+# Used to give each run an isolated directory and to attribute metrics.
+# Returns: e.g. 20260628T194501-12345
+#######################################
+compute_run_id() {
+    # date + pid + a random suffix so rapid same-second runs (e.g. --rm sandbox
+    # containers that may reuse low PIDs) don't collide.
+    printf '%s-%s-%s\n' "$(date +%Y%m%dT%H%M%S)" "$$" "${RANDOM}"
+}
+
+#######################################
+# Prune old per-run directories to bound disk growth, keeping the most recent N.
+# Run IDs are timestamp-prefixed, so a reverse name sort is newest-first.
+# Arguments:
+#   $1 - runs directory
+#   $2 - number of runs to keep (default 20)
+#######################################
+prune_old_runs() {
+    local runs_dir="$1"
+    local keep="${2:-20}"
+    [[ -d "$runs_dir" ]] || return 0
+
+    local d count=0
+    while IFS= read -r d; do
+        count=$((count + 1))
+        if [[ $count -gt $keep ]]; then
+            rm -rf "$d" 2>/dev/null || true
+        fi
+    done < <(find "$runs_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+}
+
+#######################################
+# Persist self-tuning parameters derived from a run review.
+# Arguments:
+#   $1 - State directory
+#   $2 - Recommended lazy threshold
+#   $3 - Stall percentage (observed)
+#   $4 - Sample count
+# Returns: 0 on success, 1 otherwise
+#######################################
+write_tuning() {
+    local state_dir="$1"
+    local threshold="${2:-2}"
+    local stall_pct="${3:-0}"
+    local samples="${4:-0}"
+
+    command_exists jq || return 1
+    mkdir -p "$state_dir" 2>/dev/null
+
+    local tuning_file="$state_dir/tuning.json"
+    local tmp
+    tmp=$(mktemp) || return 1
+    if jq -n \
+        --argjson t "${threshold:-2}" \
+        --argjson s "${stall_pct:-0}" \
+        --argjson n "${samples:-0}" \
+        '{lazy_threshold: $t, stall_pct: $s, samples: $n}' > "$tmp" 2>/dev/null \
+        && mv -f "$tmp" "$tuning_file"; then
+        return 0
+    fi
+
+    rm -f "$tmp"
+    return 1
+}
+
+#######################################
+# Load self-tuning overrides written by review_run (sets/exports LAZY_THRESHOLD).
+# Arguments:
+#   $1 - (Optional) state directory; defaults to STATE_DIR
+# Returns: 0 if a tuning value was applied, 1 otherwise
+#######################################
+load_tuning() {
+    local state_dir="${1:-${STATE_DIR:-.ralph/state}}"
+    local tuning_file="$state_dir/tuning.json"
+
+    { [[ -f "$tuning_file" ]] && command_exists jq; } || return 1
+
+    local tuned
+    tuned=$(jq -r '.lazy_threshold // empty' "$tuning_file" 2>/dev/null || echo "")
+    if [[ "$tuned" =~ ^[0-9]+$ ]]; then
+        export LAZY_THRESHOLD="$tuned"
+        log_debug "Loaded tuning: LAZY_THRESHOLD=$LAZY_THRESHOLD"
+        return 0
+    fi
+    return 1
+}
+
+#######################################
 # Scan a file or directory for high-confidence secret patterns.
 # Used to fail closed before loading credentials into a sandbox / committing.
 # Arguments:
@@ -903,6 +1005,8 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--sandbox${_RALPH_COLOR_NC}               Run in Docker sandbox (requires Docker)
     ${_RALPH_COLOR_GREEN}--no-sandbox${_RALPH_COLOR_NC}            Force run without sandbox
     ${_RALPH_COLOR_GREEN}--unattended${_RALPH_COLOR_NC}            Autonomous mode: enable Docker sandbox isolation (recommended for cron)
+    ${_RALPH_COLOR_GREEN}--once${_RALPH_COLOR_NC}                  Run a single iteration then exit (let cron/systemd own cadence; pair with --resume)
+    ${_RALPH_COLOR_GREEN}--review${_RALPH_COLOR_NC}                Analyze metrics history, update self-tuning (tuning.json), and exit
     ${_RALPH_COLOR_GREEN}-h, --help${_RALPH_COLOR_NC}              Show this help message
 
 ${_RALPH_COLOR_YELLOW}Commands:${_RALPH_COLOR_NC}
@@ -1070,6 +1174,14 @@ parse_arguments() {
                 ;;
             --unattended)
                 export UNATTENDED=true
+                shift
+                ;;
+            --once)
+                export RUN_ONCE=true
+                shift
+                ;;
+            --review)
+                export REVIEW_MODE=true
                 shift
                 ;;
             -h|--help)
