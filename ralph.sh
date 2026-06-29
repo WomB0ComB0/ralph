@@ -33,8 +33,10 @@ source "$SCRIPT_DIR/lib/skills.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/lint.sh"
 
-# Check dependencies before running
-check_dependencies || exit 1
+# NOTE: dependency checking is deferred to main() — it runs only on the iterating path
+# (after --tool/config are parsed) so `--help`, `--version`, `--test`, and the read-only
+# signal/skill/lint/swarm/copilot subcommands work on hosts without the full toolchain,
+# and the AI-tool check sees the actual selected tool rather than always defaulting to opencode.
 
 # Run main function
 main "$@"

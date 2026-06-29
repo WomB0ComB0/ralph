@@ -391,11 +391,11 @@ resolve_model_for_tool() {
             local list; list=$(agy models 2>/dev/null) || list=""
             _pick_latest_model "$role" "$list"
             ;;
-        claude|amp)
+        claude)
             case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
             ;;
-        codex)
-            echo ""   # codex self-selects; no `codex models` listing to drive a router
+        amp|codex)
+            echo ""   # no usable --model in our invocation -> they self-select (don't fabricate one)
             ;;
         opencode|*)
             get_model_for_role "$role"
@@ -412,17 +412,20 @@ resolve_model_for_tool() {
 determine_model() {
     local current_role="${RALPH_ROLE:-engineer}"
 
-    # If model explicitly specified via CLI, use it (highest priority)
-    if [[ -n "${SELECTED_MODEL:-}" && "${SELECTED_MODEL_SOURCE:-}" == "CLI" ]]; then
-        log_debug "Using CLI-specified model: $SELECTED_MODEL"
+    # Honor any user-set model (CLI flag, ralph.json, .ralphrc, or SELECTED_MODEL env) —
+    # anything NOT auto-resolved. Auto picks carry source="auto" so they re-resolve each
+    # call (the tool/role may change); user picks persist.
+    if [[ -n "${SELECTED_MODEL:-}" && "${SELECTED_MODEL_SOURCE:-}" != "auto" ]]; then
+        log_debug "Using ${SELECTED_MODEL_SOURCE:-user}-specified model: $SELECTED_MODEL"
         return 0
     fi
 
     local auto_selected_model
     auto_selected_model=$(resolve_model_for_tool "${TOOL:-opencode}" "$current_role")
-    
+
     SELECTED_MODEL="$auto_selected_model"
-    export SELECTED_MODEL
+    SELECTED_MODEL_SOURCE="auto"
+    export SELECTED_MODEL SELECTED_MODEL_SOURCE
     
     log_debug "Model routed for role '$current_role': $SELECTED_MODEL"
     return 0
@@ -762,6 +765,7 @@ _build_ai_cmd() {
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
             # first it swallowed --dangerously-skip-permissions and ignored the prompt.)
             _AI_CMD=(agy --dangerously-skip-permissions)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # agy accepts the human-readable `agy models` name
             local _agytmo; _agytmo=$(_ai_timeout_secs)
             [[ "$_agytmo" -gt 0 ]] && _AI_CMD+=(--print-timeout "${_agytmo}s")   # agy's default is only 5m
             _AI_CMD+=(--print) ;;   # --print MUST stay last (string-valued: takes the prompt)
@@ -1326,8 +1330,13 @@ main() {
         exit $?
     fi
 
-    # Validate configuration
+    # Validate configuration FIRST (fail fast on bad config before any install work).
     validate_config || exit 1
+
+    # Dependency check runs HERE (not in ralph.sh) so it only gates the iterating path:
+    # --help/--version/--init/--setup/--test/--review and the read-only subcommands have
+    # already exited above, and TOOL is now known so the correct AI tool is verified.
+    check_dependencies || exit 1
 
     # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
     # Skip when already inside the sandbox container (we are the isolation boundary).

@@ -32,10 +32,11 @@ eng=$(_pick_latest_model engineer "$AGY")
 [[ "$(_pick_latest_model planner "$AGY")" != *"GPT-OSS"* ]] && ok "120B param count does not masquerade as a version" || bad "GPT-OSS leaked"
 eq "empty list -> empty" "" "$(_pick_latest_model engineer "")"
 
-echo "== resolve_model_for_tool: claude/amp use latest-resolving aliases =="
+echo "== resolve_model_for_tool: claude uses latest-resolving aliases; amp self-selects =="
 eq "claude planner -> opus alias"    opus   "$(resolve_model_for_tool claude planner)"
 eq "claude engineer -> sonnet alias" sonnet "$(resolve_model_for_tool claude engineer)"
-eq "amp tester -> sonnet alias"      sonnet "$(resolve_model_for_tool amp tester)"
+# amp has NO --model flag, so resolving one is wasted + records a model amp never used.
+eq "amp -> empty (no --model flag)"  ""     "$(resolve_model_for_tool amp tester)"
 [[ "$(resolve_model_for_tool claude planner)" != *"2024"* && "$(resolve_model_for_tool claude planner)" != *"3-5"* ]] && ok "claude no longer pins a stale dated model" || bad "claude still pinned"
 
 echo "== resolve_model_for_tool agy: live-lists via 'agy models' (stubbed) =="
@@ -48,6 +49,18 @@ echo "== param-count tokens (NNb) must not masquerade as a version =="
 PARAM='claude-sonnet-4-5
 qwen-72b-coder-2.5'
 eq "72b param count does not beat sonnet-4-5" "claude-sonnet-4-5" "$(_pick_latest_model engineer "$PARAM")"
+
+echo "== determine_model: honor user-set SELECTED_MODEL (CLI/config/env), re-resolve auto =="
+# config/env-provided model (source != CLI) must NOT be silently overwritten
+SELECTED_MODEL="pinned-cfg"; export SELECTED_MODEL_SOURCE="config"; TOOL=claude
+determine_model >/dev/null 2>&1; eq "config model honored" "pinned-cfg" "$SELECTED_MODEL"
+# env var with NO source set is still a user choice -> honored
+unset SELECTED_MODEL_SOURCE; SELECTED_MODEL="pinned-env"; TOOL=claude
+determine_model >/dev/null 2>&1; eq "env model honored (unset source)" "pinned-env" "$SELECTED_MODEL"
+# auto-resolved models carry source=auto and DO re-resolve next call
+export SELECTED_MODEL_SOURCE="auto"; SELECTED_MODEL="stale-auto"; TOOL=claude
+determine_model >/dev/null 2>&1; [[ "$SELECTED_MODEL" != "stale-auto" ]] && ok "auto source re-resolves" || bad "auto model not re-resolved"
+unset SELECTED_MODEL SELECTED_MODEL_SOURCE
 
 echo "== validate_model_availability accepts claude/amp tier aliases =="
 validate_model_availability "sonnet" claude >/dev/null 2>&1 && ok "sonnet alias validates for claude" || bad "sonnet alias rejected by validator"

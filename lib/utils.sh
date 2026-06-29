@@ -377,7 +377,7 @@ check_dependencies() {
     fi
     
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        log_info "Missing dependencies: ${missing_tools[*]}"
+        log_info "Missing dependencies: $(IFS=' '; echo "${missing_tools[*]}")"
         log_info "Attempting non-interactive auto-installation..."
         
         local pkg_mgr
@@ -408,11 +408,20 @@ check_dependencies() {
                 done
                 
                 if [[ ${#packages[@]} -gt 0 ]]; then
-                    log_info "Requesting sudo for system packages: ${packages[*]}"
+                    local pkg_list; pkg_list=$(IFS=' '; echo "${packages[*]}")
+                    log_info "Requesting sudo for system packages: $pkg_list"
                     if ! sudo -n pacman -S --noconfirm "${packages[@]}" >/dev/null 2>&1; then
-                        log_warning "Non-interactive sudo failed. Trying interactive sudo..."
-                        if ! sudo pacman -S --noconfirm "${packages[@]}"; then
-                            log_error "Failed to install system packages. Please install manually: sudo pacman -S ${packages[*]}"
+                        # Only fall back to an interactive sudo prompt when we actually have a
+                        # tty and aren't in non-interactive/unattended mode; otherwise it blocks
+                        # (terminal) or errors noisily (cron/CI) on the password prompt.
+                        if [[ -t 0 && "${NON_INTERACTIVE:-false}" != "true" && "${UNATTENDED:-false}" != "true" ]]; then
+                            log_warning "Non-interactive sudo failed. Trying interactive sudo..."
+                            if ! sudo pacman -S --noconfirm "${packages[@]}"; then
+                                log_error "Failed to install system packages. Please install manually: sudo pacman -S $pkg_list"
+                                return 1
+                            fi
+                        else
+                            log_error "Cannot install packages non-interactively. Install manually: sudo pacman -S $pkg_list"
                             return 1
                         fi
                     fi
@@ -619,7 +628,8 @@ load_config() {
             
             # Apply settings if not already set
             [[ -z "${TOOL:-}" && -n "$json_tool" ]] && TOOL="$json_tool"
-            [[ -z "${SELECTED_MODEL:-}" && -n "$json_model" ]] && SELECTED_MODEL="$json_model"
+            # Tag the source so determine_model honors it instead of auto-overwriting it.
+            [[ -z "${SELECTED_MODEL:-}" && -n "$json_model" ]] && { SELECTED_MODEL="$json_model"; SELECTED_MODEL_SOURCE="config"; }
             [[ -z "${MAX_ITERATIONS:-}" && -n "$json_max_iter" ]] && MAX_ITERATIONS="$json_max_iter"
             [[ -z "${SANDBOX_MODE:-}" && -n "$json_sandbox" ]] && SANDBOX_MODE="$json_sandbox"
             [[ -z "${VERBOSE:-}" && "$json_verbose" == "true" ]] && VERBOSE=true
