@@ -1145,6 +1145,11 @@ main() {
         handle_skill_command "$@"
         exit $?
     fi
+    if [[ "${1:-}" == "lint" ]]; then
+        shift
+        handle_lint_command "$@"
+        exit $?
+    fi
 
     parse_arguments "$@"
     
@@ -2121,6 +2126,12 @@ review_run() {
     # every --once tick, and a read-only review must not mutate the run narrative.)
     prune_signals || true
     declare -F prune_skills >/dev/null && prune_skills || true
+
+    # Curator pass: surface a one-line knowledge-hygiene summary (gaps / orphaned /
+    # stale / approval-backlog / high-severity). Read-only; full report via `ralph lint`.
+    if declare -F lint_knowledge >/dev/null; then
+        log_info "$(lint_knowledge quiet)"
+    fi
 
     if [[ ! -f "$metrics" ]]; then
         log_info "No metrics history to review yet"

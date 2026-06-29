@@ -29,6 +29,9 @@ source "$SCRIPT_DIR/lib/signals.sh"
 # shellcheck source=lib/skills.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/skills.sh"
+# shellcheck source=lib/lint.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/lint.sh"
 
 # Check dependencies before running
 check_dependencies || exit 1

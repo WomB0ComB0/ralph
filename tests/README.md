@@ -20,7 +20,8 @@ working tree.
 | `test_signals.sh` | Signal + LOG.md compounding: `theme_key` normalization/dedup, lifecycle (open/ack/resolved, regressed-reopen), bounded recall, prune (31) |
 | `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture from resolved signals, ranked recall, synthetic-note rejection (18) |
 | `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
-| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 16 cases) |
+| `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (12) |
+| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 17 cases) |
 
 ## Writing tests
 
