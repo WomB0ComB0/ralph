@@ -412,9 +412,9 @@ check_dependencies() {
                     log_info "Requesting sudo for system packages: $pkg_list"
                     if ! sudo -n pacman -S --noconfirm "${packages[@]}" >/dev/null 2>&1; then
                         # Only fall back to an interactive sudo prompt when we actually have a
-                        # tty and aren't in unattended mode; otherwise it blocks (terminal) or
-                        # errors noisily (cron/CI) on the password prompt.
-                        if [[ -t 0 && "${NON_INTERACTIVE:-false}" != "true" ]]; then
+                        # tty and aren't in non-interactive/unattended mode; otherwise it blocks
+                        # (terminal) or errors noisily (cron/CI) on the password prompt.
+                        if [[ -t 0 && "${NON_INTERACTIVE:-false}" != "true" && "${UNATTENDED:-false}" != "true" ]]; then
                             log_warning "Non-interactive sudo failed. Trying interactive sudo..."
                             if ! sudo pacman -S --noconfirm "${packages[@]}"; then
                                 log_error "Failed to install system packages. Please install manually: sudo pacman -S $pkg_list"

@@ -1330,13 +1330,13 @@ main() {
         exit $?
     fi
 
+    # Validate configuration FIRST (fail fast on bad config before any install work).
+    validate_config || exit 1
+
     # Dependency check runs HERE (not in ralph.sh) so it only gates the iterating path:
     # --help/--version/--init/--setup/--test/--review and the read-only subcommands have
     # already exited above, and TOOL is now known so the correct AI tool is verified.
     check_dependencies || exit 1
-
-    # Validate configuration
-    validate_config || exit 1
 
     # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
     # Skip when already inside the sandbox container (we are the isolation boundary).
