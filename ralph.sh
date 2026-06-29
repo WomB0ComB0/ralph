@@ -23,6 +23,9 @@ source "$SCRIPT_DIR/lib/engine.sh"
 # shellcheck source=lib/tools.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/tools.sh"
+# shellcheck source=lib/signals.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/signals.sh"
 
 # Check dependencies before running
 check_dependencies || exit 1

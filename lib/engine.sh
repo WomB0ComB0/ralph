@@ -901,6 +901,10 @@ execute_iteration() {
     swarm_events=$(consume_events)
     user_provided_context+="${swarm_events:-}"
 
+    # Surface the durable compounding layer: recurring signals + recent LOG narrative.
+    user_provided_context+="$(recall_signals)"
+    user_provided_context+="$(recall_log)"
+
     # Detect available opencode skills
     local available_skills=""
     if [[ -d "$HOME/.config/opencode/skills" ]]; then
@@ -926,6 +930,7 @@ execute_iteration() {
     elif [[ -n "${PREVIOUS_LOG_HASH:-}" ]] && [[ "$current_log_signature" == "$PREVIOUS_LOG_HASH" ]]; then
         # Detect infinite loop
         reflection_instruction=$(generate_loop_instruction "$PREVIOUS_LOG_HASH" "$current_log_signature")
+        record_signal loop_detected "repeating the same actions across iterations" "repeating-same-actions" "change approach; the last action produced no new state" "loop_detection" >/dev/null 2>&1 || true
     fi
     
     # Generate complete system prompt
@@ -964,6 +969,7 @@ execute_iteration() {
             '{iteration: $iteration, tool: $tool, model: $model}' 2>/dev/null || echo '{}')
         emit_event "iteration_failed" "$fail_payload"
         store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $SELECTED_MODEL)."
+        record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $SELECTED_MODEL did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
         return 2
     fi
     
@@ -994,6 +1000,17 @@ execute_iteration() {
     if [[ -n "$artifact_errors" || -n "$runtime_errors" ]]; then
         export NEXT_INSTRUCTION="${artifact_errors}${runtime_errors}"
         log_warning "Validation or runtime errors detected, will correct in next iteration"
+        SIGNAL_CLEAN_STREAK=0
+        # Record recurring failures as deduped signals (frequency climbs on repeat).
+        [[ -n "$artifact_errors" ]] && record_signal validation_failure "artifact validation failed" "$artifact_errors" "fix the flagged artifacts before continuing" "validation" >/dev/null 2>&1 || true
+        [[ -n "$runtime_errors" ]] && record_signal runtime_failure "runtime verification failed" "$runtime_errors" "fix the runtime/build error before closing the task" "verify_runtime" >/dev/null 2>&1 || true
+    else
+        # Both clean: count toward auto-resolving the failure families.
+        SIGNAL_CLEAN_STREAK=$(( ${SIGNAL_CLEAN_STREAK:-0} + 1 ))
+        if [[ "${RALPH_SIGNAL_AUTORESOLVE:-1}" == "1" && ${SIGNAL_CLEAN_STREAK:-0} -ge ${RALPH_SIGNAL_CLEAN_STREAK:-2} ]]; then
+            _signal_auto_resolve_family validation_failure || true
+            _signal_auto_resolve_family runtime_failure || true
+        fi
     fi
     
     # Analyze project changes
@@ -1004,9 +1021,15 @@ execute_iteration() {
     if [[ "$project_hash_before" == "$project_hash_after" ]]; then
         LAZY_STREAK=$(( ${LAZY_STREAK:-0} + 1 ))
         log_warning "No files modified this iteration (streak: $LAZY_STREAK)"
+        if [[ ${LAZY_STREAK:-0} -ge ${LAZY_THRESHOLD:-2} ]]; then
+            record_signal lazy_streak "no files modified for $LAZY_STREAK consecutive iterations" "no-files-modified" "make a concrete code change or output the completion promise" "lazy_detection" >/dev/null 2>&1 || true
+        fi
     else
         log_success "Files modified - agent is making progress"
         LAZY_STREAK=0
+        # Real progress clears stall/loop patterns.
+        _signal_auto_resolve_family lazy_streak >/dev/null 2>&1 || true
+        _signal_auto_resolve_family loop_detected >/dev/null 2>&1 || true
     fi
     
     # Log metrics (JSONL). Build with jq so special chars in TOOL/SELECTED_MODEL
@@ -1051,6 +1074,14 @@ execute_iteration() {
     
     # Commit task state (Dolt Time-Travel)
     commit_task_state "Ralph Iteration $iteration: $est_tokens tokens"
+
+    # Narrate this iteration into the global LOG (linked to its step traces).
+    local _changed="no"; [[ "$project_hash_before" != "$project_hash_after" ]] && _changed="yes"
+    RALPH_LOG_ITER="$iteration" log_append \
+        "iteration $iteration ($TOOL/$SELECTED_MODEL)" \
+        "[prompt](${RUN_DIR:-.}/steps/iter-$iteration/prompt.txt) · [output](${RUN_DIR:-.}/steps/iter-$iteration/output.txt)" \
+        "" \
+        "changed=$_changed · lazy_streak=${LAZY_STREAK:-0} · tokens=$est_tokens" || true
     
     # Check for completion signal
     if echo "$output" | grep -qF "<promise>COMPLETE</promise>"; then
@@ -1099,7 +1130,15 @@ main() {
         log_error "Failed to load configuration"
         exit 1
     }
-    
+
+    # Signal CLI (dispatched after load_config so SIGNAL_DIR/LOG_MD exist, before
+    # parse_arguments which wouldn't recognize the subcommand).
+    if [[ "${1:-}" == "signal" ]]; then
+        shift
+        handle_signal_command "$@"
+        exit $?
+    fi
+
     parse_arguments "$@"
     
     # Handle Smart Init
@@ -1199,6 +1238,7 @@ main() {
     archive_previous_run
     track_current_branch
     init_memory
+    init_signals
     init_task_engine
     
     if [[ ! -f "$PROGRESS_FILE" ]]; then
@@ -1213,6 +1253,7 @@ main() {
     
     # Initialize state variables (fresh-run defaults)
     export LAZY_STREAK=0
+    export SIGNAL_CLEAN_STREAK=0
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
     local CONSECUTIVE_FAILURES=0
@@ -1365,6 +1406,10 @@ validate_artifacts() {
     drift=$(verify_architecture)
     if [[ -n "$drift" ]]; then
         instructions+=$'\n'"$drift"
+        # `declare -F` guard keeps validate_artifacts safe when signals.sh isn't sourced.
+        declare -F record_signal >/dev/null && record_signal arch_drift "architecture diagram drifted from the code" "$drift" "reconcile code with ralph_architecture.md" "verify_architecture" >/dev/null 2>&1 || true
+    else
+        declare -F _signal_auto_resolve_family >/dev/null && _signal_auto_resolve_family arch_drift >/dev/null 2>&1 || true
     fi
     
     # Log summary
@@ -2062,6 +2107,12 @@ review_run() {
         log_warning "jq unavailable; skipping run review"
         return 0
     fi
+
+    # Compounding-layer housekeeping: archive stale/resolved signals. (No LOG write
+    # here — review_run is also the body of `ralph --review` and runs every --once
+    # tick, and a read-only review must not mutate the run narrative.)
+    prune_signals || true
+
     if [[ ! -f "$metrics" ]]; then
         log_info "No metrics history to review yet"
         return 0

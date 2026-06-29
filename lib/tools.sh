@@ -625,6 +625,29 @@ run_internal_tests() {
         failed=$((failed+1))
     fi
 
+    # Test Signal compounding layer (dedup + recall)
+    log_info "Testing signal layer..."
+    if ! command_exists jq; then
+        log_warning "Skipping signal tests (jq unavailable)"
+    else
+        local _sd
+        _sd=$(mktemp -d)
+        if ( export SIGNAL_DIR="$_sd/signals" SIGNAL_ARCHIVE_DIR="$_sd/signals/.archive" \
+                    LOG_MD="$_sd/LOG.md" RUN_ID="testrun-1-2"
+             k=$(record_signal validation_failure "cargo fails" "error[E0001] at src/main.rs:1" "fix")
+             record_signal validation_failure "cargo fails" "error[E0001] at src/main.rs:9" "fix" >/dev/null
+             [[ "$(jq -r .frequency "$SIGNAL_DIR/$k.json")" == "2" ]] \
+               && [[ "$(find "$SIGNAL_DIR" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')" == "1" ]] \
+               && recall_signals | grep -q '<signals>' ); then
+            log_success "signals dedup by theme + recall digest works"
+            passed=$((passed+1))
+        else
+            log_error "signal layer failed"
+            failed=$((failed+1))
+        fi
+        rm -rf "$_sd"
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
