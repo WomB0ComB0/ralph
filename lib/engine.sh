@@ -717,6 +717,15 @@ EOF
 # Arguments: $1 tool, $2 model
 # Returns: 0 and sets _AI_CMD/_AI_STDIN; 1 for an unknown tool.
 #######################################
+# Per-call wall-clock budget in seconds for an AI tool (a hard backstop — no tool has a
+# reliable built-in timeout and run_ai_tool otherwise waits on the PID forever).
+# RALPH_TOOL_TIMEOUT overrides; 0 disables; non-numeric falls back to the default.
+_ai_timeout_secs() {
+    local d="${RALPH_TOOL_TIMEOUT:-1800}"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=1800
+    echo "$d"
+}
+
 _build_ai_cmd() {
     local tool="$1" model="$2"
     _AI_CMD=(); _AI_STDIN=0
@@ -731,7 +740,10 @@ _build_ai_cmd() {
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
             # first it swallowed --dangerously-skip-permissions and ignored the prompt.)
-            _AI_CMD=(agy --dangerously-skip-permissions --print) ;;
+            _AI_CMD=(agy --dangerously-skip-permissions)
+            local _agytmo; _agytmo=$(_ai_timeout_secs)
+            [[ "$_agytmo" -gt 0 ]] && _AI_CMD+=(--print-timeout "${_agytmo}s")   # agy's default is only 5m
+            _AI_CMD+=(--print) ;;   # --print MUST stay last (string-valued: takes the prompt)
         *)
             return 1 ;;
     esac
@@ -769,12 +781,24 @@ run_ai_tool() {
         log_error "Unknown tool: $tool"
         return 1
     fi
+    # Hard wall-clock backstop so a hung tool can't block the loop forever (exit 124 on
+    # timeout, which the retry/circuit-breaker then treats as a failed iteration).
+    local -a tmo=(); local _dur; _dur=$(_ai_timeout_secs)
+    if [[ "$_dur" -gt 0 ]]; then
+        if command_exists timeout; then
+            tmo=(timeout --kill-after=15 "$_dur")
+        elif [[ -z "${_RALPH_TIMEOUT_WARNED:-}" ]]; then
+            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but 'timeout' is not installed; AI tool calls have no wall-clock backstop (install coreutils)"
+            _RALPH_TIMEOUT_WARNED=1
+        fi
+    fi
+
     # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
     # leak into the parent shell or later iterations.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
     else
-        ( _apply_tool_env "$tool"; "${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
     
@@ -789,9 +813,9 @@ run_ai_tool() {
         sleep 0.1
     done
     
-    # Get exit code
-    wait $pid
-    exit_code=$?
+    # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
+    exit_code=0
+    wait "$pid" || exit_code=$?
     
     # Clear line and show final success/fail
     printf "\r\033[K"

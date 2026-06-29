@@ -41,6 +41,20 @@ eq "amp uses stdin" 1 "$_AI_STDIN"
 echo "== unknown tool rejected =="
 _build_ai_cmd bogus "m"; eq "unknown tool rc=1" 1 "$?"
 
+echo "== _ai_timeout_secs: per-call wall-clock budget =="
+unset RALPH_TOOL_TIMEOUT;     eq "default 1800s"          1800 "$(_ai_timeout_secs)"
+export RALPH_TOOL_TIMEOUT=600; eq "custom respected"       600  "$(_ai_timeout_secs)"
+export RALPH_TOOL_TIMEOUT=abc; eq "non-numeric -> default" 1800 "$(_ai_timeout_secs)"
+export RALPH_TOOL_TIMEOUT=0;   eq "0 disables (returns 0)" 0    "$(_ai_timeout_secs)"
+
+echo "== agy gets --print-timeout (still --print last) when timeout enabled =="
+export RALPH_TOOL_TIMEOUT=600; _build_ai_cmd agy "m"
+[[ "${_AI_CMD[*]}" == *"--print-timeout 600s"* ]] && ok "agy --print-timeout wired" || bad "agy no --print-timeout: ${_AI_CMD[*]}"
+eq "agy --print still last (timeout before it)" "--print" "${_AI_CMD[$((${#_AI_CMD[@]}-1))]}"
+export RALPH_TOOL_TIMEOUT=0; _build_ai_cmd agy "m"
+[[ "${_AI_CMD[*]}" != *"--print-timeout"* ]] && ok "timeout disabled -> no --print-timeout" || bad "print-timeout present when disabled"
+unset RALPH_TOOL_TIMEOUT
+
 echo "== per-tool env is subshell-scoped (must NOT leak to the parent) =="
 unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"
