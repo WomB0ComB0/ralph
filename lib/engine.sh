@@ -584,8 +584,11 @@ _timeout_bin() {
 }
 
 _build_ai_cmd() {
-    local tool="$1" model="$2"
+    local tool="$1" model="$2" resume="${3:-0}"
     _AI_CMD=(); _AI_STDIN=0
+    # Opt-in session continuity: on iterations after the first, continue the tool's prior
+    # conversation. Only claude/opencode/agy expose a SAFE headless resume (--continue);
+    # codex resume needs the no-sandbox bypass and amp isn't verified, so both run fresh.
     case "$tool" in
         amp)
             _AI_CMD=(amp --dangerously-allow-all); _AI_STDIN=1 ;;
@@ -594,18 +597,21 @@ _build_ai_cmd() {
             # was redundant. Add resilience: fall back to a cheaper tier on overload (skip if it
             # equals the primary) and an opt-in per-call spend cap.
             _AI_CMD=(claude -p --dangerously-skip-permissions --model "$model")
+            [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _fb="${RALPH_CLAUDE_FALLBACK_MODEL:-sonnet}"
             [[ -n "$_fb" && "$_fb" != "$model" ]] && _AI_CMD+=(--fallback-model "$_fb")
             [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
             ;;
         opencode)
-            _AI_CMD=(opencode run --model "$model") ;;
+            _AI_CMD=(opencode run --model "$model")
+            [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
         agy)
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
             # first it swallowed --dangerously-skip-permissions and ignored the prompt.)
             _AI_CMD=(agy --dangerously-skip-permissions)
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # agy accepts the human-readable `agy models` name
+            [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _agytmo; _agytmo=$(_ai_timeout_secs)
             [[ "$_agytmo" -gt 0 ]] && _AI_CMD+=(--print-timeout "${_agytmo}s")   # agy's default is only 5m
             _AI_CMD+=(--print) ;;   # --print MUST stay last (string-valued: takes the prompt)
@@ -638,6 +644,16 @@ _apply_tool_env() {
     esac
 }
 
+# Whether THIS call should resume the tool's prior conversation: opt-in (RALPH_RESUME_SESSION)
+# AND a session already established this run AND a tool with a safe headless resume.
+# NOTE: the established flag is per-process, so resume only spans iterations of ONE run
+# (not across separate `--once`/cron ticks). It's tool-agnostic, which is safe only because
+# TOOL is fixed for a run — revisit if per-iteration tool switching is ever added.
+_should_resume() {
+    [[ "${RALPH_RESUME_SESSION:-0}" == "1" && "${_RALPH_SESSION_ESTABLISHED:-0}" == "1" ]] || return 1
+    case "$1" in claude|opencode|agy) return 0 ;; *) return 1 ;; esac
+}
+
 run_ai_tool() {
     local tool="$1"
     local model="$2"
@@ -650,8 +666,21 @@ run_ai_tool() {
     
     local pid i exit_code
 
+    # Opt-in session continuity: resume the tool's prior conversation once a session has
+    # been established (after the first SUCCESSFUL call this run). Default off.
+    local resume=0
+    if _should_resume "$tool"; then
+        resume=1
+    elif [[ "${RALPH_RESUME_SESSION:-0}" == "1" && "${_RALPH_SESSION_ESTABLISHED:-0}" == "1" ]]; then
+        # A session exists but this tool has no safe headless resume — run fresh, note once.
+        if [[ -z "${_RALPH_RESUME_UNSUPPORTED_WARNED:-}" ]]; then
+            log_warning "RALPH_RESUME_SESSION: '$tool' has no safe headless resume; each iteration runs fresh"
+            export _RALPH_RESUME_UNSUPPORTED_WARNED=1
+        fi
+    fi
+
     # Build the argv (testable; no execution), then launch in the background.
-    if ! _build_ai_cmd "$tool" "$model"; then
+    if ! _build_ai_cmd "$tool" "$model" "$resume"; then
         log_error "Unknown tool: $tool"
         return 1
     fi
@@ -698,10 +727,12 @@ run_ai_tool() {
     
     if [[ $exit_code -eq 0 ]]; then
         log_success "Iteration $iteration: AI Response Received"
+        # A successful call establishes a session the next iteration can --continue.
+        [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] && export _RALPH_SESSION_ESTABLISHED=1
     else
         log_error "Iteration $iteration: AI Tool Failed (Exit $exit_code)"
     fi
-    
+
     return $exit_code
 }
 

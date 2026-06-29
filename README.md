@@ -710,6 +710,7 @@ bd vc log
 - `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout`/`gtimeout` so a hung tool can't block it (default 1800; `0` removes Ralph's wrapper — note agy still self-terminates at its built-in ~5m `--print` default; set a large value to extend instead)
 - `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY`: Retry count / base backoff (s) for a failed tool call (default 3 / 5)
 - `MAX_CONSECUTIVE_FAILURES`: Consecutive failed iterations before the loop aborts (default 3)
+- `RALPH_RESUME_SESSION`: Opt-in (`1`) session continuity — resume the tool's conversation across iterations (same as `--continue-session`). Supported on claude/opencode/agy (`--continue`); codex/amp run fresh each iteration. Default off (each iteration is freshly grounded). Spans iterations of a single run only — **not** across separate `--once`/cron ticks (the session-established flag is per-process)
 - `RALPH_MAX_BUDGET_USD`: Opt-in per-call spend cap for `--tool claude` (`--max-budget-usd`); unset = no cap
 - `RALPH_CLAUDE_FALLBACK_MODEL`: Tier claude falls back to on overload (default `sonnet`; skipped when it equals the primary). For `--tool claude`, do NOT set `ANTHROPIC_BASE_URL` unless you want a local/proxy endpoint — claude uses your normal Anthropic auth by default
 - `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
@@ -741,7 +742,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 236 cases total
+# Run every suite (9 unit harnesses + the native --test) — 250 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

@@ -41,6 +41,28 @@ unset ANTHROPIC_BASE_URL
 v=$( _apply_tool_env claude; echo "${ANTHROPIC_BASE_URL:-UNSET}" )
 [[ "$v" == "UNSET" ]] && ok "claude uses real Anthropic auth (no forced localhost:11434)" || bad "forced ANTHROPIC_BASE_URL=$v"
 
+echo "== session resume (opt-in, 3rd arg): --continue for claude/opencode/agy; codex/amp degrade =="
+_build_ai_cmd claude m 1; [[ "${_AI_CMD[*]}" == *"--continue"* ]] && ok "claude resume -> --continue" || bad "claude resume no --continue: ${_AI_CMD[*]}"
+_build_ai_cmd claude m 0; [[ "${_AI_CMD[*]}" != *"--continue"* ]] && ok "claude no-resume -> no --continue" || bad "claude --continue without resume"
+_build_ai_cmd claude m;   [[ "${_AI_CMD[*]}" != *"--continue"* ]] && ok "claude default (2-arg) -> no --continue" || bad "claude --continue by default"
+_build_ai_cmd opencode m 1; [[ "${_AI_CMD[*]}" == *"--continue"* ]] && ok "opencode resume -> --continue" || bad "opencode resume no --continue: ${_AI_CMD[*]}"
+_build_ai_cmd agy m 1; [[ "${_AI_CMD[*]}" == *"--continue"* ]] && ok "agy resume -> --continue" || bad "agy resume no --continue: ${_AI_CMD[*]}"
+eq "agy --print still last with resume" "--print" "${_AI_CMD[$((${#_AI_CMD[@]}-1))]}"
+_build_ai_cmd codex "" 1; [[ "${_AI_CMD[*]}" != *"--continue"* && "${_AI_CMD[*]}" != *" resume"* ]] && ok "codex ignores resume (keeps sandboxed fresh exec)" || bad "codex tried to resume: ${_AI_CMD[*]}"
+_build_ai_cmd amp m 1; [[ "${_AI_CMD[*]}" != *"--continue"* ]] && ok "amp ignores resume (no safe headless resume)" || bad "amp tried --continue"
+
+echo "== _should_resume: gated on opt-in + established session + a supported tool =="
+unset RALPH_RESUME_SESSION _RALPH_SESSION_ESTABLISHED
+_should_resume claude && bad "resumed with continuity disabled" || ok "no resume when RALPH_RESUME_SESSION unset"
+export RALPH_RESUME_SESSION=1
+_should_resume claude && bad "resumed before any session established" || ok "no resume before the first call establishes a session"
+export _RALPH_SESSION_ESTABLISHED=1
+_should_resume claude && ok "resumes when opt-in + established (claude)" || bad "did not resume when it should"
+_should_resume opencode && ok "resumes (opencode)" || bad "opencode did not resume"
+_should_resume codex && bad "codex resumed (unsupported)" || ok "codex never resumes (keeps sandboxed fresh exec)"
+_should_resume amp && bad "amp resumed (unsupported)" || ok "amp never resumes"
+unset RALPH_RESUME_SESSION _RALPH_SESSION_ESTABLISHED
+
 echo "== opencode: run --model, prompt-as-arg =="
 _build_ai_cmd opencode "prov/mod"
 [[ "${_AI_CMD[*]}" == "opencode run --model prov/mod" ]] && ok "opencode run --model" || bad "opencode cmd: ${_AI_CMD[*]}"
