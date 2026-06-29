@@ -360,12 +360,13 @@ _pick_latest_model() {
         *)               kws="sonnet|flash|code|coder|pro" ;;   # engineer (default)
     esac
     printf '%s\n' "$list" | awk -v kws="$kws" '
+        BEGIN{ n=split(tolower(kws),a,"|") }   # split the constant keyword list once, not per line
         { line=$0
           if (line ~ /^[[:space:]]*$/) next
           vs=line; gsub(/[0-9]+[bB]/,"",vs)   # drop param-count tokens (70B/120b) so they cannot pose as a version
           ver=0; if (match(vs, /[0-9]+(\.[0-9]+)?/)) ver=substr(vs,RSTART,RLENGTH)+0
-          n=split(kws,a,"|"); rank=0; ll=tolower(line)
-          for(i=1;i<=n;i++){ kw=tolower(a[i]); if(ll ~ ("(^|[^a-z])" kw "([^a-z]|$)")){ r=n-i+1; if(r>rank) rank=r } }
+          rank=0; ll=tolower(line)
+          for(i=1;i<=n;i++){ if(ll ~ ("(^|[^a-z])" a[i] "([^a-z]|$)")){ r=n-i+1; if(r>rank) rank=r } }
           if(rank==0) next
           score=ver*1000+rank
           if(best=="" || score>bestscore){ bestscore=score; best=line } }
