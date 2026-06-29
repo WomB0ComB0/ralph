@@ -155,7 +155,7 @@ recall_skills() {
         freq=$(jq -r '.frequency // 0' "$sf" 2>/dev/null) || freq=0
         [[ "$freq" =~ ^[0-9]+$ ]] || freq=0
         case "$sev" in high) rank=3 ;; medium) rank=2 ;; *) rank=1 ;; esac
-        printf '%d%06d\t- %s%s\n' "$rank" "$freq" "$(jq -r '.theme_key + ": " + .resolution' "$src" 2>/dev/null)" "$suffix" >> "$tmpf" || true
+        printf '%d%06d\t- %s%s\n' "$rank" "$freq" "$(jq -r '(.theme_key // "?") + ": " + (.resolution // "(no resolution)")' "$src" 2>/dev/null)" "$suffix" >> "$tmpf" || true
     done
     local lines
     lines=$(sort -rn "$tmpf" 2>/dev/null | head -n "$limit" | cut -f2-)
@@ -230,10 +230,13 @@ globalize_skill() {
 
     local gdir="${RALPH_GLOBAL_SKILL_DIR:-${HOME:-}/.config/ralph/skills}"
     mkdir -p "$gdir" 2>/dev/null || true
-    local now origin tmp
+    local now origin tmp pd
     now=$(_skill_now)
-    origin=$(basename "${PROJECT_DIR:-$PWD}" 2>/dev/null) || origin=unknown  # _RALPH_DIR basename is always ".ralph"
-    [[ -n "$origin" ]] || origin=unknown
+    # Provenance from PROJECT_DIR (NOT _RALPH_DIR — its basename is always ".ralph").
+    # Resolve to an absolute path so basename yields a real dir name, not "." or "/".
+    pd="${PROJECT_DIR:-$PWD}"
+    origin=$(basename "$(cd "$pd" 2>/dev/null && pwd || printf '%s' "$pd")" 2>/dev/null) || origin=""
+    [[ -n "$origin" && "$origin" != "." && "$origin" != "/" ]] || origin=unknown
     tmp=$(mktemp "$gdir/.skill.XXXXXX" 2>/dev/null) || tmp=$(mktemp) || return 1
     if jq --arg now "$now" --arg origin "$origin" \
           '.scope = "global" | .globalized_at = $now | .origin_project = (.origin_project // $origin)' \

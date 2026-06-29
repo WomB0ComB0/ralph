@@ -126,5 +126,16 @@ printf '%s' "$(jq -n --arg t "$ng" '{theme_key:$t,resolution:"UNAPPROVED GLOBAL"
 out4=$(recall_skills)
 [[ "$out4" != *"UNAPPROVED GLOBAL"* ]] && ok "non-approved global skill is not surfaced" || bad "unapproved global leaked"
 
+# a skill with a NULL/missing resolution must not break recall (jq + on null throws)
+nr=$(record_signal validation_failure "nr" "NULLRES problem" "fix")
+printf '%s' "$(jq -n --arg t "$nr" '{theme_key:$t,resolution:null,status:"approved",scope:"global"}')" > "$RALPH_GLOBAL_SKILL_DIR/$nr.json"
+out5=$(recall_skills)
+[[ "$out5" == *"(no resolution)"* ]] && ok "null-resolution skill shows a placeholder, not a blank/broken line" || bad "null resolution not handled gracefully"
+
+# PROJECT_DIR="." must resolve to a real dir name, not "." or empty
+( export PROJECT_DIR="."; record_skill "dotrepo-x" p r >/dev/null; approve_skill "dotrepo-x"; globalize_skill "dotrepo-x" >/dev/null )
+odot=$(jq -r '.origin_project // ""' "$RALPH_GLOBAL_SKILL_DIR/dotrepo-x.json" 2>/dev/null)
+[[ -n "$odot" && "$odot" != "." && "$odot" != "/" ]] && ok "PROJECT_DIR=. resolves to a real provenance name" || bad "origin is '.'/'/'/'empty (got [$odot])"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
