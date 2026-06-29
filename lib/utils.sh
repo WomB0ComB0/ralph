@@ -584,6 +584,8 @@ load_config() {
     SIGNAL_DIR="${SIGNAL_DIR:-$ARTIFACT_DIR/signals}"
     SIGNAL_ARCHIVE_DIR="${SIGNAL_ARCHIVE_DIR:-$SIGNAL_DIR/.archive}"
     LOG_MD="${LOG_MD:-$ARTIFACT_DIR/LOG.md}"
+    # Guarded skill-authoring: proven resolutions derived from resolved signals.
+    SKILL_DIR="${SKILL_DIR:-$ARTIFACT_DIR/skills}"
 
     # Apply persisted self-tuning (e.g. LAZY_THRESHOLD) from a prior review_run.
     load_tuning "$STATE_DIR" || true

@@ -648,6 +648,29 @@ run_internal_tests() {
         rm -rf "$_sd"
     fi
 
+    # Test Skill-authoring layer (guard + recall)
+    log_info "Testing skill layer..."
+    if ! command_exists jq || ! declare -F record_skill >/dev/null; then
+        log_warning "Skipping skill tests (jq or skills.sh unavailable)"
+    else
+        local _kd
+        _kd=$(mktemp -d)
+        if ( export SIGNAL_DIR="$_kd/signals" SKILL_DIR="$_kd/skills" RUN_ID="t-1-1"
+             s=$(record_signal validation_failure "x fails" "error[E1] at a.rs:1" "fix")
+             record_skill "$s" "x fails" "do the fix" "tag" >/dev/null
+             # candidate must NOT surface
+             [[ -z "$(recall_skills)" ]] || exit 1
+             approve_skill "$s"
+             recall_skills | grep -q '<skills>' ); then
+            log_success "skills guard candidates and surface approved matches"
+            passed=$((passed+1))
+        else
+            log_error "skill layer failed"
+            failed=$((failed+1))
+        fi
+        rm -rf "$_kd"
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"

@@ -223,7 +223,15 @@ _signal_set() {
 }
 
 signal_ack()     { _signal_set "$1" '.status = "ack"'; }
-signal_resolve() { _signal_set "$1" --arg n "$(_signal_now)" --arg note "${2:-}" '.status = "resolved" | .resolved_at = $n | .note = $note'; }
+signal_resolve() {
+    local rc=0
+    _signal_set "$1" --arg n "$(_signal_now)" --arg note "${2:-}" '.status = "resolved" | .resolved_at = $n | .note = $note' || rc=$?
+    # Auto-author a candidate skill from the resolution (guarded: only if skills.sh
+    # is sourced; only for recurring signals resolved with a note). Non-fatal — must
+    # not clobber the resolve status (return $rc preserves _signal_set's rc).
+    declare -F _skill_autocapture >/dev/null && _skill_autocapture "$1" "${2:-}" || true
+    return $rc
+}
 signal_reopen()  { _signal_set "$1" '.status = "open" | .regressed = true | .resolved_at = null'; }
 
 # Print one signal's JSON.
@@ -389,10 +397,10 @@ handle_signal_command() {
     local cmd="${1:-ls}"; shift 2>/dev/null || true
     case "$cmd" in
         ls|list)  list_signals "${1:-}" ;;
-        show|get) signal_get "$1" ;;
-        ack)      signal_ack "$1" && echo "Acked $1" ;;
-        resolve)  signal_resolve "$1" "${2:-}" && echo "Resolved $1" ;;
-        reopen)   signal_reopen "$1" && echo "Reopened $1" ;;
+        show|get) signal_get "${1:-}" ;;
+        ack)      if [[ -n "${1:-}" ]]; then signal_ack "$1" && echo "Acked $1"; else echo "Usage: ralph signal ack <key>"; fi ;;
+        resolve)  if [[ -n "${1:-}" ]]; then signal_resolve "$1" "${2:-}" && echo "Resolved $1"; else echo "Usage: ralph signal resolve <key> [note]"; fi ;;
+        reopen)   if [[ -n "${1:-}" ]]; then signal_reopen "$1" && echo "Reopened $1"; else echo "Usage: ralph signal reopen <key>"; fi ;;
         recall)   recall_signals ;;
         *)        echo "Usage: ralph signal [ls|show <key>|ack <key>|resolve <key> [note]|reopen <key>|recall]" ;;
     esac
