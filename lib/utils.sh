@@ -580,6 +580,11 @@ load_config() {
     METRICS_FILE="${METRICS_FILE:-$STATE_DIR/metrics.json}"
     ARCHIVE_DIR="${ARCHIVE_DIR:-$_RALPH_DIR/archives}"
 
+    # Signal + LOG compounding layer (durable "patterns the loop keeps re-hitting").
+    SIGNAL_DIR="${SIGNAL_DIR:-$ARTIFACT_DIR/signals}"
+    SIGNAL_ARCHIVE_DIR="${SIGNAL_ARCHIVE_DIR:-$SIGNAL_DIR/.archive}"
+    LOG_MD="${LOG_MD:-$ARTIFACT_DIR/LOG.md}"
+
     # Apply persisted self-tuning (e.g. LAZY_THRESHOLD) from a prior review_run.
     load_tuning "$STATE_DIR" || true
 
