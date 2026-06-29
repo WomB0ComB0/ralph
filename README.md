@@ -700,13 +700,16 @@ bd vc log
 ## Configuration
 
 ### Environment Variables
-- `TOOL`: AI tool to use (opencode, amp, claude)
-- `SELECTED_MODEL`: Specific model to use
+- `TOOL`: AI tool to use (opencode, claude, amp, agy, codex)
+- `RALPH_ROLE`: Role driving model routing — `planner` | `engineer` (default) | `tester` | `thinker`
+- `SELECTED_MODEL`: Specific model to pin (honored from CLI `--model`, `ralph.json`, `.ralphrc`, or this env var; otherwise auto-selected per tool+role)
 - `MAX_ITERATIONS`: Maximum iterations (default: 10)
 - `LOG_FILE`: Path to log file (default: ralph.log)
 - `VERBOSE`: Enable debug logging (true/false)
-- `RALPH_UNATTENDED`: Never pause for interactive input (same as `--unattended`)
-- `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout` so a hung tool can't block it (default 1800; `0` disables; also sets agy's `--print-timeout`)
+- `RALPH_UNATTENDED`: Autonomous mode (same as `--unattended`) — prefers the Docker sandbox for isolation and suppresses interactive prompts (e.g. sudo). For interactive pausing between iterations use `-i/--interactive`
+- `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout`/`gtimeout` so a hung tool can't block it (default 1800; `0` removes Ralph's wrapper — note agy still self-terminates at its built-in ~5m `--print` default; set a large value to extend instead)
+- `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY`: Retry count / base backoff (s) for a failed tool call (default 3 / 5)
+- `MAX_CONSECUTIVE_FAILURES`: Consecutive failed iterations before the loop aborts (default 3)
 - `RALPH_MAX_BUDGET_USD`: Opt-in per-call spend cap for `--tool claude` (`--max-budget-usd`); unset = no cap
 - `RALPH_CLAUDE_FALLBACK_MODEL`: Tier claude falls back to on overload (default `sonnet`; skipped when it equals the primary). For `--tool claude`, do NOT set `ANTHROPIC_BASE_URL` unless you want a local/proxy endpoint — claude uses your normal Anthropic auth by default
 - `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
@@ -721,20 +724,24 @@ bd vc log
 - `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
 
 ### Configuration File
-Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
+Ralph supports `ralph.json` (JSON) or `.ralphrc` (shell) for persistent settings.
+Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
+
+`ralph.json` keys: `tool`, `model`, `maxIterations`, `sandbox`, `verbose`:
 
 ```json
 {
   "tool": "opencode",
-  "max_iterations": 15,
-  "interactive": false,
+  "model": "",
+  "maxIterations": 15,
+  "sandbox": false,
   "verbose": true
 }
 ```
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 233 cases total
+# Run every suite (9 unit harnesses + the native --test) — 236 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

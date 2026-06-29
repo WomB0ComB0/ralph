@@ -663,7 +663,11 @@ load_config() {
     if ! $config_loaded; then
         log_debug "No configuration files found, using defaults"
     fi
-    
+
+    # Map documented env vars onto internal flags so RALPH_UNATTENDED=true behaves like
+    # --unattended (the CLI flag handler also sets UNATTENDED).
+    [[ "${RALPH_UNATTENDED:-}" == "true" ]] && export UNATTENDED=true
+
     return 0
 }
 
@@ -1065,6 +1069,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
                               (default: ./gitdiff-exclude, then ~/.config/git/gitdiff-exclude)
     ${_RALPH_COLOR_GREEN}--no-archive${_RALPH_COLOR_NC}            Skip archiving previous runs
     ${_RALPH_COLOR_GREEN}--verbose${_RALPH_COLOR_NC}               Enable verbose/debug output
+    ${_RALPH_COLOR_GREEN}-v, --version${_RALPH_COLOR_NC}            Print version (git describe) and exit
     ${_RALPH_COLOR_GREEN}-i, --interactive${_RALPH_COLOR_NC}        Pause for user input between iterations
     ${_RALPH_COLOR_GREEN}--resume${_RALPH_COLOR_NC}                Resume from last checkpoint
     ${_RALPH_COLOR_GREEN}--diff-context${_RALPH_COLOR_NC}          Include recent git diffs in context
@@ -1077,6 +1082,9 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}-h, --help${_RALPH_COLOR_NC}              Show this help message
 
 ${_RALPH_COLOR_YELLOW}Commands:${_RALPH_COLOR_NC}
+    ${_RALPH_COLOR_GREEN}signal [SUBCOMMAND]${_RALPH_COLOR_NC}     Inspect recurring problems (ls, show, prune)
+    ${_RALPH_COLOR_GREEN}skill [SUBCOMMAND]${_RALPH_COLOR_NC}      Inspect proven resolutions (ls, show, global)
+    ${_RALPH_COLOR_GREEN}lint${_RALPH_COLOR_NC}                    Knowledge-base health check (gaps / orphaned / stale)
     ${_RALPH_COLOR_GREEN}swarm [SUBCOMMAND]${_RALPH_COLOR_NC}      Multi-agent orchestration (spawn, msg, list, task)
     ${_RALPH_COLOR_GREEN}copilot [SUBCOMMAND]${_RALPH_COLOR_NC}    GitHub Copilot integration (agent, explain, auth)
 
@@ -1248,6 +1256,10 @@ parse_arguments() {
             --unattended)
                 export UNATTENDED=true
                 shift
+                ;;
+            -v|--version)
+                echo "ralph $(git -C "${SCRIPT_DIR:-.}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+                exit 0
                 ;;
             --once)
                 export RUN_ONCE=true

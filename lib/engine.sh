@@ -1267,8 +1267,7 @@ main() {
     # Check for swarm command
     if [[ "${1:-}" == "swarm" ]]; then
         shift
-        # shellcheck source=./lib/swarm.sh
-        # (Already sourced in ralph.sh)
+        # handle_swarm_command lives in lib/tools.sh (sourced by ralph.sh) — there is no lib/swarm.sh.
         handle_swarm_command "$@"
         exit $?
     fi
