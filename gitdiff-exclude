@@ -1,0 +1,49 @@
+# Ralph gitdiff-exclude — paths filtered OUT of the git diff shown to the agent.
+#
+# IMPORTANT: these lines become git PATHSPEC excludes (`:(exclude)<pattern>`), which
+# drop TRACKED files too — not just untracked build artifacts. So this is intentionally
+# minimal: only high-noise paths that are almost never source you'd want the agent to
+# review. This is NOT a .gitignore.
+#
+# Do NOT add ambiguous source/output directory names here (lib/ bin/ build/ dist/ out/
+# target/ vendor/ obj/ gen/): they are real, tracked source in many projects (e.g. this
+# repo's own source lives in lib/), and excluding them would hide the agent's changes.
+# A comprehensive multi-language ignore list belongs in .gitignore, not here.
+
+# Vendored dependency trees (large, machine-fetched, not authored in-repo)
+node_modules/
+.pnp.*
+vendor/bundle/
+.venv/
+.bundle/
+
+# Machine-generated lockfiles (huge, low signal in a diff)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+Cargo.lock
+poetry.lock
+composer.lock
+Gemfile.lock
+
+# VCS internals and Ralph's own runtime state
+.git/
+.ralph/
+.beads/
+
+# Caches and compiled bytecode
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.gradle/
+.turbo/
+
+# Minified output, source maps, logs, snapshots
+*.min.js
+*.min.css
+*.map
+*.log
+*.snap

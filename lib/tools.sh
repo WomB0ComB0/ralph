@@ -120,12 +120,21 @@ compute_project_hash() {
         mtime=$(git -C "$project_dir" log -1 --format="%ct" 2>/dev/null || date +%s)
         printf '%s\n%s\n' "$project_dir" "$mtime" > "$cache_meta"
     else
-        # Fallback to find with exclusions
-        # Use global excludes if defined, otherwise empty
-        local exclude_dirs=("${DEFAULT_HASH_EXCLUDES[@]}")
-        
+        # Fallback to find with exclusions. Build the prune-expression from the
+        # configurable exclude names (defaults + RALPH_HASH_EXCLUDES + .ralph/excludes).
+        local _ex_names=() _prune=() _n _find_prune=()
+        mapfile -t _ex_names < <(hash_exclude_names)
+        for _n in "${_ex_names[@]+"${_ex_names[@]}"}"; do
+            [[ ${#_prune[@]} -gt 0 ]] && _prune+=(-o)
+            _prune+=(-name "$_n")
+        done
+        # Only add the prune group when non-empty; `find ... \( \)` is a syntax error.
+        if [[ ${#_prune[@]} -gt 0 ]]; then
+            _find_prune=( -type d \( "${_prune[@]}" \) -prune -o )
+        fi
+
         hash=$(
-            find "$project_dir" -type d \( "${exclude_dirs[@]}" \) -prune -o -type f -print0 2>/dev/null | \
+            find "$project_dir" "${_find_prune[@]+"${_find_prune[@]}"}" -type f -print0 2>/dev/null | \
             sort -z | \
             xargs -0 "$MD5_COMMAND" 2>/dev/null | \
             "$MD5_COMMAND" 2>/dev/null | \
@@ -589,6 +598,33 @@ run_internal_tests() {
         rm -rf "$_td"
     fi
 
+    # Test Configurable Excludes (better defaults + file/env override)
+    log_info "Testing configurable excludes..."
+    local _hx
+    _hx=$(hash_exclude_names "/nonexistent/excludes")
+    if grep -qxF node_modules <<<"$_hx" && grep -qxF __pycache__ <<<"$_hx" \
+       && ! grep -qxF Downloads <<<"$_hx" && ! grep -qxF Pictures <<<"$_hx"; then
+        log_success "hash excludes: project defaults present, home-dir cruft removed"
+        passed=$((passed+1))
+    else
+        log_error "hash excludes defaults incorrect"
+        failed=$((failed+1))
+    fi
+    if [[ "$(RALPH_HASH_EXCLUDES="zz_extra" hash_exclude_names "/nonexistent" | grep -cxF zz_extra)" == "1" ]]; then
+        log_success "hash excludes: env override extends the list"
+        passed=$((passed+1))
+    else
+        log_error "hash excludes env override failed"
+        failed=$((failed+1))
+    fi
+    if ( export GITDIFF_EXCLUDE="/x/y"; [[ "$(resolve_gitdiff_exclude /tmp)" == "/x/y" ]] ); then
+        log_success "resolve_gitdiff_exclude honors explicit path"
+        passed=$((passed+1))
+    else
+        log_error "resolve_gitdiff_exclude precedence failed"
+        failed=$((failed+1))
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"
@@ -925,6 +961,21 @@ run_in_sandbox() {
     
     # Allow specific environment variables to pass through (whitelist approach)
     local safe_env_vars=("LOG_LEVEL" "VERBOSE" "DEBUG" "RALPH_MODE")
+    # Extend the pass-through allowlist via RALPH_SANDBOX_ALLOW_ENV (space/comma separated).
+    if [[ -n "${RALPH_SANDBOX_ALLOW_ENV:-}" ]]; then
+        local _extra_env=() _ev
+        IFS=$' \t\n,' read -r -a _extra_env <<< "$RALPH_SANDBOX_ALLOW_ENV" || true
+        for _ev in "${_extra_env[@]+"${_extra_env[@]}"}"; do
+            # Valid identifier name only, and never loader/path-hijack vars, so an
+            # extended allowlist can't reintroduce LD_PRELOAD/PATH-style names.
+            if [[ "$_ev" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+               && ! [[ "$_ev" =~ ^(PATH|IFS|ENV|BASH_ENV|SHELLOPTS|LD_.*|DYLD_.*)$ ]]; then
+                safe_env_vars+=("$_ev")
+            else
+                log_warning "Ignoring unsafe sandbox env var name: $_ev"
+            fi
+        done
+    fi
     for var in "${safe_env_vars[@]}"; do
         if [[ -n "${!var:-}" ]]; then
             # Validate value to prevent command injection
