@@ -1987,42 +1987,6 @@ run_mini_bench() {
 # Wraps 'ast-grep' for robust code transformations
 #######################################
 
-#######################################
-# Semantic Search and Replace
-# Arguments:
-#   $1 - Pattern (ast-grep syntax)
-#   $2 - Replacement (ast-grep syntax)
-#   $3 - Language (rust, py, go, ts, etc.)
-#   $4 - Path
-#######################################
-semantic_replace() {
-    local pattern="$1"
-    local replacement="$2"
-    local lang="$3"
-    local path="$4"
-    
-    if ! command_exists sg; then
-        log_error "ast-grep (sg) is not available."
-        return 1
-    fi
-    
-    log_info "Performing semantic replacement in $path..."
-    sg rewrite --pattern "$pattern" --rewrite "$replacement" --lang "$lang" "$path"
-}
-
-#######################################
-# Scan for code smells using AST
-# Arguments:
-#   $1 - Rule Name
-#   $2 - Path
-#######################################
-semantic_scan() {
-    local rule="$1"
-    local path="$2"
-    
-    if ! command_exists sg; then return 1; fi
-    sg scan --rule "$rule" "$path"
-}
 
 #######################################
 # Vision Library for Ralph
