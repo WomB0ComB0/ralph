@@ -655,7 +655,7 @@ run_internal_tests() {
     else
         local _kd
         _kd=$(mktemp -d)
-        if ( export SIGNAL_DIR="$_kd/signals" SKILL_DIR="$_kd/skills" RUN_ID="t-1-1"
+        if ( export SIGNAL_DIR="$_kd/signals" SKILL_DIR="$_kd/skills" RALPH_GLOBAL_SKILL_DIR="$_kd/global" RUN_ID="t-1-1"
              s=$(record_signal validation_failure "x fails" "error[E1] at a.rs:1" "fix")
              record_skill "$s" "x fails" "do the fix" "tag" >/dev/null
              # candidate must NOT surface
