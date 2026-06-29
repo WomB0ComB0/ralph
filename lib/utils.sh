@@ -278,7 +278,7 @@ create_temp_file() {
 # Ensure common local bin directories are in PATH
 #######################################
 ensure_local_paths() {
-    local common_paths=("$HOME/go/bin" "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin")
+    local common_paths=("${HOME:-}/go/bin" "${HOME:-}/.local/bin" "${HOME:-}/.bun/bin" "${HOME:-}/.cargo/bin")
     
     for p in "${common_paths[@]}"; do
         if [[ -d "$p" ]] && [[ ":$PATH:" != *":$p:"* ]]; then

@@ -199,7 +199,7 @@ record_signal() {
                 domain: "", observation: $obs, evidence: $ev, possible_causes: $causes,
                 suggested_action: $act, sources: $src, tags: $tags, frequency: 1,
                 first_seen: $now, last_seen: $now, first_run: $run, last_run: $run,
-                runs: [$run], resolved_at: null, note: "", regressed: false}' \
+                runs: [$run], resolved_at: null, note: "", regressed: false, related: []}' \
               > "$tmp" 2>/dev/null; then
             mv -f "$tmp" "$file"
         fi
@@ -262,7 +262,56 @@ _signal_auto_resolve_family() {
 }
 
 #######################################
-# Surface a bounded digest of open/regressed signals into the prompt.
+# Curator pass: link signals that CO-OCCUR (share >=1 run id) via a bounded,
+# bidirectional `.related` list, so recall can surface clusters of problems that tend
+# to appear together. The graph is derived from each signal's runs[] in a single jq
+# pass (no hot-path cost in record_signal). Read-only except for the .related field;
+# best-effort (never aborts the caller). Honors RALPH_SIGNAL_RELATED_MAX (default 8).
+#######################################
+link_related_signals() {
+    command_exists jq || return 0
+    local dir="${SIGNAL_DIR:-.ralph/artifacts/signals}"
+    [[ -d "$dir" ]] || return 0
+    local max="${RALPH_SIGNAL_RELATED_MAX:-8}"; [[ "$max" =~ ^[0-9]+$ ]] || max=8
+
+    # Sanitize per-file FIRST (one corrupt JSON must not abort the whole slurp, matching
+    # recall_signals' corrupt-resilience), then compute the graph in a single jq pass.
+    # related(X) = other signals whose runs[] intersect X's runs[]  ( A ∩ B == A - (A - B) ).
+    local tmpin f pairs
+    tmpin=$(mktemp) || return 0
+    for f in "$dir"/*.json; do
+        [[ -f "$f" ]] || continue
+        jq -c '{theme: (.theme_key // ""), runs: (.runs // [])} | select(.theme != "")' "$f" 2>/dev/null >> "$tmpin" || true
+    done
+    pairs=$(jq -rs '
+        [ .[] ] as $s
+        | $s[] as $x
+        | [ $s[] | select(.theme != $x.theme) | select(((.runs) - ((.runs) - ($x.runs))) | length > 0) | .theme ] as $rel
+        | "\($x.theme)\t\($rel | unique | join(","))"
+    ' "$tmpin" 2>/dev/null) || { rm -f "$tmpin"; return 0; }
+    rm -f "$tmpin"
+    [[ -n "$pairs" ]] || return 0
+
+    local theme rel file reljson tmp
+    while IFS=$'\t' read -r theme rel; do
+        [[ -n "$theme" ]] || continue
+        file="$dir/$theme.json"
+        [[ -f "$file" ]] || continue
+        reljson=$(printf '%s' "$rel" | jq -R 'split(",") | map(select(length > 0))' 2>/dev/null) || reljson="[]"
+        [[ -n "$reljson" ]] || reljson='[]'   # empty rel -> clear .related, don't leave it stale
+        tmp=$(mktemp "$dir/.sig.XXXXXX" 2>/dev/null) || continue
+        if jq --argjson r "$reljson" --argjson max "$max" '.related = ($r[0:$max])' "$file" > "$tmp" 2>/dev/null; then
+            mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+        else
+            rm -f "$tmp"
+        fi
+    done <<< "$pairs"
+    return 0
+}
+
+#######################################
+# Surface a bounded digest of open/regressed signals (with related clusters) into
+# the prompt.
 # Arguments: [$1 limit]
 #######################################
 recall_signals() {
@@ -279,12 +328,13 @@ recall_signals() {
         # Read each file in isolation: one corrupt JSON must not blank the digest.
         jq -c 'select(.status == "open" or .status == "ack")
             | {k: .theme_key, sev: .severity, f: .frequency, reg: .regressed,
-               ls: .last_seen, obs: .observation, act: .suggested_action}' "$f" 2>/dev/null >> "$tmpf" || true
+               ls: .last_seen, obs: .observation, act: .suggested_action, rel: (.related // [])}' "$f" 2>/dev/null >> "$tmpf" || true
     done
     lines=$(jq -rs --argjson limit "$limit" 'def sevrank: {"high":3,"medium":2,"low":1}[.sev] // 0;
             sort_by([(if .reg then 1 else 0 end), sevrank, .f, .ls]) | reverse
             | .[0:$limit]
-            | .[] | "- [\(.sev) x\(.f)\(if .reg then " REGRESSED" else "" end)] \(.k): \(.obs) -> \(.act)"' "$tmpf" 2>/dev/null)
+            | .[] | "- [\(.sev) x\(.f)\(if .reg then " REGRESSED" else "" end)] \(.k): \(.obs) -> \(.act)"
+              + (if ((.rel // []) | length) > 0 then " (related: " + ((.rel) | join(", ")) + ")" else "" end)' "$tmpf" 2>/dev/null)
     rm -f "$tmpf"
     [[ -z "$lines" ]] && return 0
     printf '\n<signals>\nRecurring patterns this loop keeps hitting (act on these or resolve them):\n%s\n</signals>\n' "$lines"

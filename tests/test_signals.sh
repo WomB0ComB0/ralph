@@ -109,5 +109,41 @@ printf 'NOT JSON {{{\n' > "$SIGNAL_DIR/corrupt.json"
 out=$(recall_signals)
 [[ "$out" == *"good one"* ]] && ok "corrupt file does not blank the digest" || bad "digest blanked by corrupt file"
 
+echo "== related: co-occurrence links (gap #3) =="
+rm -rf "$SIGNAL_DIR"; unset RALPH_NOW; init_signals
+a=$(RUN_ID=run-X record_signal validation_failure "fa" "RELATED alpha problem" "fix")
+b=$(RUN_ID=run-X record_signal runtime_failure  "fb" "RELATED bravo problem" "fix")
+c=$(RUN_ID=run-Y record_signal lazy_streak      "fc" "RELATED charlie problem" "fix")
+eq "new signal starts with related: []" "[]" "$(jq -c '.related' "$SIGNAL_DIR/$a.json" 2>/dev/null)"
+link_related_signals
+[[ "$(jq -r '.related[]?' "$SIGNAL_DIR/$a.json" 2>/dev/null)" == *"$b"* ]] && ok "A linked to B (shared run)" || bad "A not linked to B"
+[[ "$(jq -r '.related[]?' "$SIGNAL_DIR/$b.json" 2>/dev/null)" == *"$a"* ]] && ok "B linked to A (bidirectional)" || bad "B not linked to A"
+[[ "$(jq -r '.related[]?' "$SIGNAL_DIR/$a.json" 2>/dev/null)" == *"$c"* ]] && bad "A wrongly linked to C (different run)" || ok "A not linked to C (no shared run)"
+out=$(recall_signals)
+[[ "$out" == *"related:"* ]] && ok "recall_signals surfaces related links" || bad "recall missing related"
+
+echo "== related: a corrupt signal file must not disable the whole pass =="
+rm -rf "$SIGNAL_DIR"; init_signals
+p=$(RUN_ID=run-K record_signal validation_failure "fp" "PAIR one problem" "fix")
+q=$(RUN_ID=run-K record_signal runtime_failure  "fq" "PAIR two problem" "fix")
+printf 'NOT JSON {{{\n' > "$SIGNAL_DIR/corrupt.json"
+link_related_signals
+[[ "$(jq -r '.related[]?' "$SIGNAL_DIR/$p.json" 2>/dev/null)" == *"$q"* ]] && ok "corrupt file does not disable co-occurrence linking" || bad "corrupt file blanked the related pass"
+
+echo "== related: a no-longer-co-occurring signal gets .related cleared (no stale) =="
+rm -rf "$SIGNAL_DIR"; init_signals
+s1=$(RUN_ID=run-S1 record_signal validation_failure "fs" "SOLO problem here" "fix")
+tmpj=$(mktemp); jq '.related=["stale-theme-xyz"]' "$SIGNAL_DIR/$s1.json" > "$tmpj" && mv "$tmpj" "$SIGNAL_DIR/$s1.json"
+link_related_signals
+eq "stale related cleared to []" "[]" "$(jq -c '.related' "$SIGNAL_DIR/$s1.json" 2>/dev/null)"
+
+echo "== related: bounded by RALPH_SIGNAL_RELATED_MAX =="
+rm -rf "$SIGNAL_DIR"; init_signals
+for w in alpha bravo charlie delta echo; do RUN_ID=run-Z record_signal validation_failure "m" "MANY problem $w" "fix" >/dev/null; done
+RALPH_SIGNAL_RELATED_MAX=2 link_related_signals
+one=$(find "$SIGNAL_DIR" -maxdepth 1 -name '*.json' | head -1)
+n=$(jq -r '.related | length' "$one" 2>/dev/null)
+[[ "$n" -le 2 ]] && ok "related bounded by RALPH_SIGNAL_RELATED_MAX (got $n)" || bad "related not bounded (got $n)"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
