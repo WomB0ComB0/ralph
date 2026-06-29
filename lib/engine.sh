@@ -815,11 +815,13 @@ run_ai_tool() {
     fi
 
     # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
-    # leak into the parent shell or later iterations.
+    # leak into the parent shell or later iterations. stderr (tool diagnostics) goes to the
+    # log only; stdout (the actual answer) goes to BOTH log and output_file, so the captured
+    # result + per-step trace are clean for emptiness/observability.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     else
-        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" 2>&1 | tee -a "$log_file" > "$output_file") &
+        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
     

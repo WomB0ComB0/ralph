@@ -82,5 +82,15 @@ unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"
 ( _apply_tool_env claude ); [[ -z "${ANTHROPIC_BASE_URL:-}" ]] && ok "claude ANTHROPIC_BASE_URL does not leak" || bad "ANTHROPIC_BASE_URL leaked to parent"
 
+echo "== capture: stderr -> log only; stdout (the answer) -> output_file =="
+cdir=$(mktemp -d); lf="$cdir/log"; of="$cdir/out"
+# exact redirection run_ai_tool uses: 2>>log | tee -a log > out
+( bash -c 'echo ANSWER; echo DIAG >&2' 2>>"$lf" | tee -a "$lf" > "$of" )
+eq "output_file holds only stdout (clean answer)" "ANSWER" "$(cat "$of")"
+grep -q DIAG "$lf" && ok "stderr captured in the log" || bad "stderr missing from log"
+grep -q DIAG "$of" && bad "stderr leaked into output_file" || ok "stderr NOT in output_file"
+# guard against regressing to 2>&1 in run_ai_tool
+grep -q '2>&1 | tee -a "\$log_file"' "$R/lib/engine.sh" && bad "run_ai_tool still merges stderr (2>&1) into output" || ok "run_ai_tool separates stderr from the result file"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
