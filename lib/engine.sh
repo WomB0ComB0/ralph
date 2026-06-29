@@ -901,9 +901,11 @@ execute_iteration() {
     swarm_events=$(consume_events)
     user_provided_context+="${swarm_events:-}"
 
-    # Surface the durable compounding layer: recurring signals + recent LOG narrative.
+    # Surface the durable compounding layer: recurring signals + recent LOG narrative,
+    # plus proven resolutions (approved skills) for problems currently open.
     user_provided_context+="$(recall_signals)"
     user_provided_context+="$(recall_log)"
+    declare -F recall_skills >/dev/null && user_provided_context+="$(recall_skills)" || true
 
     # Detect available opencode skills
     local available_skills=""
@@ -1131,11 +1133,16 @@ main() {
         exit 1
     }
 
-    # Signal CLI (dispatched after load_config so SIGNAL_DIR/LOG_MD exist, before
-    # parse_arguments which wouldn't recognize the subcommand).
+    # Signal/skill CLIs (dispatched after load_config so SIGNAL_DIR/SKILL_DIR exist,
+    # before parse_arguments which wouldn't recognize the subcommand).
     if [[ "${1:-}" == "signal" ]]; then
         shift
         handle_signal_command "$@"
+        exit $?
+    fi
+    if [[ "${1:-}" == "skill" ]]; then
+        shift
+        handle_skill_command "$@"
         exit $?
     fi
 
@@ -1239,6 +1246,7 @@ main() {
     track_current_branch
     init_memory
     init_signals
+    init_skills
     init_task_engine
     
     if [[ ! -f "$PROGRESS_FILE" ]]; then
@@ -2108,10 +2116,11 @@ review_run() {
         return 0
     fi
 
-    # Compounding-layer housekeeping: archive stale/resolved signals. (No LOG write
-    # here — review_run is also the body of `ralph --review` and runs every --once
-    # tick, and a read-only review must not mutate the run narrative.)
+    # Compounding-layer housekeeping: archive stale/resolved signals + stale skills.
+    # (No LOG write here — review_run is also the body of `ralph --review` and runs
+    # every --once tick, and a read-only review must not mutate the run narrative.)
     prune_signals || true
+    declare -F prune_skills >/dev/null && prune_skills || true
 
     if [[ ! -f "$metrics" ]]; then
         log_info "No metrics history to review yet"
