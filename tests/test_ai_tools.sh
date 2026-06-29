@@ -41,6 +41,23 @@ eq "amp uses stdin" 1 "$_AI_STDIN"
 echo "== unknown tool rejected =="
 _build_ai_cmd bogus "m"; eq "unknown tool rc=1" 1 "$?"
 
+echo "== codex: exec subcommand, sandboxed, NO dangerous bypass, NO -p (would hang TUI) =="
+_build_ai_cmd codex ""; eq "codex rc" 0 "$?"
+[[ "${_AI_CMD[*]}" == "codex exec "* ]] && ok "codex uses exec subcommand" || bad "codex not exec: ${_AI_CMD[*]}"
+[[ "${_AI_CMD[*]}" == *"-s workspace-write"* ]] && ok "codex sandboxed (workspace-write)" || bad "codex no sandbox"
+[[ "${_AI_CMD[*]}" == *"--color never"* ]] && ok "codex --color never (clean tee'd logs)" || bad "codex no --color never"
+[[ "${_AI_CMD[*]}" == *"--skip-git-repo-check"* ]] && ok "codex --skip-git-repo-check" || bad "codex missing skip-git"
+[[ " ${_AI_CMD[*]} " != *" -p "* && "${_AI_CMD[*]}" != *"--print"* ]] && ok "codex avoids -p/--print" || bad "codex has -p/--print (TUI hang risk)"
+eq "codex not stdin" 0 "$_AI_STDIN"
+[[ "${_AI_CMD[*]}" != *"--model"* ]] && ok "no --model when empty (codex self-selects)" || bad "codex passed empty model"
+_build_ai_cmd codex "gpt-5-codex"; [[ "${_AI_CMD[*]}" == *"--model gpt-5-codex"* ]] && ok "codex passes --model when set" || bad "codex no --model when set"
+eq "resolve_model_for_tool codex -> empty (self-select)" "" "$(resolve_model_for_tool codex engineer)"
+
+echo "== _ralph_is_valid_tool accepts all wired tools, rejects bogus =="
+for t in opencode claude amp agy codex; do _ralph_is_valid_tool "$t" && ok "valid: $t" || bad "rejected valid tool: $t"; done
+_ralph_is_valid_tool gemini && bad "gemini (deprecated CLI) accepted" || ok "gemini rejected (deprecated)"
+_ralph_is_valid_tool bogus && bad "bogus accepted" || ok "bogus rejected"
+
 echo "== _ai_timeout_secs: per-call wall-clock budget =="
 unset RALPH_TOOL_TIMEOUT;     eq "default 1800s"          1800 "$(_ai_timeout_secs)"
 export RALPH_TOOL_TIMEOUT=600; eq "custom respected"       600  "$(_ai_timeout_secs)"

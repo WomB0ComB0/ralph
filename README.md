@@ -40,6 +40,7 @@ graph TB
         AMP[amp - Anthropic MCP]
         Claude[claude-cli]
         Agy[agy - Google Antigravity]
+        Codex[codex - OpenAI]
         Copilot[GitHub Copilot]
     end
     
@@ -132,6 +133,7 @@ graph TB
     AITool --> AMP
     AITool --> Claude
     AITool --> Agy
+    AITool --> Codex
     AITool --> Copilot
     
     BeadsDB --> Dolt
@@ -581,6 +583,8 @@ Ralph maintains synchronized artifacts for consistent execution:
 ./ralph.sh --tool opencode
 ./ralph.sh --tool amp
 ./ralph.sh --tool claude
+./ralph.sh --tool agy       # Google Antigravity
+./ralph.sh --tool codex     # OpenAI Codex (codex exec, sandboxed)
 
 # Specify model
 ./ralph.sh --model "google/gemini-2.0-flash-001"
@@ -728,7 +732,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 193 cases total
+# Run every suite (9 unit harnesses + the native --test) — 212 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

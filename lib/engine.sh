@@ -216,6 +216,9 @@ get_default_model_for_tool() {
         agy)
             echo ""   # Antigravity self-selects the latest; resolve_model_for_tool live-lists via `agy models`
             ;;
+        codex)
+            echo ""   # codex self-selects its default model; no listing to route from
+            ;;
         *)
             log_warning "Unknown tool: $tool, using generic default"
             echo "sonnet"
@@ -390,6 +393,9 @@ resolve_model_for_tool() {
             ;;
         claude|amp)
             case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
+            ;;
+        codex)
+            echo ""   # codex self-selects; no `codex models` listing to drive a router
             ;;
         opencode|*)
             get_model_for_role "$role"
@@ -752,6 +758,13 @@ _build_ai_cmd() {
             local _agytmo; _agytmo=$(_ai_timeout_secs)
             [[ "$_agytmo" -gt 0 ]] && _AI_CMD+=(--print-timeout "${_agytmo}s")   # agy's default is only 5m
             _AI_CMD+=(--print) ;;   # --print MUST stay last (string-valued: takes the prompt)
+        codex)
+            # codex is headless ONLY via `exec` (bare codex / -p -> interactive TUI -> hangs).
+            # exec never prompts, so -s workspace-write keeps the OS sandbox instead of a blanket
+            # bypass; --color never keeps tee'd logs ANSI-free; --skip-git-repo-check for non-repos.
+            _AI_CMD=(codex exec -s workspace-write --color never --skip-git-repo-check)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")
+            ;;
         *)
             return 1 ;;
     esac
