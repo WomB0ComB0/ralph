@@ -753,7 +753,7 @@ _build_ai_cmd() {
             _AI_CMD=(claude -p --dangerously-skip-permissions --model "$model")
             local _fb="${RALPH_CLAUDE_FALLBACK_MODEL:-sonnet}"
             [[ -n "$_fb" && "$_fb" != "$model" ]] && _AI_CMD+=(--fallback-model "$_fb")
-            [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9.]+$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
+            [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
             ;;
         opencode)
             _AI_CMD=(opencode run --model "$model") ;;

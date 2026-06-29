@@ -28,6 +28,10 @@ _build_ai_cmd claude opus
 [[ "${_AI_CMD[*]}" != *"--max-budget-usd"* ]] && ok "no budget cap by default" || bad "budget set without env"
 export RALPH_MAX_BUDGET_USD=5; _build_ai_cmd claude opus
 [[ "${_AI_CMD[*]}" == *"--max-budget-usd 5"* ]] && ok "budget cap when RALPH_MAX_BUDGET_USD set" || bad "no budget with env"
+export RALPH_MAX_BUDGET_USD="5.50"; _build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" == *"--max-budget-usd 5.50"* ]] && ok "decimal budget accepted" || bad "decimal budget rejected"
+export RALPH_MAX_BUDGET_USD="1.2.3"; _build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" != *"--max-budget-usd"* ]] && ok "malformed budget (1.2.3) rejected" || bad "malformed budget accepted"
 unset RALPH_MAX_BUDGET_USD
 _build_ai_cmd claude sonnet
 [[ "${_AI_CMD[*]}" != *"--fallback-model"* ]] && ok "no redundant fallback when primary==fallback (sonnet)" || bad "fallback duplicates the primary"
