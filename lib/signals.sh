@@ -386,9 +386,9 @@ handle_signal_command() {
     case "$cmd" in
         ls|list)  list_signals "${1:-}" ;;
         show|get) signal_get "${1:-}" ;;
-        ack)      [[ -n "${1:-}" ]] && signal_ack "$1" && echo "Acked $1" || echo "Usage: ralph signal ack <key>" ;;
-        resolve)  [[ -n "${1:-}" ]] && signal_resolve "$1" "${2:-}" && echo "Resolved $1" || echo "Usage: ralph signal resolve <key> [note]" ;;
-        reopen)   [[ -n "${1:-}" ]] && signal_reopen "$1" && echo "Reopened $1" || echo "Usage: ralph signal reopen <key>" ;;
+        ack)      if [[ -n "${1:-}" ]]; then signal_ack "$1" && echo "Acked $1"; else echo "Usage: ralph signal ack <key>"; fi ;;
+        resolve)  if [[ -n "${1:-}" ]]; then signal_resolve "$1" "${2:-}" && echo "Resolved $1"; else echo "Usage: ralph signal resolve <key> [note]"; fi ;;
+        reopen)   if [[ -n "${1:-}" ]]; then signal_reopen "$1" && echo "Reopened $1"; else echo "Usage: ralph signal reopen <key>"; fi ;;
         recall)   recall_signals ;;
         *)        echo "Usage: ralph signal [ls|show <key>|ack <key>|resolve <key> [note]|reopen <key>|recall]" ;;
     esac

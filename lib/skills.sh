@@ -50,7 +50,7 @@ record_skill() {
                | .updated_at = $now | .last_run = $run
                | .tags = (((.tags // []) + $tags) | unique)' \
               "$file" > "$tmp" 2>/dev/null; then
-            mv -f "$tmp" "$file"
+            mv -f "$tmp" "$file" || log_warning "record_skill: failed to write $file"
         fi
     else
         if jq -n --arg theme "$theme" --arg prob "$problem" --arg res "$resolution" \
@@ -60,7 +60,7 @@ record_skill() {
                 created_at: $now, updated_at: $now, approved_at: null,
                 first_run: $run, last_run: $run}' \
               > "$tmp" 2>/dev/null; then
-            mv -f "$tmp" "$file"
+            mv -f "$tmp" "$file" || log_warning "record_skill: failed to write $file"
         fi
     fi
     rm -f "$tmp" 2>/dev/null
@@ -205,8 +205,8 @@ handle_skill_command() {
     case "$cmd" in
         ls|list)  list_skills "${1:-}" ;;
         show|get) skill_get "${1:-}" ;;
-        approve)  [[ -n "${1:-}" ]] && approve_skill "$1" && echo "Approved skill: $1" || echo "Usage: ralph skill approve <theme>" ;;
-        reject)   [[ -n "${1:-}" ]] && reject_skill "$1" && echo "Rejected skill: $1" || echo "Usage: ralph skill reject <theme>" ;;
+        approve)  if [[ -n "${1:-}" ]]; then approve_skill "$1" && echo "Approved skill: $1"; else echo "Usage: ralph skill approve <theme>"; fi ;;
+        reject)   if [[ -n "${1:-}" ]]; then reject_skill "$1" && echo "Rejected skill: $1"; else echo "Usage: ralph skill reject <theme>"; fi ;;
         recall)   recall_skills ;;
         *)        echo "Usage: ralph skill [ls|show <theme>|approve <theme>|reject <theme>|recall]" ;;
     esac
