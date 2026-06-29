@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ralph Wiggum - Long-running AI agent loop
-# Usage: ./ralph.sh [--tool amp|claude|opencode] [--max-iterations N] [--model MODEL] [--no-archive]
+# Usage: ./ralph.sh [--tool opencode|claude|amp|agy] [--max-iterations N] [--model MODEL] [--no-archive]
 
 set -euo pipefail
 

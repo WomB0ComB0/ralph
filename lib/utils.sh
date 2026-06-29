@@ -1048,7 +1048,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--init${_RALPH_COLOR_NC}                  Smart project initialization
     ${_RALPH_COLOR_GREEN}--setup${_RALPH_COLOR_NC}                 Install all required dependencies
     ${_RALPH_COLOR_GREEN}--test${_RALPH_COLOR_NC}                  Run internal test suite
-    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: amp, claude, or opencode (default: opencode)
+    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, or agy (Antigravity) (default: opencode)
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
