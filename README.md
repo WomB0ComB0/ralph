@@ -702,6 +702,7 @@ bd vc log
 - `LOG_FILE`: Path to log file (default: ralph.log)
 - `VERBOSE`: Enable debug logging (true/false)
 - `RALPH_UNATTENDED`: Never pause for interactive input (same as `--unattended`)
+- `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout` so a hung tool can't block it (default 1800; `0` disables; also sets agy's `--print-timeout`)
 - `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
 - `RALPH_HASH_EXCLUDES`: Extra dir names to exclude from the project hash (also reads `.ralph/excludes`)
 - `GITDIFF_EXCLUDE`: Path to the diff-exclude file used by `--diff-context` (default: `gitdiff-exclude`)
@@ -727,7 +728,7 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 187 cases total
+# Run every suite (9 unit harnesses + the native --test) — 193 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
