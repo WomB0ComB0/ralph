@@ -52,7 +52,11 @@ lint_knowledge() {
     [[ "$min_freq" =~ ^[0-9]+$ ]] || min_freq=2
     [[ "$stale_days" =~ ^[0-9]+$ ]] || stale_days=30
 
-    local gaps=() orphans=() stale=() backlog=() highsev=()
+    # `local x=()` is a syntax error on Bash 3.2/4.0-4.1; but a `local -a` array left
+    # unassigned reads as "unbound" under set -u once it stays empty. So declare local,
+    # then initialize to empty arrays on a separate (non-`local`) line — safe on both.
+    local -a gaps orphans stale backlog highsev
+    gaps=(); orphans=(); stale=(); backlog=(); highsev=()
     local f theme status freq sev last skillfile sigfile sk_status age covered sst
 
     # --- Signal-driven checks ---
@@ -68,12 +72,12 @@ lint_knowledge() {
             skillfile="$kdir/$theme.json"
             # A theme is "covered" only by a candidate/approved skill; a REJECTED skill
             # (or none at all) leaves the recurring problem an open gap.
-            covered=1
-            if [[ ! -f "$skillfile" ]]; then
-                covered=0
-            else
+            # Default-deny: a theme is covered ONLY by a real candidate/approved skill;
+            # missing, rejected, corrupt, or unknown-status all count as an open gap.
+            covered=0
+            if [[ -f "$skillfile" ]]; then
                 sst=$(jq -r '.status // ""' "$skillfile" 2>/dev/null) || sst=""
-                [[ "$sst" == "rejected" ]] && covered=0
+                [[ "$sst" == "approved" || "$sst" == "candidate" ]] && covered=1
             fi
             if [[ $freq -ge $min_freq && $covered -eq 0 ]]; then
                 gaps+=("$theme (freq=$freq, sev=$sev)")
