@@ -484,6 +484,19 @@ Ralph maintains synchronized artifacts for consistent execution:
 - Message passing between agents
 - Task board for swarm orchestration
 
+### 8. Compounding Artifact Layer
+- **Signals**: deduplicated "patterns the loop keeps re-hitting" — one git-diffable JSON per signal under `.ralph/artifacts/signals/`, keyed by a normalized `theme_key`, with frequency, severity, and lifecycle (open → ack → resolved, auto-reopen on regression). A bounded digest is surfaced into the prompt each iteration.
+- **LOG.md**: an append-only cross-run narrative at `.ralph/artifacts/LOG.md`.
+- **Guarded Skills**: when a recurring signal is resolved with a note, Ralph auto-authors a *candidate* skill (a proven resolution). Candidates are never surfaced until you `approve` them; approved skills are then injected ("you fixed this before: …") whenever the matching signal is open again.
+- Manage via the `ralph signal` and `ralph skill` CLIs (see Usage).
+
+### 9. Durable Execution & Bounded Orchestration
+- **Retry/backoff** around the AI call, plus **recovery checkpoints** persisted per run so `--resume` can continue after a crash.
+- **Failure ≠ done**: a failed iteration never counts as success, and a **circuit breaker** stops the loop after repeated hard failures.
+- **Triggers**: `--once` (single pass), backlog-drain (stop once the task queue stays empty for a streak), and a `--review` self-tuning pass that adjusts the lazy-detection threshold from run metrics.
+- **Per-run workspace**: each run gets a `RUN_ID` and a `.ralph/runs/<id>/` directory with step traces; old runs are pruned.
+- **Bounded swarm scheduler**: live-PID-aware concurrency cap, dead-agent reaping, run history, and per-task + global retry caps so orchestration can't loop forever.
+
 ## Usage
 
 ### Basic Usage
@@ -510,6 +523,15 @@ Ralph maintains synchronized artifacts for consistent execution:
 
 # Run internal tests
 ./ralph.sh --test
+
+# Single pass (one iteration) then exit — ideal for cron/CI triggers
+./ralph.sh --once
+
+# Self-tuning review pass: refresh the lazy threshold from run metrics (no AI call)
+./ralph.sh --review
+
+# Unattended: never pause for input (headless/cron runs)
+./ralph.sh --unattended
 
 # Run in Docker sandbox
 ./ralph.sh --sandbox
@@ -560,6 +582,20 @@ bd close tk-123
 bd vc log
 ```
 
+### Compounding Memory (Signals & Skills)
+```bash
+# Signals — recurring problems the loop keeps hitting
+./ralph.sh signal ls                                    # list, most urgent first
+./ralph.sh signal show <key>                            # inspect one signal
+./ralph.sh signal resolve <key> "added the missing module"  # resolve (may auto-author a skill)
+./ralph.sh signal recall                                # the digest surfaced to the agent
+
+# Skills — proven resolutions; candidates stay hidden until approved
+./ralph.sh skill ls
+./ralph.sh skill approve <theme>     # surface this fix when the matching signal recurs
+./ralph.sh skill reject <theme>
+```
+
 ### Swarm Commands
 ```bash
 # Spawn a sub-agent
@@ -570,6 +606,13 @@ bd vc log
 
 # List all agents
 ./ralph.sh swarm list
+
+# Series of Orchestrations: auto-plan then drain the task queue with bounded workers
+./ralph.sh swarm soo
+
+# Reap crashed agents / view the run history
+./ralph.sh swarm reap
+./ralph.sh swarm history
 ```
 
 ## Configuration
@@ -580,6 +623,14 @@ bd vc log
 - `MAX_ITERATIONS`: Maximum iterations (default: 10)
 - `LOG_FILE`: Path to log file (default: ralph.log)
 - `VERBOSE`: Enable debug logging (true/false)
+- `RALPH_UNATTENDED`: Never pause for interactive input (same as `--unattended`)
+- `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
+- `RALPH_HASH_EXCLUDES`: Extra dir names to exclude from the project hash (also reads `.ralph/excludes`)
+- `GITDIFF_EXCLUDE`: Path to the diff-exclude file used by `--diff-context` (default: `gitdiff-exclude`)
+- `RALPH_HEALTH_PORTS` / `RALPH_MODEL_FAMILIES` / `RALPH_SANDBOX_ALLOW_ENV`: Override the built-in port / model-family / sandbox-env-passthrough lists
+- `RALPH_SIGNAL_RECALL` / `RALPH_SIGNAL_OPEN_TTL_DAYS`: Signal digest size / prune age for open signals
+- `RALPH_SKILL_MIN_FREQ` / `RALPH_SKILL_RECALL` / `RALPH_SKILL_TTL_DAYS`: Skill auto-capture frequency threshold / recall size / prune age
+- `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
 
 ### Configuration File
 Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
@@ -592,6 +643,17 @@ Ralph supports `.ralphrc` or `ralph.config.json` for persistent settings:
   "verbose": true
 }
 ```
+
+## Testing
+```bash
+# Run every suite (6 unit harnesses + the native --test) — 121 cases total
+./tests/run_all.sh
+
+# Just the native runtime self-test
+./ralph.sh --test
+```
+Each suite is hermetic (sources `lib/*.sh`, uses `mktemp` sandboxes). See
+[`tests/README.md`](tests/README.md) for the per-suite breakdown.
 
 ## Required Dependencies
 
