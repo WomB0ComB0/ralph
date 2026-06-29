@@ -3,7 +3,7 @@
 # Sources the lib directly so we don't need the AI CLIs / docker.
 # Usage: bash test_now_tier.sh
 
-RALPH_ROOT="/home/wombocombo/github/dev/ralph"
+RALPH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source under test. Disable the EXIT trap noise by running in this shell.
 # shellcheck disable=SC1090

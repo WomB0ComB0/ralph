@@ -10,15 +10,18 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fail=0
 
 run() {
-    local name="$1" script="$2" out tmpd
+    local name="$1" script="$2" out tmpd rc summary
     tmpd=$(mktemp -d)
     # Run in a throwaway cwd so no suite can write into the repo.
-    out=$(cd "$tmpd" && bash "$script" 2>&1)
+    out=$(cd "$tmpd" && bash "$script" 2>&1); rc=$?
     rm -rf "$tmpd"
-    if printf '%s\n' "$out" | grep -qE 'TOTAL: [0-9]+ passed, 0 failed|Test Summary: [0-9]+ passed, 0 failed'; then
-        printf '  PASS  %-9s %s\n' "$name" "$(printf '%s\n' "$out" | grep -oE 'TOTAL: [0-9]+ passed.*|Test Summary: [0-9]+ passed.*' | head -1)"
+    summary=$(printf '%s\n' "$out" | grep -oE 'TOTAL: [0-9]+ passed.*|Test Summary: [0-9]+ passed.*' | head -1)
+    # Pass only if the suite EXITED 0 *and* reported zero failures: a crash before the
+    # summary line fails the rc check; a non-zero failure count fails the grep.
+    if [[ $rc -eq 0 ]] && printf '%s\n' "$out" | grep -qE 'TOTAL: [0-9]+ passed, 0 failed|Test Summary: [0-9]+ passed, 0 failed'; then
+        printf '  PASS  %-9s %s\n' "$name" "$summary"
     else
-        printf '  FAIL  %-9s\n' "$name"
+        printf '  FAIL  %-9s (exit %s) %s\n' "$name" "$rc" "$summary"
         printf '%s\n' "$out" | grep -iE 'fail' | head -8
         fail=1
     fi
