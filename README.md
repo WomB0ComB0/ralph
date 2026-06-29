@@ -18,12 +18,12 @@ graph TB
     end
     
     subgraph "Core State Management"
-        PRD[prd.jsonGoals & Requirements]
-        BeadsDB[.beads/Task Database]
-        Plan[ralph_plan.mdHuman-Readable Tasks]
-        Diagram[ralph_architecture.mdMermaid Diagrams]
-        Progress[progress.txtRun Metadata]
-        Checkpoint[.ralph_checkpointResume Point]
+        PRD["prd.json<br/>goals & requirements"]
+        BeadsDB[".ralph/beads/tasks.db<br/>task database"]
+        Plan["ralph_plan.md<br/>human-readable tasks"]
+        Diagram["ralph_architecture.md<br/>mermaid diagrams"]
+        Progress["progress.txt<br/>run metadata"]
+        Checkpoint[".ralph_checkpoint<br/>resume point"]
     end
     
     subgraph "Iteration Engine"
@@ -61,9 +61,37 @@ graph TB
         Steering[User Steering]
     end
     
-    subgraph "Memory & Coordination"
-        GenMemory[Genetic Memory~/.config/ralph/memory]
-        WarRoom[War Room EventsReal-time coordination]
+    subgraph "Compounding Memory (.ralph/artifacts, cross-run)"
+        Signals["signals/*.json<br/>deduped recurring problems<br/>freq · severity · related[]"]
+        LogMd["LOG.md<br/>append-only narrative"]
+        Skills["skills/*.json<br/>proven resolutions<br/>candidate to approved"]
+        GlobalSkills["~/.config/ralph/skills<br/>cross-project skills"]
+        GenMemory["~/.config/ralph/memory<br/>genetic lessons"]
+    end
+
+    subgraph "Curator Pass (review_run · --review/--once)"
+        Prune["prune signals/skills (TTL)"]
+        LinkRel[link_related_signals]
+        Lint["lint: gaps / orphaned /<br/>stale / high-severity"]
+        Tune["self-tune LAZY_THRESHOLD"]
+    end
+
+    subgraph "Swarm (bounded scheduler)"
+        Spawn["spawn_agent + slot gate"]
+        Reap[reap dead agents]
+        SoO["soo: plan to drain<br/>+ retry/cycle cap"]
+        WarRoom["war-room event bus"]
+        SwarmHist[run history]
+    end
+
+    subgraph "Triggers & Durability"
+        Once["--once / backlog-drain"]
+        Review["--review"]
+        Unattended["--unattended (sandbox)"]
+        Retry["retry + backoff"]
+        Breaker["circuit breaker"]
+        Recovery["recovery checkpoint"]
+        RunDir[".ralph/runs/RUN_ID<br/>step traces"]
     end
     
     subgraph "Utilities"
@@ -137,6 +165,42 @@ graph TB
     Archive --> Plan
     Archive --> Progress
 
+    %% Compounding memory: recalled into context, captured from analysis
+    Context --> Signals
+    Context --> Skills
+    Context --> LogMd
+    Analysis --> Signals
+    Signals --> Skills
+    Skills --> GlobalSkills
+    GlobalSkills --> Skills
+    Analysis --> LogMd
+
+    %% Triggers & durability around the loop / AI call
+    Once --> Loop
+    Review --> Loop
+    Unattended --> Loop
+    Retry --> AITool
+    Breaker --> Loop
+    Loop --> Recovery
+    Loop --> RunDir
+
+    %% Curator pass (review_run) maintains the compounding layer
+    Loop --> Prune
+    Loop --> LinkRel
+    Loop --> Lint
+    Loop --> Tune
+    LinkRel --> Signals
+    Lint --> Signals
+    Lint --> Skills
+    Tune --> LazyDetect
+
+    %% Swarm bounded scheduler
+    Loop --> Spawn
+    SoO --> Spawn
+    Spawn --> Reap
+    Spawn --> WarRoom
+    Spawn --> SwarmHist
+
     style PRD fill:#e1f5ff
     style BeadsDB fill:#e1f5ff
     style Plan fill:#e1f5ff
@@ -146,6 +210,13 @@ graph TB
     style Trigger fill:#ffe1e1
     style Beads fill:#e1ffe1
     style GenMemory fill:#ffe1f0
+    style Signals fill:#fff0d0
+    style Skills fill:#fff0d0
+    style GlobalSkills fill:#fff0d0
+    style LogMd fill:#fff0d0
+    style Lint fill:#e1ffe1
+    style LinkRel fill:#e1ffe1
+    style SoO fill:#f0e1ff
 ```
 
 ## Data Flow Sequence
