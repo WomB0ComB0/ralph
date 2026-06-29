@@ -728,7 +728,10 @@ _build_ai_cmd() {
         opencode)
             _AI_CMD=(opencode run --model "$model") ;;
         agy)
-            _AI_CMD=(agy --print --dangerously-skip-permissions) ;;
+            # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
+            # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
+            # first it swallowed --dangerously-skip-permissions and ignored the prompt.)
+            _AI_CMD=(agy --dangerously-skip-permissions --print) ;;
         *)
             return 1 ;;
     esac
