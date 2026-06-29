@@ -355,13 +355,13 @@ check_dependencies() {
     
     # Add the selected AI tool to requirements
     local selected_tool="${TOOL:-opencode}"
-    if [[ "$selected_tool" == "opencode" ]]; then
-        required_tools+=("opencode")
-    elif [[ "$selected_tool" == "claude" ]]; then
-        required_tools+=("claude")
-    elif [[ "$selected_tool" == "amp" ]]; then
-        required_tools+=("amp")
-    fi
+    case "$selected_tool" in
+        opencode) required_tools+=("opencode") ;;
+        claude)   required_tools+=("claude") ;;
+        amp)      required_tools+=("amp") ;;
+        agy)      required_tools+=("agy") ;;
+        codex)    required_tools+=("codex") ;;
+    esac
 
     log_debug "Checking required dependencies..."
     
@@ -1048,7 +1048,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--init${_RALPH_COLOR_NC}                  Smart project initialization
     ${_RALPH_COLOR_GREEN}--setup${_RALPH_COLOR_NC}                 Install all required dependencies
     ${_RALPH_COLOR_GREEN}--test${_RALPH_COLOR_NC}                  Run internal test suite
-    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, or agy (Antigravity) (default: opencode)
+    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), or codex (default: opencode)
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
@@ -1287,13 +1287,17 @@ parse_arguments() {
 # Validate configuration settings
 # Returns: 0 if valid, exits on invalid config
 #######################################
+_ralph_is_valid_tool() {
+    case "$1" in opencode|claude|amp|agy|codex) return 0 ;; *) return 1 ;; esac
+}
+
 validate_config() {
     local errors=0
-    
-    # Validate tool selection
-    if [[ "$TOOL" != "amp" && "$TOOL" != "claude" && "$TOOL" != "opencode" ]]; then
-        log_error "Invalid tool '$TOOL'. Must be 'amp', 'claude', or 'opencode'"
-        ((errors++))
+
+    # Validate tool selection (single source of truth: _ralph_is_valid_tool)
+    if ! _ralph_is_valid_tool "$TOOL"; then
+        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex"
+        errors=$((errors + 1))
     fi
     
     # Validate max iterations
@@ -1825,6 +1829,28 @@ install_claude_cli() {
         return 0
     else
         log_error "Failed to install Claude CLI"
+        return 1
+    fi
+}
+
+install_codex() {
+    if command_exists codex; then
+        log_success "codex is already installed"
+        return 0
+    fi
+
+    log_setup "Installing codex (OpenAI Codex CLI)..."
+
+    # Ensure npm is available
+    if ! command_exists npm; then
+        install_nodejs || return 1
+    fi
+
+    if npm install -g @openai/codex 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
+        log_success "codex installed successfully"
+        return 0
+    else
+        log_error "Failed to install codex"
         return 1
     fi
 }
