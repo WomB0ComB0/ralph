@@ -1788,14 +1788,14 @@ install_amp() {
         return 0
     fi
     
-    log_setup "Installing amp (Anthropic MCP)..."
+    log_setup "Installing amp (Ampcode coding agent)..."
     
     # Ensure npm is available
     if ! command_exists npm; then
         install_nodejs || return 1
     fi
     
-    if npm install -g @anthropic-ai/mcp 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
+    if npm install -g @ampcode/cli 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
         log_success "amp installed successfully"
         return 0
     else
@@ -1820,7 +1820,7 @@ install_claude_cli() {
         install_nodejs || return 1
     fi
     
-    if npm install -g @anthropic-ai/claude-cli 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
+    if npm install -g @anthropic-ai/claude-code 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
         log_success "Claude CLI installed successfully"
         return 0
     else
@@ -1846,13 +1846,13 @@ install_opencode() {
             install_script=$(create_temp_file)
             
             # Download installer
-            if ! curl -fsSL https://raw.githubusercontent.com/stackblitz/opencode/main/install.sh -o "$install_script"; then
+            if ! curl -fsSL https://opencode.ai/install -o "$install_script"; then
                 log_error "Failed to download opencode installer"
                 return 1
             fi
             
-            # Verify script looks legitimate (basic checks)
-            if ! grep -q "#!/bin/bash" "$install_script"; then
+            # Verify script looks legitimate (the official installer uses #!/usr/bin/env bash)
+            if ! grep -qE '^#![[:space:]]*/.*(bash|sh)' "$install_script"; then
                 log_error "Downloaded script doesn't look like a bash script"
                 return 1
             fi
@@ -1868,7 +1868,7 @@ install_opencode() {
             ;;
         windows)
             log_error "opencode installation on Windows requires manual setup"
-            log_info "Visit: https://github.com/stackblitz/opencode"
+            log_info "Visit: https://opencode.ai/docs"
             return 1
             ;;
         *)

@@ -25,11 +25,12 @@ _build_ai_cmd opencode "prov/mod"
 [[ "${_AI_CMD[*]}" == "opencode run --model prov/mod" ]] && ok "opencode run --model" || bad "opencode cmd: ${_AI_CMD[*]}"
 eq "opencode not stdin" 0 "$_AI_STDIN"
 
-echo "== agy: --print + skip-permissions, NO --model (agy has no model flag) =="
+echo "== agy: --print must be LAST (string-valued flag; prompt becomes its value) =="
 _build_ai_cmd agy "ignored-model"; eq "agy rc" 0 "$?"
-[[ "${_AI_CMD[*]}" == *"--print"* ]] && ok "agy print mode" || bad "agy no --print: ${_AI_CMD[*]}"
 [[ "${_AI_CMD[*]}" == *"--dangerously-skip-permissions"* ]] && ok "agy auto-approves" || bad "agy no skip-perms"
-[[ "${_AI_CMD[*]}" != *"--model"* ]] && ok "agy omits --model" || bad "agy wrongly passes --model: ${_AI_CMD[*]}"
+# --print consumes the NEXT token as the prompt, so it MUST be the final flag in _AI_CMD;
+# run_ai_tool appends "$prompt" after it -> `agy --dangerously-skip-permissions --print "<prompt>"`.
+eq "agy --print is the LAST element" "--print" "${_AI_CMD[$((${#_AI_CMD[@]}-1))]}"
 eq "agy not stdin" 0 "$_AI_STDIN"
 
 echo "== amp: stdin-piped + allow-all =="
