@@ -20,6 +20,27 @@ _build_ai_cmd claude "m1"; eq "claude rc" 0 "$?"
 [[ "${_AI_CMD[*]}" == *"--model m1"* ]] && ok "claude passes --model" || bad "claude no model: ${_AI_CMD[*]}"
 eq "claude not stdin" 0 "$_AI_STDIN"
 
+echo "== claude robustness: collapsed perms, fallback model, opt-in budget =="
+_build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" == *"--dangerously-skip-permissions"* ]] && ok "claude keeps --dangerously-skip-permissions" || bad "claude lost skip-perms"
+[[ "${_AI_CMD[*]}" != *"--permission-mode"* ]] && ok "claude drops the redundant --permission-mode" || bad "redundant --permission-mode still present"
+[[ "${_AI_CMD[*]}" == *"--fallback-model sonnet"* ]] && ok "claude(opus) has --fallback-model sonnet" || bad "no fallback: ${_AI_CMD[*]}"
+[[ "${_AI_CMD[*]}" != *"--max-budget-usd"* ]] && ok "no budget cap by default" || bad "budget set without env"
+export RALPH_MAX_BUDGET_USD=5; _build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" == *"--max-budget-usd 5"* ]] && ok "budget cap when RALPH_MAX_BUDGET_USD set" || bad "no budget with env"
+export RALPH_MAX_BUDGET_USD="5.50"; _build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" == *"--max-budget-usd 5.50"* ]] && ok "decimal budget accepted" || bad "decimal budget rejected"
+export RALPH_MAX_BUDGET_USD="1.2.3"; _build_ai_cmd claude opus
+[[ "${_AI_CMD[*]}" != *"--max-budget-usd"* ]] && ok "malformed budget (1.2.3) rejected" || bad "malformed budget accepted"
+unset RALPH_MAX_BUDGET_USD
+_build_ai_cmd claude sonnet
+[[ "${_AI_CMD[*]}" != *"--fallback-model"* ]] && ok "no redundant fallback when primary==fallback (sonnet)" || bad "fallback duplicates the primary"
+
+echo "== claude no longer forces ANTHROPIC_BASE_URL to a local Ollama port =="
+unset ANTHROPIC_BASE_URL
+v=$( _apply_tool_env claude; echo "${ANTHROPIC_BASE_URL:-UNSET}" )
+[[ "$v" == "UNSET" ]] && ok "claude uses real Anthropic auth (no forced localhost:11434)" || bad "forced ANTHROPIC_BASE_URL=$v"
+
 echo "== opencode: run --model, prompt-as-arg =="
 _build_ai_cmd opencode "prov/mod"
 [[ "${_AI_CMD[*]}" == "opencode run --model prov/mod" ]] && ok "opencode run --model" || bad "opencode cmd: ${_AI_CMD[*]}"
