@@ -119,9 +119,13 @@ _triage_apply_fix() {
     fi
 
     command_exists git || { log_error "git is required for --apply."; return 1; }
-    local work lf of; work=$(mktemp -d); lf=$(mktemp); of=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -rf '$work' '$lf' '$of'" RETURN
+    # Set the cleanup trap (single-quoted -> evaluated at RETURN, empty-guarded) BEFORE creating the
+    # temp files, and validate each mktemp, so a mktemp failure can't leak or act on an empty path.
+    local work="" lf="" of=""
+    trap '[[ -n "$work" ]] && rm -rf "$work"; [[ -n "$lf" ]] && rm -f "$lf"; [[ -n "$of" ]] && rm -f "$of"' RETURN
+    work=$(mktemp -d) || { log_error "[$repo] mktemp -d failed."; return 1; }
+    lf=$(mktemp)     || { log_error "[$repo] mktemp failed.";    return 1; }
+    of=$(mktemp)     || { log_error "[$repo] mktemp failed.";    return 1; }
     log_info "[$repo] cloning $base_branch ..."
     # Clone the base branch directly (--depth 50 is single-branch, so a later checkout of a
     # different branch silently fails and would leave the agent on the wrong code).
@@ -217,8 +221,12 @@ triage_autofix_security() {
         number=$(printf '%s' "$alert_json" | jq -r '.number // empty' 2>/dev/null || true)
         [[ -z "$number" ]] && { log_error "[$repo] code-scanning alert $alert_override not found (or code scanning disabled)."; return 1; }
     else
-        alert_json=$(gh api "repos/$repo/code-scanning/alerts?state=open&per_page=50" 2>/dev/null \
-            | jq -c 'def rank: {"critical":0,"high":1,"medium":2,"low":3}[.rule.security_severity_level // ""] // 4; (arrays | sort_by(rank))[0] // {}' 2>/dev/null || echo '{}')
+        local alerts_list
+        if ! alerts_list=$(gh api "repos/$repo/code-scanning/alerts?state=open&per_page=50" 2>/dev/null); then
+            log_error "[$repo] failed to retrieve code-scanning alerts (enabled? token scope?)."
+            return 1
+        fi
+        alert_json=$(printf '%s' "$alerts_list" | jq -c 'def rank: {"critical":0,"high":1,"error":1,"medium":2,"warning":2,"low":3,"note":3}[.rule.security_severity_level // .rule.severity // ""] // 4; (arrays | sort_by(rank))[0] // {}' 2>/dev/null || echo '{}')
         number=$(printf '%s' "$alert_json" | jq -r '.number // empty' 2>/dev/null || true)
         [[ -z "$number" ]] && { log_info "[$repo] no open code-scanning alerts — nothing to fix."; return 0; }
     fi
