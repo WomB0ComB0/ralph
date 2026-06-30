@@ -67,14 +67,20 @@ sanitize_id() {
 # files the agent created/edited but did not commit were invisible -> false "no files
 # modified" / spurious lazy streaks.)
 _project_files_mtime() {
-    local dir="${1:-.}" _ex=() _prune=() _n _fp=()
+    local dir="${1:-.}" _ex=() _prune=() _n _fp=() mt
     mapfile -t _ex < <(hash_exclude_names)
     for _n in "${_ex[@]+"${_ex[@]}"}"; do
         [[ ${#_prune[@]} -gt 0 ]] && _prune+=(-o)
         _prune+=(-name "$_n")
     done
     [[ ${#_prune[@]} -gt 0 ]] && _fp=( -type d \( "${_prune[@]}" \) -prune -o )
-    find "$dir" "${_fp[@]+"${_fp[@]}"}" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1
+    # GNU find (Linux) -printf is fastest; fall back to BSD `stat -f` (macOS) when -printf is absent.
+    mt=$(find "$dir" "${_fp[@]+"${_fp[@]}"}" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)
+    if [[ -z "$mt" ]]; then
+        mt=$(find "$dir" "${_fp[@]+"${_fp[@]}"}" -type f -print0 2>/dev/null \
+             | xargs -0 stat -f '%m' 2>/dev/null | sort -n | tail -1)
+    fi
+    echo "$mt"
 }
 
 compute_project_hash() {
