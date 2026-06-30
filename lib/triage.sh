@@ -100,8 +100,8 @@ triage_autofix_ci() {
     local repo="$1" apply="${2:-0}"
     # iteration is referenced by run_ai_tool (status bar/logging); set it so the call doesn't
     # trip `set -u` when invoked outside the normal iteration loop.
-    local run_json run_id run_url default_branch branch iteration=1
-    run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url 2>/dev/null || echo '[]')
+    local run_json run_id run_url default_branch base_branch branch iteration=1
+    run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch 2>/dev/null || echo '[]')
     run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
     if [[ -z "$run_id" ]]; then
         log_info "[$repo] no failing CI run — nothing to fix."
@@ -109,14 +109,19 @@ triage_autofix_ci() {
     fi
     run_url=$(printf '%s' "$run_json" | jq -r 'arrays[0].url // ""' 2>/dev/null || true)
     default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    # Fix on the branch that's ACTUALLY failing (e.g. a renovate/dependabot PR branch), not
+    # always the default — the broken code lives there. PR targets that same branch so merging
+    # the fix turns the failing run green. Falls back to the default branch.
+    base_branch=$(printf '%s' "$run_json" | jq -r 'arrays[0].headBranch // empty' 2>/dev/null || true)
+    [[ -z "$base_branch" ]] && base_branch="$default_branch"
     branch=$(triage_ci_branch_name "$run_id")
 
     if [[ "$apply" != "1" ]]; then
         log_info "[$repo] DRY-RUN — would attempt to fix CI run $run_url"
         printf '    clone   %s -> throwaway worktree\n' "$repo"
-        printf '    branch  %s (off %s)\n' "$branch" "$default_branch"
+        printf '    branch  %s (off the failing branch %s)\n' "$branch" "$base_branch"
         printf '    model   %s\n' "${RALPH_LOCAL_MODEL:-<resolved at run; local-first if configured>}"
-        printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$default_branch" "$branch"
+        printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$base_branch" "$branch"
         printf '    will NEVER push to %s. Re-run with --apply to execute.\n' "$default_branch"
         return 0
     fi
@@ -133,9 +138,12 @@ triage_autofix_ci() {
     logs=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null | tail -n 120 || true)
     prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nFailing log (tail):\n%s\n\nFix the failing CI with MINIMAL changes to the code/tests. Do not edit unrelated files. Do not change CI workflow files unless the workflow itself is the bug.' "$run_url" "$repo" "$logs")
     lf="$work/.ralph-fix.log"; of="$work/.ralph-fix.out"
-    # PROJECT_DIR must point at the CLONE so tools that bind a working dir (e.g. agy --add-dir)
-    # operate on the throwaway checkout, not the original repo.
-    ( cd "$work" && export PROJECT_DIR="$work" && git checkout -b "$branch" >/dev/null 2>&1 \
+    # Check out the FAILING branch (it may not be the default), then branch the fix off it so the
+    # agent sees the broken code. PROJECT_DIR must point at the CLONE so tools that bind a working
+    # dir (e.g. agy --add-dir) operate on the throwaway checkout, not the original repo.
+    ( cd "$work" && export PROJECT_DIR="$work" \
+        && { [[ "$base_branch" == "$default_branch" ]] || { git fetch --depth 50 origin "$base_branch" >/dev/null 2>&1 && git checkout "$base_branch" >/dev/null 2>&1; }; } \
+        && git checkout -b "$branch" >/dev/null 2>&1 \
         && RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of" ) || true
 
     if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
@@ -158,12 +166,12 @@ Automated fix by \`ralph triage --fix-ci\` (local model). Please review before m
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
         log_error "[$repo] commit/push failed."; return 1
     fi
-    gh pr create --repo "$repo" --base "$default_branch" --head "$cur" \
+    gh pr create --repo "$repo" --base "$base_branch" --head "$cur" \
         --title "fix: resolve failing CI (run $run_id)" \
         --body "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
 
 ⚠️ Agent-generated — please review before merging." 2>&1 | tail -1
-    log_success "[$repo] opened a PR from $cur against $default_branch."
+    log_success "[$repo] opened a PR from $cur against $base_branch."
     return 0
 }
 
