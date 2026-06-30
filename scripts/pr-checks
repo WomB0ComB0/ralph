@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# pr-checks — CI check rollup for a PR (or the current branch). Thin wrapper over `gh pr checks`.
+# Usage: scripts/pr-checks [pr] [owner/repo]   (no pr -> the current branch's PR)
+set -euo pipefail
+pr="${1:-}"
+repo="${2:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+gh pr checks ${pr:+"$pr"} --repo "$repo"
