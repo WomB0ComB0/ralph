@@ -305,6 +305,7 @@ determine_model() {
 # Echoes: rate_limit | overloaded | quota | auth | timeout | other
 classify_tool_failure() {
     local out="$1" rc="${2:-1}" lc
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=1   # guard the arithmetic below against a non-numeric exit code
     # Deterministic process exit/signal codes take precedence over text (providers reword their
     # messages; exit codes don't). A process killed by signal N exits with code 128+N; we map by
     # the signal's SEMANTICS (ref: WomB0ComB0/bash-testing process-signal signal table):

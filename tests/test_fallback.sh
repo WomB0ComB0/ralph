@@ -38,6 +38,7 @@ eq "exit 153 (128+25 SIGXFSZ, file limit) -> timeout" "timeout" "$(classify_tool
 eq "exit 139 (128+11 SIGSEGV crash) -> other"         "other"   "$(classify_tool_failure '' 139)"
 eq "exit 134 (128+6 SIGABRT crash) -> other"          "other"   "$(classify_tool_failure '' 134)"
 eq "exit 131 (128+3 SIGQUIT) -> other"                "other"   "$(classify_tool_failure '' 131)"
+eq "non-numeric rc is guarded (no arithmetic abort)"  "other"   "$(classify_tool_failure 'weird' '12x' 2>/dev/null)"
 # a code wins over misleading text: a 137-killed run whose stdout happens to say 'rate limit'
 eq "exit code beats stale text"             "timeout" "$(classify_tool_failure 'partial rate limit output' 137)"
 eq "generic exit 1 -> other"                "other"   "$(classify_tool_failure 'Segmentation fault somewhere' 1)"
