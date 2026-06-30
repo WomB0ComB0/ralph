@@ -737,6 +737,8 @@ A central, locally-run, scoped alternative to per-repo cloud workflows: point Ra
 - **What it finds:** failing CI runs (`gh run list --status failure`) + open **Dependabot**, **code-scanning**, and **secret-scanning** alerts; prints a severity-sorted report and records deduped signals (`ralph signal ls`).
 - **Tuning:** `RALPH_TARGETS_FILE` (allowlist path), `RALPH_TRIAGE_CI_LIMIT` (failing runs per repo, default 5).
 - **Autofix CI → PR (opt-in):** `ralph triage --fix-ci` prints a dry-run plan; add `--apply` to clone to a throwaway worktree, run the loop (local model) to fix the failing CI, and open a PR on a bot-namespaced `ralph/fix-*` branch. It targets the **actual failing branch** (e.g. a renovate PR branch), discards any dependency/lockfile/workflow churn (source-only fix), and `--run <id>` picks a specific run. It **never pushes to a default branch** (a `ralph/fix-*`-only push gate enforces this) and the PR is flagged for review.
+- **Remediate security alerts → PR (opt-in):** `ralph triage --fix-security [alert]` takes the highest-severity open **code-scanning** (CodeQL etc.) alert — or a specific `[alert]` number — clones the default branch, fixes the vulnerability at the flagged location, and opens a `ralph/fix-sec-*` PR against the default branch (same source-only + never-push-default + review-flagged guarantees). Dependabot dependency bumps are intentionally left to Dependabot/renovate.
+- **Resolve PR review conversations (opt-in):** `ralph triage --resolve-reviews <pr>` addresses the unresolved review threads on one of Ralph's own `ralph/fix-*` PRs, pushes, and marks each conversation resolved. Refuses any non-`ralph/fix-*` PR (never auto-dismisses a human's review); resolves only after pushing a real change.
 - **Suggest→issue mode is still separate and opt-in (next).**
 ```bash
 RALPH_TARGETS="me/api,me/web" ralph triage      # or: echo "me/api" > ralph.targets && ralph triage
@@ -760,7 +762,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (12 unit harnesses + the native --test) — 358 cases total
+# Run every suite (12 unit harnesses + the native --test) — 364 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
