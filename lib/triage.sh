@@ -96,42 +96,22 @@ _triage_safe_push_branch() {
 # (prints the exact plan, writes nothing); pass apply=1 to execute. Even with apply, it works
 # in a throwaway clone, only ever pushes the ralph/fix-* branch, opens the PR against the
 # default branch, and never touches the default branch itself.
-triage_autofix_ci() {
-    local repo="$1" apply="${2:-0}" run_override="${3:-}"
-    # iteration is referenced by run_ai_tool (status bar/logging); set it so the call doesn't
-    # trip `set -u` when invoked outside the normal iteration loop.
-    local run_json run_id run_url default_branch base_branch branch iteration=1
-    if [[ -n "$run_override" ]]; then
-        # Operator picked a specific run (e.g. a known code-fixable one). Look it up directly.
-        run_id="$run_override"
-        run_json=$(gh run view "$run_id" --repo "$repo" --json url,headBranch 2>/dev/null || echo '{}')
-        run_url=$(printf '%s' "$run_json" | jq -r '.url // ""' 2>/dev/null || true)
-        base_branch=$(printf '%s' "$run_json" | jq -r '.headBranch // empty' 2>/dev/null || true)
-        if [[ -z "$run_url" ]]; then
-            log_error "[$repo] run $run_id not found or could not be retrieved."
-            return 1
-        fi
-    else
-        run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch 2>/dev/null || echo '[]')
-        run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
-        run_url=$(printf '%s' "$run_json" | jq -r 'arrays[0].url // ""' 2>/dev/null || true)
-        base_branch=$(printf '%s' "$run_json" | jq -r 'arrays[0].headBranch // empty' 2>/dev/null || true)
-    fi
-    if [[ -z "$run_id" ]]; then
-        log_info "[$repo] no failing CI run — nothing to fix."
-        return 0
-    fi
+triage_sec_branch_name() { printf 'ralph/fix-sec-%s\n' "$1"; }
+
+# Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
+# to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
+# dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
+# a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
+_triage_apply_fix() {
+    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}"
+    # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
+    local default_branch iteration=1
     default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
-    # Fix on the branch that's ACTUALLY failing (e.g. a renovate/dependabot PR branch), not
-    # always the default — the broken code lives there. PR targets that same branch so merging
-    # the fix turns the failing run green. Falls back to the default branch.
-    [[ -z "$base_branch" ]] && base_branch="$default_branch"
-    branch=$(triage_ci_branch_name "$run_id")
 
     if [[ "$apply" != "1" ]]; then
-        log_info "[$repo] DRY-RUN — would attempt to fix CI run $run_url"
-        printf '    clone   %s -> throwaway worktree\n' "$repo"
-        printf '    branch  %s (off the failing branch %s)\n' "$branch" "$base_branch"
+        log_info "[$repo] DRY-RUN — $title"
+        printf '    clone   %s @ %s -> throwaway worktree\n' "$repo" "$base_branch"
+        printf '    branch  %s (off %s)\n' "$branch" "$base_branch"
         printf '    model   %s\n' "${RALPH_LOCAL_MODEL:-<resolved at run; local-first if configured>}"
         printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$base_branch" "$branch"
         printf '    will NEVER push to %s. Re-run with --apply to execute.\n' "$default_branch"
@@ -139,52 +119,29 @@ triage_autofix_ci() {
     fi
 
     command_exists git || { log_error "git is required for --apply."; return 1; }
-    local work; work=$(mktemp -d)
+    local work lf of; work=$(mktemp -d); lf=$(mktemp); of=$(mktemp)
     # shellcheck disable=SC2064
-    trap "rm -rf '$work'" RETURN
-    log_info "[$repo] cloning $base_branch to fix CI run $run_id ..."
-    # Clone the FAILING branch directly (--depth 50 is single-branch, so a later fetch+checkout of a
-    # different branch silently fails and leaves us on the default branch — where the bug isn't).
+    trap "rm -rf '$work' '$lf' '$of'" RETURN
+    log_info "[$repo] cloning $base_branch ..."
+    # Clone the base branch directly (--depth 50 is single-branch, so a later checkout of a
+    # different branch silently fails and would leave the agent on the wrong code).
     if ! gh repo clone "$repo" "$work" -- --depth 50 --branch "$base_branch" >/dev/null 2>&1; then
         log_error "[$repo] clone of branch '$base_branch' failed."; return 1
     fi
-    local logs prompt lf of full
-    # Focus the prompt on the ACTUAL error lines (compiler/test/lint), not the raw stack-trace
-    # tail — the error lines are what the agent needs to locate the fix. Fall back to the tail.
-    full=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null || true)
-    logs=$(printf '%s\n' "$full" | grep -iE 'error|failed|cannot|expected|undefined|not found|TS[0-9]{3,}' | grep -vE '^[[:space:]]*$' | tail -n 60)
-    [[ -z "$logs" ]] && logs=$(printf '%s\n' "$full" | tail -n 80)
-    if [[ -z "$logs" ]]; then
-        log_error "[$repo] no failing-log output for run $run_id (expired/permissions?) — can't fix blind."
-        return 1
-    fi
-    prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL source-code change (e.g. a type annotation, an import, or a renamed API) to the source files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do NOT deliberately change dependency versions or CI/workflow files — fix it in the source. (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs")
-    # Agent log/out live OUTSIDE the clone so `git add -A` can never commit them into the PR.
-    lf=$(mktemp); of=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -rf '$work' '$lf' '$of'" RETURN
-    # Check out the FAILING branch (it may not be the default), then branch the fix off it so the
-    # agent sees the broken code. PROJECT_DIR must point at the CLONE so tools that bind a working
-    # dir (e.g. agy --add-dir) operate on the throwaway checkout, not the original repo.
-    # Default to the tool's OWN model self-selection unless a local model / pin is explicitly
-    # configured: the auto-resolved "newest" model isn't guaranteed to be authenticated, whereas
-    # the tool's built-in default is. RALPH_LOCAL_MODEL still wins (local-first preserved).
+    # Default to the tool's OWN model self-selection (opencode) unless a local model / pin is set:
+    # run_ai_with_fallback always resolves a concrete model that may not be authenticated.
     local fix_model_source="fallback"
-    [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" ]] && fix_model_source="selfselect"
+    [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]] && fix_model_source="selfselect"
     ( cd "$work" && export PROJECT_DIR="$work"
       git checkout -b "$branch" >/dev/null 2>&1   # already on $base_branch from the clone
       if [[ "$fix_model_source" == "selfselect" ]]; then
-          # run_ai_with_fallback ALWAYS resolves a concrete model (resolve_model_for_tool), which
-          # may not be authenticated. When the user pinned nothing, bypass it and pass an empty
-          # model so the tool self-selects its own working default.
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool "${TOOL:-opencode}" "" "$prompt" "$lf" "$of"
       else
           RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of"
       fi ) || true
 
-    # Discard any dependency/lockfile/workflow churn the agent may have introduced — a fix for a
-    # dep-bump CI break should be SOURCE-ONLY (lockfiles are renovate/CI's domain). Done before the
-    # change-check so a PR is opened only if there's a real source fix.
+    # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
+    # opens only on a real source change.
     ( cd "$work" \
         && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
         git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
@@ -196,27 +153,88 @@ triage_autofix_ci() {
     fi
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
-        log_error "[$repo] refusing to push: on '$cur' (not a ralph/fix-* branch off '$default_branch')."
+        log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-* branch off '$default_branch'."
         return 1
     fi
-    # Local identity in the clone so the commit succeeds even with no global git user config.
     if ! ( cd "$work" \
-            && git config user.name "ralph-bot" \
-            && git config user.email "ralph-bot@users.noreply.github.com" \
-            && git add -A \
-            && git commit -q -m "fix: resolve failing CI (run $run_id)
-
-Automated fix by \`ralph triage --fix-ci\` (local model). Please review before merging." \
+            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git add -A && git commit -q -m "$title" \
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
         log_error "[$repo] commit/push failed."; return 1
     fi
-    gh pr create --repo "$repo" --base "$base_branch" --head "$cur" \
-        --title "fix: resolve failing CI (run $run_id)" \
-        --body "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
-
-⚠️ Agent-generated — please review before merging." 2>&1 | tail -1
+    gh pr create --repo "$repo" --base "$base_branch" --head "$cur" --title "$title" --body "$body" 2>&1 | tail -1
     log_success "[$repo] opened a PR from $cur against $base_branch."
     return 0
+}
+
+# Fix the latest (or --run) failing CI run -> PR against the failing branch.
+triage_autofix_ci() {
+    local repo="$1" apply="${2:-0}" run_override="${3:-}"
+    local run_json run_id run_url default_branch base_branch branch
+    if [[ -n "$run_override" ]]; then
+        run_id="$run_override"
+        run_json=$(gh run view "$run_id" --repo "$repo" --json url,headBranch 2>/dev/null || echo '{}')
+        run_url=$(printf '%s' "$run_json" | jq -r '.url // ""' 2>/dev/null || true)
+        base_branch=$(printf '%s' "$run_json" | jq -r '.headBranch // empty' 2>/dev/null || true)
+        [[ -z "$run_url" ]] && { log_error "[$repo] run $run_id not found or could not be retrieved."; return 1; }
+    else
+        run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch 2>/dev/null || echo '[]')
+        run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
+        run_url=$(printf '%s' "$run_json" | jq -r 'arrays[0].url // ""' 2>/dev/null || true)
+        base_branch=$(printf '%s' "$run_json" | jq -r 'arrays[0].headBranch // empty' 2>/dev/null || true)
+    fi
+    [[ -z "$run_id" ]] && { log_info "[$repo] no failing CI run — nothing to fix."; return 0; }
+    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    [[ -z "$base_branch" ]] && base_branch="$default_branch"   # fix on the branch that's failing
+    branch=$(triage_ci_branch_name "$run_id")
+
+    local prompt="" logs full
+    if [[ "$apply" == "1" ]]; then
+        full=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null || true)
+        logs=$(printf '%s\n' "$full" | grep -iE 'error|failed|cannot|expected|undefined|not found|TS[0-9]{3,}' | grep -vE '^[[:space:]]*$' | tail -n 60)
+        [[ -z "$logs" ]] && logs=$(printf '%s\n' "$full" | tail -n 80)
+        if [[ -z "$logs" ]]; then
+            log_error "[$repo] no failing-log output for run $run_id (expired/permissions?) — can't fix blind."; return 1
+        fi
+        prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL source-code change (e.g. a type annotation, an import, or a renamed API) to the source files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do NOT deliberately change dependency versions or CI/workflow files — fix it in the source. (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs")
+    fi
+    _triage_apply_fix "$repo" "$base_branch" "$branch" "$prompt" \
+        "fix: resolve failing CI (run $run_id)" \
+        "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
+
+⚠️ Agent-generated — please review before merging." "$apply"
+}
+
+# Remediate a code-scanning (CodeQL etc.) alert -> PR against the default branch (where the alert's
+# code lives). Picks the highest-severity open alert, or a specific one via alert_override.
+# (Dependabot dependency bumps are intentionally left to Dependabot/renovate.)
+triage_autofix_security() {
+    local repo="$1" apply="${2:-0}" alert_override="${3:-}"
+    local default_branch alert_json number rule sev desc help path line branch prompt
+    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    if [[ -n "$alert_override" ]]; then
+        alert_json=$(gh api "repos/$repo/code-scanning/alerts/$alert_override" 2>/dev/null || echo '{}')
+        number=$(printf '%s' "$alert_json" | jq -r '.number // empty' 2>/dev/null || true)
+        [[ -z "$number" ]] && { log_error "[$repo] code-scanning alert $alert_override not found (or code scanning disabled)."; return 1; }
+    else
+        alert_json=$(gh api "repos/$repo/code-scanning/alerts?state=open&per_page=50" 2>/dev/null \
+            | jq -c 'def rank: {"critical":0,"high":1,"medium":2,"low":3}[.rule.security_severity_level // ""] // 4; (arrays | sort_by(rank))[0] // {}' 2>/dev/null || echo '{}')
+        number=$(printf '%s' "$alert_json" | jq -r '.number // empty' 2>/dev/null || true)
+        [[ -z "$number" ]] && { log_info "[$repo] no open code-scanning alerts — nothing to fix."; return 0; }
+    fi
+    rule=$(printf '%s' "$alert_json" | jq -r '.rule.id // .rule.name // "alert"' 2>/dev/null || true)
+    sev=$(printf '%s'  "$alert_json" | jq -r '.rule.security_severity_level // .rule.severity // "warning"' 2>/dev/null || true)
+    desc=$(printf '%s' "$alert_json" | jq -r '.rule.full_description // .rule.description // ""' 2>/dev/null || true)
+    help=$(printf '%s' "$alert_json" | jq -r '.rule.help // ""' 2>/dev/null | head -c 1200 || true)
+    path=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.path // ""' 2>/dev/null || true)
+    line=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.start_line // 0' 2>/dev/null || true)
+    branch=$(triage_sec_branch_name "$number")
+    prompt=$(printf 'GitHub code scanning flagged a %s-severity issue (%s) in %s at %s:%s.\n\nDescription: %s\n\nGuidance: %s\n\nFix the vulnerability with a MINIMAL source-code change at that location. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$sev" "$rule" "$repo" "$path" "$line" "$desc" "$help")
+    _triage_apply_fix "$repo" "$default_branch" "$branch" "$prompt" \
+        "fix(security): $rule ($sev) in $path" \
+        "Automated remediation of code-scanning alert #$number ($rule, $sev) at \`$path:$line\` by \`ralph triage --fix-security\`.
+
+⚠️ Agent-generated security fix — review carefully before merging." "$apply"
 }
 
 # Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
@@ -307,10 +325,11 @@ triage_resolve_reviews() {
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
     # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
-    local mode="report" apply=0 run_override="" resolve_pr=""
+    local mode="report" apply=0 run_override="" resolve_pr="" sec_alert=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --fix-ci)          mode="fix-ci" ;;
+            --fix-security)    mode="fix-security"; [[ "${2:-}" =~ ^[0-9]+$ ]] && { sec_alert="$2"; shift; } ;;
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
@@ -330,6 +349,12 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
         local r
         for r in "${targets[@]}"; do triage_autofix_ci "$r" "$apply" "$run_override" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "fix-security" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
+        local r
+        for r in "${targets[@]}"; do triage_autofix_security "$r" "$apply" "$sec_alert" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then

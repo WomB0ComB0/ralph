@@ -76,10 +76,27 @@ export -f gh git 2>/dev/null || true
 dry=$(triage_autofix_ci "o/r" 0 2>&1)
 printf '%s' "$dry" | grep -q 'DRY-RUN' && ok "dry-run announces itself" || bad "no DRY-RUN marker"
 printf '%s' "$dry" | grep -q 'ralph/fix-ci-555' && ok "dry-run shows the bot branch" || bad "branch missing from plan"
-printf '%s' "$dry" | grep -q 'failing branch renovate/dep-1' && ok "dry-run bases the fix on the FAILING branch, not default" || bad "fix not based on failing branch"
+printf '%s' "$dry" | grep -q 'off renovate/dep-1' && ok "dry-run bases the fix on the FAILING branch, not default" || bad "fix not based on failing branch"
 printf '%s' "$dry" | grep -q -- '--base renovate/dep-1' && ok "PR targets the failing branch" || bad "PR base is not the failing branch"
 printf '%s' "$dry" | grep -q 'NEVER push to main' && ok "still NEVER pushes the default branch" || bad "no never-push-default note"
 [[ ! -s "$GITLOG" ]] && ok "dry-run invoked git ZERO times (no writes)" || bad "dry-run touched git: $(cat "$GITLOG")"
+unset -f gh git
+
+echo "== fix-security: code-scanning remediation dry-run =="
+eq "security fix branch is bot-namespaced" "ralph/fix-sec-7" "$(triage_sec_branch_name 7)"
+GITLOG3="$TMP/gitcalls3"; : > "$GITLOG3"
+gh() { case "$*" in
+        *code-scanning/alerts*) echo '[{"number":7,"rule":{"id":"js/sql-injection","security_severity_level":"high","full_description":"SQL injection via req.query","help":"Use parameterized queries"},"most_recent_instance":{"location":{"path":"src/db.js","start_line":12}}}]' ;;
+        *repo*view*) echo "main" ;;
+        *) echo "{}" ;;
+       esac; }
+git() { echo "git $*" >> "$GITLOG3"; }
+sdry=$(triage_autofix_security "o/r" 0 "" 2>&1)
+printf '%s' "$sdry" | grep -q 'DRY-RUN' && ok "fix-security dry-run announces itself" || bad "no DRY-RUN: $sdry"
+printf '%s' "$sdry" | grep -q 'ralph/fix-sec-7' && ok "dry-run uses the security fix branch (highest-sev alert)" || bad "branch missing: $sdry"
+printf '%s' "$sdry" | grep -q -- '--base main' && ok "security PR targets the default branch" || bad "wrong base: $sdry"
+printf '%s' "$sdry" | grep -q 'fix(security): js/sql-injection' && ok "dry-run titles by rule" || bad "no rule title: $sdry"
+[[ ! -s "$GITLOG3" ]] && ok "fix-security dry-run invoked git ZERO times" || bad "dry-run touched git: $(cat "$GITLOG3")"
 unset -f gh git
 
 echo "== resolve-reviews: thread parsing + safety + dry-run =="
