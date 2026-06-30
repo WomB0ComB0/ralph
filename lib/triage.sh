@@ -219,16 +219,101 @@ Automated fix by \`ralph triage --fix-ci\` (local model). Please review before m
     return 0
 }
 
+# Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
+_triage_parse_threads() {
+    jq -r '.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved==false)
+        | [ .id,
+            (.comments.nodes[0].author.login // "?"),
+            (.comments.nodes[0].path // "-"),
+            ((.comments.nodes[0].line // 0)|tostring),
+            ((.comments.nodes[0].body // "")|gsub("[\n\t\r]";" ")) ] | @tsv' 2>/dev/null || true
+}
+
+# Close out review CONVERSATIONS on one of Ralph's own fix PRs: address each unresolved thread
+# with the agent, push to the PR branch, then reply + mark the conversation resolved. DRY-RUN by
+# default. Hard-scoped to ralph/fix-* PRs so it can never auto-dismiss a human's PR review.
+triage_resolve_reviews() {
+    local repo="$1" pr="$2" apply="${3:-0}" iteration=1
+    local owner name; owner="${repo%%/*}"; name="${repo##*/}"
+    local q='query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){headRefName reviewThreads(first:50){nodes{id isResolved comments(first:1){nodes{author{login} path line body}}}}}}}'
+    local data; data=$(gh api graphql -f query="$q" -F o="$owner" -F n="$name" -F pr="$pr" 2>/dev/null || echo '{}')
+    local head; head=$(printf '%s' "$data" | jq -r '.data.repository.pullRequest.headRefName // ""' 2>/dev/null || true)
+    if [[ -z "$head" ]]; then log_error "[$repo#$pr] PR not found / not retrievable."; return 1; fi
+    # SAFETY: only ever act on Ralph's own fix branches — never resolve a human's conversation.
+    if [[ "$head" != ralph/fix-* ]]; then
+        log_error "[$repo#$pr] head '$head' is not a ralph/fix-* branch — refusing to resolve conversations."
+        return 1
+    fi
+    local threads n; threads=$(printf '%s' "$data" | _triage_parse_threads)
+    n=$(printf '%s' "$threads" | grep -c . 2>/dev/null || echo 0)
+    if [[ "$n" -eq 0 ]]; then log_success "[$repo#$pr] no unresolved review conversations."; return 0; fi
+
+    if [[ "$apply" != "1" ]]; then
+        log_warning "[$repo#$pr] $n unresolved conversation(s) — DRY-RUN (would address + resolve):"
+        printf '%s\n' "$threads" | while IFS=$'\t' read -r id author path line body; do
+            [[ -z "$id" ]] && continue
+            printf '  @%-18s %s:%s  %s\n' "$author" "$path" "$line" "${body:0:90}"
+        done
+        printf '    re-run with --apply to address each, push to %s, and resolve the conversations.\n' "$head"
+        return 0
+    fi
+
+    command_exists git || { log_error "git required for --apply."; return 1; }
+    local work lf of; work=$(mktemp -d); lf=$(mktemp); of=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work' '$lf' '$of'" RETURN
+    log_info "[$repo#$pr] cloning $head to address $n conversation(s) ..."
+    if ! gh repo clone "$repo" "$work" -- --depth 50 --branch "$head" >/dev/null 2>&1; then
+        log_error "[$repo#$pr] clone of '$head' failed."; return 1
+    fi
+    local prompt comments
+    comments=$(printf '%s\n' "$threads" | while IFS=$'\t' read -r id author path line body; do [[ -z "$id" ]] || printf -- '- %s:%s — %s\n' "$path" "$line" "$body"; done)
+    prompt=$(printf 'Address these unresolved pull-request review comments with MINIMAL source-code changes (one fix per comment):\n%s\n\nEdit only the source files referenced. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$comments")
+    ( cd "$work" && export PROJECT_DIR="$work"
+      if [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]]; then
+          RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool opencode "" "$prompt" "$lf" "$of"
+      else
+          RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of"
+      fi ) || true
+    ( cd "$work" \
+        && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
+        git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
+        git checkout -- .github 2>/dev/null; git clean -fd -- .github 2>/dev/null ) || true
+    if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
+        log_warning "[$repo#$pr] agent produced no changes — conversations left OPEN (not resolved)."
+        return 0
+    fi
+    if ! _triage_safe_push_branch "$head" "${head}__never"; then   # head is ralph/fix-* by the gate above
+        log_error "[$repo#$pr] refusing to push '$head'."; return 1
+    fi
+    if ! ( cd "$work" \
+            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git add -A && git commit -q -m "fix: address review comments on #$pr (automated)" \
+            && git push >/dev/null 2>&1 ); then
+        log_error "[$repo#$pr] commit/push failed."; return 1
+    fi
+    local sha; sha=$(cd "$work" && git rev-parse --short HEAD 2>/dev/null || echo "")
+    # Only NOW resolve each conversation — and only because we pushed a real change addressing them.
+    printf '%s\n' "$threads" | while IFS=$'\t' read -r id author path line body; do
+        [[ -z "$id" ]] && continue
+        gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="Addressed in $sha (automated by \`ralph triage --resolve-reviews\`)." >/dev/null 2>&1 || true
+        gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" >/dev/null 2>&1 || true
+    done
+    log_success "[$repo#$pr] addressed + resolved $n conversation(s) (pushed $sha to $head)."
+    return 0
+}
+
 # Orchestrate the read-only triage across the allowlist; record each finding as a signal.
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
     # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
-    local mode="report" apply=0 run_override=""
+    local mode="report" apply=0 run_override="" resolve_pr=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --fix-ci) mode="fix-ci" ;;
-            --apply)  apply=1 ;;
-            --run)    run_override="${2:-}"; shift ;;
+            --fix-ci)          mode="fix-ci" ;;
+            --apply)           apply=1 ;;
+            --run)             run_override="${2:-}"; shift ;;
+            --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
         esac
         shift
     done
@@ -245,6 +330,13 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
         local r
         for r in "${targets[@]}"; do triage_autofix_ci "$r" "$apply" "$run_override" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "resolve-reviews" ]]; then
+        if [[ -z "$resolve_pr" ]]; then log_error "--resolve-reviews needs a PR number, e.g. 'ralph triage --resolve-reviews 475'."; return 1; fi
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): listing unresolved conversations only — nothing is pushed or resolved."
+        local r
+        for r in "${targets[@]}"; do triage_resolve_reviews "$r" "$resolve_pr" "$apply" || true; done
         return 0
     fi
     log_info "Triaging ${#targets[@]} repo(s), read-only: ${targets[*]}"
