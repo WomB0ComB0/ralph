@@ -29,16 +29,16 @@ triage_load_targets() {
             printf '%s\n' "$RALPH_TARGETS" | tr ',' '\n' | tr ' ' '\n'
         else
             local f="${RALPH_TARGETS_FILE:-$dir/ralph.targets}"
-            [[ -f "$f" ]] && sed 's/#.*//' "$f"
+            [[ -f "$f" ]] && cat "$f"
         fi
-    } | awk '{ gsub(/[ \t\r]/,"") } /^[^\/]+\/[^\/]+$/ && !seen[$0]++ { print }'
+    } | awk '{ sub(/#.*/,""); gsub(/[ \t\r]/,"") } /^[^\/]+\/[^\/]+$/ && !seen[$0]++ { print }'
 }
 
 # Parse `gh run list --json name,headBranch,url` -> TSV findings (sev\trepo\tcategory\tsummary\turl).
 _triage_parse_runs() {
     local repo="$1"
     jq -r --arg r "$repo" '
-        .[]? | "medium\t\($r)\tci\t\((.name // "workflow")) failed on \((.headBranch // "?"))\t\((.url // ""))"
+        arrays[] |"medium\t\($r)\tci\t\((.name // "workflow")) failed on \((.headBranch // "?"))\t\((.url // ""))"
     ' 2>/dev/null || true
 }
 
@@ -47,13 +47,13 @@ _triage_parse_alerts() {
     local repo="$1" kind="$2"
     case "$kind" in
         dependabot)
-            jq -r --arg r "$repo" '.[]? | select((.state // "open")=="open")
+            jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
                 | "\((.security_advisory.severity // "low"))\t\($r)\tdependabot\t\((.dependency.package.name // "?")): \((.security_advisory.summary // "vulnerable dependency"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
         code-scanning)
-            jq -r --arg r "$repo" '.[]? | select((.state // "open")=="open")
+            jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
                 | "\((.rule.security_severity_level // .rule.severity // "warning"))\t\($r)\tcode-scan\t\((.rule.description // .rule.id // "code scanning alert"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
         secret-scanning)
-            jq -r --arg r "$repo" '.[]? | select((.state // "open")=="open")
+            jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
                 | "high\t\($r)\tsecret\t\((.secret_type_display_name // .secret_type // "leaked secret"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
     esac
 }
@@ -113,7 +113,7 @@ handle_triage_command() {
     local sev repo2 cat summary url
     while IFS=$'\t' read -r sev repo2 cat summary url; do
         [[ -z "$repo2" ]] && continue
-        record_signal "triage_${cat}_${repo2//[^a-zA-Z0-9]/_}" "$cat finding in $repo2" "$summary ${url:+($url)}" "review and resolve: $summary" "triage" "$sev" >/dev/null 2>&1 || true
+        record_signal "triage_${cat}_${repo2//[^a-zA-Z0-9]/_}" "$cat finding in $repo2" "$summary${url:+ ($url)}" "review and resolve: $summary" "triage" "$sev" >/dev/null 2>&1 || true
     done < "$all"
     rm -f "$all"
     log_info "Recorded findings as signals (see 'ralph signal ls'). Autofix→PR / suggest modes are opt-in (coming next)."
