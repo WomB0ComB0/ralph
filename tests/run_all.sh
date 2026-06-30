@@ -38,6 +38,7 @@ run lint     "$DIR/test_lint.sh"
 run ai-tools "$DIR/test_ai_tools.sh"
 run models   "$DIR/test_models.sh"
 run fallback "$DIR/test_fallback.sh"
+run triage   "$DIR/test_triage.sh"
 run memory   "$DIR/test_memory.sh"
 run native   "$DIR/run_internal_tests.sh"
 

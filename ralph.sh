@@ -32,6 +32,9 @@ source "$SCRIPT_DIR/lib/skills.sh"
 # shellcheck source=lib/lint.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/lint.sh"
+# shellcheck source=lib/triage.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/triage.sh"
 
 # NOTE: dependency checking is deferred to main() — it runs only on the iterating path
 # (after --tool/config are parsed) so `--help`, `--version`, `--test`, and the read-only
