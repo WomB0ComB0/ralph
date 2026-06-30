@@ -329,6 +329,55 @@ triage_resolve_reviews() {
     return 0
 }
 
+# Render a triage findings file (TSV: sev\trepo\tcat\tsummary\turl) as a markdown checklist body.
+_triage_suggest_body() {
+    echo "Automated triage by \`ralph triage --suggest\` — each item is a suggested fix to review:"
+    echo
+    while IFS=$'\t' read -r sev repo cat summary url; do
+        [[ -z "$repo" ]] && continue
+        printf -- '- [ ] **[%s] %s** — %s%s\n' "$sev" "$cat" "$summary" "${url:+ (${url})}"
+    done
+    echo
+    echo "<!-- ralph-triage -->"
+}
+
+# Suggest-only mode: digest a repo's findings into ONE GitHub issue (idempotent — comments an
+# existing open ralph-triage issue rather than spamming). Lower blast radius than autofix→PR:
+# it never touches code. DRY-RUN by default.
+triage_suggest() {
+    local repo="$1" apply="${2:-0}"
+    local all=""
+    trap '[[ -n "$all" ]] && rm -f "$all"' RETURN
+    all=$(mktemp) || { log_error "[$repo] mktemp failed."; return 1; }
+    triage_scan_repo "$repo" > "$all" 2>/dev/null || true
+    local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
+    if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; return 0; fi
+    local title body; title="Ralph triage: $count item(s) needing attention"
+    body=$(_triage_suggest_body < "$all")
+    if [[ "$apply" != "1" ]]; then
+        log_info "[$repo] DRY-RUN — would open/update an issue:"
+        printf '    title: %s\n' "$title"
+        printf '%s\n' "$body" | sed 's/^/    /'
+        printf '    re-run with --apply to create/update the issue.\n'
+        return 0
+    fi
+    # Idempotent: reuse an existing open issue carrying the ralph-triage marker.
+    local existing
+    existing=$(gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty' 2>/dev/null || true)
+    if [[ -n "$existing" ]]; then
+        gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1 \
+            && log_success "[$repo] updated triage issue #$existing." || { log_error "[$repo] failed to comment on #$existing."; return 1; }
+    else
+        local url
+        if url=$(gh issue create --repo "$repo" --title "$title" --body "$body" 2>/dev/null); then
+            log_success "[$repo] opened a triage issue: $url"
+        else
+            log_error "[$repo] failed to create triage issue."; return 1
+        fi
+    fi
+    return 0
+}
+
 # Orchestrate the read-only triage across the allowlist; record each finding as a signal.
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
@@ -338,6 +387,7 @@ handle_triage_command() {
         case "$1" in
             --fix-ci)          mode="fix-ci" ;;
             --fix-security)    mode="fix-security"; [[ "${2:-}" =~ ^[0-9]+$ ]] && { sec_alert="$2"; shift; } ;;
+            --suggest)         mode="suggest" ;;
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
@@ -363,6 +413,12 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
         local r
         for r in "${targets[@]}"; do triage_autofix_security "$r" "$apply" "$sec_alert" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "suggest" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the issue(s) only — nothing is created."
+        local r
+        for r in "${targets[@]}"; do triage_suggest "$r" "$apply" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then

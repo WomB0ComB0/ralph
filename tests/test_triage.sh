@@ -82,6 +82,21 @@ printf '%s' "$dry" | grep -q 'NEVER push to main' && ok "still NEVER pushes the 
 [[ ! -s "$GITLOG" ]] && ok "dry-run invoked git ZERO times (no writes)" || bad "dry-run touched git: $(cat "$GITLOG")"
 unset -f gh git
 
+echo "== suggest: issue body + dry-run creates nothing =="
+sbody=$(printf 'high\to/r\tdependabot\tlodash RCE\thttps://x/1\nmedium\to/r\tci\tBuild failed\t\n' | _triage_suggest_body)
+printf '%s' "$sbody" | grep -q -- '- \[ \] \*\*\[high\] dependabot\*\* — lodash RCE (https://x/1)' && ok "suggest body renders a checklist item with url" || bad "bad body: $sbody"
+printf '%s' "$sbody" | grep -q 'ci\*\* — Build failed$' && ok "suggest body omits empty url cleanly" || bad "trailing url junk: $sbody"
+printf '%s' "$sbody" | grep -q '<!-- ralph-triage -->' && ok "suggest body carries the idempotency marker" || bad "no marker"
+# dry-run: builds the issue but creates NOTHING (gh never invoked)
+GHLOG="$TMP/ghcalls"; : > "$GHLOG"
+triage_scan_repo() { printf 'high\to/r\tsecret\tAWS key leaked\thttps://x/9\n'; }
+gh() { echo "gh $*" >> "$GHLOG"; }
+sg=$(triage_suggest "o/r" 0 2>&1)
+printf '%s' "$sg" | grep -q 'DRY-RUN' && ok "suggest dry-run announces itself" || bad "no DRY-RUN: $sg"
+printf '%s' "$sg" | grep -q 'item(s) needing attention' && ok "suggest dry-run shows the issue title" || bad "no title: $sg"
+[[ ! -s "$GHLOG" ]] && ok "suggest dry-run invoked gh ZERO times (no issue created)" || bad "dry-run called gh: $(cat "$GHLOG")"
+unset -f triage_scan_repo gh
+
 echo "== fix-security: code-scanning remediation dry-run =="
 eq "security fix branch is bot-namespaced" "ralph/fix-sec-7" "$(triage_sec_branch_name 7)"
 GITLOG3="$TMP/gitcalls3"; : > "$GITLOG3"
