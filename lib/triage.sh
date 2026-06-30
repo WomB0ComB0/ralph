@@ -138,9 +138,11 @@ triage_autofix_ci() {
     local work; work=$(mktemp -d)
     # shellcheck disable=SC2064
     trap "rm -rf '$work'" RETURN
-    log_info "[$repo] cloning to fix CI run $run_id ..."
-    if ! gh repo clone "$repo" "$work" -- --depth 50 >/dev/null 2>&1; then
-        log_error "[$repo] clone failed."; return 1
+    log_info "[$repo] cloning $base_branch to fix CI run $run_id ..."
+    # Clone the FAILING branch directly (--depth 50 is single-branch, so a later fetch+checkout of a
+    # different branch silently fails and leaves us on the default branch — where the bug isn't).
+    if ! gh repo clone "$repo" "$work" -- --depth 50 --branch "$base_branch" >/dev/null 2>&1; then
+        log_error "[$repo] clone of branch '$base_branch' failed."; return 1
     fi
     local logs prompt lf of full
     # Focus the prompt on the ACTUAL error lines (compiler/test/lint), not the raw stack-trace
@@ -162,8 +164,7 @@ triage_autofix_ci() {
     local fix_model_source="fallback"
     [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" ]] && fix_model_source="selfselect"
     ( cd "$work" && export PROJECT_DIR="$work"
-      [[ "$base_branch" == "$default_branch" ]] || { git fetch --depth 50 origin "$base_branch" >/dev/null 2>&1 && git checkout "$base_branch" >/dev/null 2>&1; }
-      git checkout -b "$branch" >/dev/null 2>&1
+      git checkout -b "$branch" >/dev/null 2>&1   # already on $base_branch from the clone
       if [[ "$fix_model_source" == "selfselect" ]]; then
           # run_ai_with_fallback ALWAYS resolves a concrete model (resolve_model_for_tool), which
           # may not be authenticated. When the user pinned nothing, bypass it and pass an empty
