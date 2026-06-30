@@ -346,7 +346,9 @@ _triage_suggest_body() {
 # it never touches code. DRY-RUN by default.
 triage_suggest() {
     local repo="$1" apply="${2:-0}"
-    local all; all=$(mktemp); trap "rm -f '$all'" RETURN
+    local all=""
+    trap '[[ -n "$all" ]] && rm -f "$all"' RETURN
+    all=$(mktemp) || { log_error "[$repo] mktemp failed."; return 1; }
     triage_scan_repo "$repo" > "$all" 2>/dev/null || true
     local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
     if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; return 0; fi
@@ -366,8 +368,12 @@ triage_suggest() {
         gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1 \
             && log_success "[$repo] updated triage issue #$existing." || { log_error "[$repo] failed to comment on #$existing."; return 1; }
     else
-        gh issue create --repo "$repo" --title "$title" --body "$body" 2>&1 | tail -1
-        log_success "[$repo] opened a triage issue."
+        local url
+        if url=$(gh issue create --repo "$repo" --title "$title" --body "$body" 2>/dev/null); then
+            log_success "[$repo] opened a triage issue: $url"
+        else
+            log_error "[$repo] failed to create triage issue."; return 1
+        fi
     fi
     return 0
 }
