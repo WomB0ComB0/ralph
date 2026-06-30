@@ -58,5 +58,26 @@ eq "code-scanning uses security_severity_level" "critical	o/r	code-scan	SQL inje
 sec='[{"state":"open","secret_type_display_name":"AWS Access Key","html_url":"https://x/s1"}]'
 eq "secret-scanning -> high severity" "high	o/r	secret	AWS Access Key	https://x/s1" "$(printf '%s' "$sec" | _triage_parse_alerts "o/r" secret-scanning)"
 
+echo "== CI autofix safety: branch naming + push gate + dry-run writes nothing =="
+eq "fix branch is bot-namespaced + deterministic" "ralph/fix-ci-789" "$(triage_ci_branch_name 789)"
+# the push gate is the last line of defense against ever writing a default branch
+_triage_safe_push_branch "ralph/fix-ci-1" "main" && ok "push allowed for ralph/fix-* off main" || bad "push wrongly blocked"
+_triage_safe_push_branch "main" "main"          && bad "push allowed for default branch!" || ok "push BLOCKED for the default branch"
+_triage_safe_push_branch "feature/x" "main"     && bad "push allowed for non-ralph branch!" || ok "push BLOCKED for a non-ralph/fix branch"
+_triage_safe_push_branch "" "main"              && bad "push allowed for empty branch!" || ok "push BLOCKED for an empty branch"
+
+# DRY-RUN must print the plan and call NEITHER git nor a push. Stub gh (failing run + default
+# branch) and git (records any invocation); assert git is never touched.
+GITLOG="$TMP/gitcalls"; : > "$GITLOG"
+gh()  { case "$1" in run) echo '[{"databaseId":555,"url":"https://x/run/555"}]';; repo) echo "main";; *) echo "";; esac; }
+git() { echo "git $*" >> "$GITLOG"; }
+export -f gh git 2>/dev/null || true
+dry=$(triage_autofix_ci "o/r" 0 2>&1)
+printf '%s' "$dry" | grep -q 'DRY-RUN' && ok "dry-run announces itself" || bad "no DRY-RUN marker"
+printf '%s' "$dry" | grep -q 'ralph/fix-ci-555' && ok "dry-run shows the bot branch" || bad "branch missing from plan"
+printf '%s' "$dry" | grep -q 'NEVER push' && ok "dry-run states the never-push-default guarantee" || bad "no never-push note"
+[[ ! -s "$GITLOG" ]] && ok "dry-run invoked git ZERO times (no writes)" || bad "dry-run touched git: $(cat "$GITLOG")"
+unset -f gh git
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

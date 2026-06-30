@@ -82,8 +82,102 @@ _triage_report() {
     done
 }
 
+# Deterministic, clearly bot-namespaced fix branch (so a human PR can never collide / be mistaken).
+triage_ci_branch_name() { printf 'ralph/fix-ci-%s\n' "$1"; }
+
+# Safety gate for ANY push: only a non-empty `ralph/fix-*` branch that isn't the default branch
+# may be pushed. This is the last line of defense against ever writing to a default branch.
+_triage_safe_push_branch() {
+    local branch="$1" default="$2"
+    [[ -n "$branch" && "$branch" != "$default" && "$branch" == ralph/fix-* ]]
+}
+
+# Attempt to fix the latest failing CI run for ONE repo and open a PR. DRY-RUN by default
+# (prints the exact plan, writes nothing); pass apply=1 to execute. Even with apply, it works
+# in a throwaway clone, only ever pushes the ralph/fix-* branch, opens the PR against the
+# default branch, and never touches the default branch itself.
+triage_autofix_ci() {
+    local repo="$1" apply="${2:-0}"
+    # iteration is referenced by run_ai_tool (status bar/logging); set it so the call doesn't
+    # trip `set -u` when invoked outside the normal iteration loop.
+    local run_json run_id run_url default_branch branch iteration=1
+    run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url 2>/dev/null || echo '[]')
+    run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
+    if [[ -z "$run_id" ]]; then
+        log_info "[$repo] no failing CI run — nothing to fix."
+        return 0
+    fi
+    run_url=$(printf '%s' "$run_json" | jq -r 'arrays[0].url // ""' 2>/dev/null || true)
+    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    branch=$(triage_ci_branch_name "$run_id")
+
+    if [[ "$apply" != "1" ]]; then
+        log_info "[$repo] DRY-RUN — would attempt to fix CI run $run_url"
+        printf '    clone   %s -> throwaway worktree\n' "$repo"
+        printf '    branch  %s (off %s)\n' "$branch" "$default_branch"
+        printf '    model   %s\n' "${RALPH_LOCAL_MODEL:-<resolved at run; local-first if configured>}"
+        printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$default_branch" "$branch"
+        printf '    will NEVER push to %s. Re-run with --apply to execute.\n' "$default_branch"
+        return 0
+    fi
+
+    command_exists git || { log_error "git is required for --apply."; return 1; }
+    local work; work=$(mktemp -d)
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+    log_info "[$repo] cloning to fix CI run $run_id ..."
+    if ! gh repo clone "$repo" "$work" -- --depth 50 >/dev/null 2>&1; then
+        log_error "[$repo] clone failed."; return 1
+    fi
+    local logs prompt lf of
+    logs=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null | tail -n 120 || true)
+    prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nFailing log (tail):\n%s\n\nFix the failing CI with MINIMAL changes to the code/tests. Do not edit unrelated files. Do not change CI workflow files unless the workflow itself is the bug.' "$run_url" "$repo" "$logs")
+    lf="$work/.ralph-fix.log"; of="$work/.ralph-fix.out"
+    # PROJECT_DIR must point at the CLONE so tools that bind a working dir (e.g. agy --add-dir)
+    # operate on the throwaway checkout, not the original repo.
+    ( cd "$work" && export PROJECT_DIR="$work" && git checkout -b "$branch" >/dev/null 2>&1 \
+        && RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of" ) || true
+
+    if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
+        log_warning "[$repo] fix attempt produced no changes — no PR opened."
+        return 0
+    fi
+    local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if ! _triage_safe_push_branch "$cur" "$default_branch"; then
+        log_error "[$repo] refusing to push: on '$cur' (not a ralph/fix-* branch off '$default_branch')."
+        return 1
+    fi
+    # Local identity in the clone so the commit succeeds even with no global git user config.
+    if ! ( cd "$work" \
+            && git config user.name "ralph-bot" \
+            && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git add -A \
+            && git commit -q -m "fix: resolve failing CI (run $run_id)
+
+Automated fix by \`ralph triage --fix-ci\` (local model). Please review before merging." \
+            && git push -u origin "$cur" >/dev/null 2>&1 ); then
+        log_error "[$repo] commit/push failed."; return 1
+    fi
+    gh pr create --repo "$repo" --base "$default_branch" --head "$cur" \
+        --title "fix: resolve failing CI (run $run_id)" \
+        --body "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
+
+⚠️ Agent-generated — please review before merging." 2>&1 | tail -1
+    log_success "[$repo] opened a PR from $cur against $default_branch."
+    return 0
+}
+
 # Orchestrate the read-only triage across the allowlist; record each finding as a signal.
 handle_triage_command() {
+    # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
+    # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
+    local mode="report" apply=0 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --fix-ci) mode="fix-ci" ;;
+            --apply)  apply=1 ;;
+        esac
+    done
     if ! command_exists gh; then
         log_error "triage needs the GitHub CLI (gh) with an authenticated token."
         return 1
@@ -92,6 +186,12 @@ handle_triage_command() {
     if [[ ${#targets[@]} -eq 0 ]]; then
         log_error "No triage targets. Set RALPH_TARGETS=\"owner/repo,owner/repo\" or create a ralph.targets file (one owner/repo per line)."
         return 1
+    fi
+    if [[ "$mode" == "fix-ci" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
+        local r
+        for r in "${targets[@]}"; do triage_autofix_ci "$r" "$apply" || true; done
+        return 0
     fi
     log_info "Triaging ${#targets[@]} repo(s), read-only: ${targets[*]}"
     local all repo; all=$(mktemp)
