@@ -295,6 +295,77 @@ determine_model() {
 }
 
 #######################################
+# SMART MODEL MANAGEMENT — fallback chain + capacity-failure classification + graceful
+# degradation. All opt-in: with no config the chain has one model, so behaviour is unchanged.
+#######################################
+
+# Classify a FAILED tool run from its captured output + exit code, so we only fall back on
+# transient/capacity issues (rate limit, overload, token/credit exhaustion, timeout) and do
+# NOT burn the chain on auth or generic bugs.
+# Echoes: rate_limit | overloaded | quota | auth | timeout | other
+classify_tool_failure() {
+    local out="$1" rc="${2:-1}" lc
+    [[ "$rc" == "124" ]] && { echo timeout; return 0; }   # our `timeout` wrapper's exit code
+    lc=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
+    case "$lc" in
+        *"rate limit"*|*rate_limit*|*ratelimit*|*"429"*|*"too many requests"*) echo rate_limit ;;
+        *overloaded*|*"529"*|*"503"*|*"server is busy"*|*"at capacity"*|*"service unavailable"*) echo overloaded ;;
+        *quota*|*"out of credit"*|*"insufficient credit"*|*"exceeded your current"*|*billing*|*"context length"*|*"maximum context"*|*"token limit"*|*"context window"*) echo quota ;;
+        *unauthorized*|*authentication*|*"invalid api key"*|*"missing bearer"*|*forbidden*|*"permission denied"*) echo auth ;;
+        *) echo other ;;
+    esac
+}
+
+# A local model to prefer when no model is pinned — "use local unless specified". Only
+# opencode can route to a local provider. Honours RALPH_LOCAL_MODEL, else auto-detects Ollama.
+# RALPH_PREFER_LOCAL=0/false/no disables it. Echoes the model id; returns 1 if none.
+preferred_local_model() {
+    local tool="$1" m pref="${RALPH_PREFER_LOCAL:-auto}"
+    case "$pref" in 0|false|no|off) return 1 ;; esac
+    [[ "$tool" == "opencode" ]] || return 1
+    # An explicit local model wins (this is how you say "use local unless specified").
+    if [[ -n "${RALPH_LOCAL_MODEL:-}" ]]; then printf '%s\n' "$RALPH_LOCAL_MODEL"; return 0; fi
+    # Auto-detecting Ollama is OPT-IN (RALPH_PREFER_LOCAL=1/true/yes/on) so a host that merely
+    # has Ollama installed isn't silently switched off its cloud default — default stays unchanged.
+    case "$pref" in
+        1|true|yes|on)
+            if command_exists ollama; then
+                m=$(ollama list 2>/dev/null | awk 'NR==2{print $1}')   # first locally-pulled model
+                [[ -n "$m" ]] && { printf 'ollama/%s\n' "$m"; return 0; }
+            fi ;;
+    esac
+    return 1
+}
+
+# Ordered model candidates to try this iteration: [primary] + RALPH_MODEL_FALLBACKS.
+# primary = a user-pinned model (wins) -> else a preferred local model -> else the tool's
+# auto pick. Empty/whitespace entries and consecutive duplicates are dropped.
+build_model_chain() {
+    local tool="$1" role="${2:-engineer}" primary lm
+    local -a chain=() fbs=()
+    if [[ -n "${SELECTED_MODEL:-}" && "${SELECTED_MODEL_SOURCE:-}" != "auto" ]]; then
+        primary="$SELECTED_MODEL"
+    elif lm=$(preferred_local_model "$tool"); then
+        primary="$lm"
+    else
+        # Avoid a set -e abort if the router exits non-zero (we run inside a < <() subshell).
+        primary="${SELECTED_MODEL:-}"
+        [[ -z "$primary" ]] && primary=$(resolve_model_for_tool "$tool" "$role" 2>/dev/null || true)
+    fi
+    chain+=("$primary")
+    if [[ -n "${RALPH_MODEL_FALLBACKS:-}" ]]; then
+        local _oifs="$IFS"; IFS=','; read -ra fbs <<< "$RALPH_MODEL_FALLBACKS"; IFS="$_oifs"
+        chain+=("${fbs[@]+"${fbs[@]}"}")
+    fi
+    local c prev="__none__"
+    for c in "${chain[@]}"; do
+        c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"   # trim
+        [[ "$c" == "$prev" ]] && continue
+        printf '%s\n' "$c"; prev="$c"
+    done
+}
+
+#######################################
 # Validate model availability
 # Arguments:
 #   $1 - Model identifier
@@ -743,6 +814,42 @@ run_ai_tool() {
     return $exit_code
 }
 
+# Run the AI tool with smart model management: try each model in build_model_chain (each with
+# the normal per-model retry/backoff). On a CAPACITY failure (rate limit / overload / quota /
+# timeout) degrade to the next model; on auth/other failures don't burn the chain. Sets
+# SELECTED_MODEL to the model actually used (so logs/metrics/failure events are accurate).
+# Falls through to identical single-model behaviour when no fallbacks are configured.
+run_ai_with_fallback() {
+    local tool="$1" role="$2" prompt="$3" log="$4" out="$5"
+    local attempts="${AI_RETRY_ATTEMPTS:-3}" delay="${AI_RETRY_BASE_DELAY:-5}"
+    local -a chain=(); mapfile -t chain < <(build_model_chain "$tool" "$role")
+    [[ ${#chain[@]} -eq 0 ]] && chain=("${SELECTED_MODEL:-}")   # never empty
+    local model rc=0 category idx=0 total=${#chain[@]}
+    for model in "${chain[@]}"; do
+        idx=$((idx + 1))
+        # Record the model ACTUALLY used (for logs/metrics/failure events) WITHOUT mutating
+        # SELECTED_MODEL — determine_model runs once before the loop, so overwriting it would
+        # permanently demote the primary for the rest of the run after one transient failure.
+        _RALPH_ACTIVE_MODEL="$model"; export _RALPH_ACTIVE_MODEL
+        [[ $idx -gt 1 ]] && log_warning "Smart model fallback ($idx/$total): trying '${model:-<self-select>}'"
+        # Capture the real exit code via `|| rc=$?` — a bare `if cmd; then return 0; fi`
+        # would leave $? as the (false) if's status of 0, masking the failure.
+        rc=0
+        retry_with_backoff "$attempts" "$delay" -- run_ai_tool "$tool" "$model" "$prompt" "$log" "$out" || rc=$?
+        [[ $rc -eq 0 ]] && return 0
+        [[ $idx -ge $total ]] && break   # chain exhausted -> graceful degradation done
+        category=$(classify_tool_failure "$(cat "$out" 2>/dev/null || true)" "$rc")
+        case "$category" in
+            rate_limit|overloaded|quota|timeout)
+                log_warning "Model '${model:-<self-select>}' hit '$category' — degrading to the next model" ;;
+            *)
+                log_warning "Model '${model:-<self-select>}' failed ('$category'); not a capacity issue — keeping it"
+                break ;;
+        esac
+    done
+    return "${rc:-1}"
+}
+
 #######################################
 # Load context with active windowing
 # Limits context size while preserving important information
@@ -991,21 +1098,23 @@ execute_iteration() {
     local start_ts end_ts iteration_latency
     start_ts=$(get_high_res_time)
 
-    # Bounded retry so a transient tool/API failure is NOT mistaken for
-    # "no work left to do". On exhaustion we return a distinct code (2) and
-    # emit a durable failure event instead of silently continuing.
+    # Smart model management: each candidate model gets bounded retry/backoff, and we degrade
+    # down the fallback chain on capacity failures (rate limit / overload / quota / timeout) so
+    # a transient/API failure is NOT mistaken for "no work left to do". On full exhaustion we
+    # return a distinct code (2) and emit a durable failure event. (Default chain = 1 model.)
     local ai_attempts="${AI_RETRY_ATTEMPTS:-3}"
-    if ! retry_with_backoff "$ai_attempts" "${AI_RETRY_BASE_DELAY:-5}" -- \
-            run_ai_tool "$TOOL" "$SELECTED_MODEL" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
-        log_error "AI tool execution failed after ${ai_attempts} attempt(s)"
-        # Build the payload with jq so special characters in TOOL/SELECTED_MODEL cannot
+    if ! run_ai_with_fallback "$TOOL" "${RALPH_ROLE:-engineer}" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
+        # Report the model actually used (the chain may have degraded past the primary).
+        local used_model="${_RALPH_ACTIVE_MODEL:-$SELECTED_MODEL}"
+        log_error "AI tool execution failed (model chain exhausted; last model: $used_model)"
+        # Build the payload with jq so special characters in TOOL/model cannot
         # produce malformed JSON.
         local fail_payload
-        fail_payload=$(jq -n --argjson iteration "$iteration" --arg tool "$TOOL" --arg model "$SELECTED_MODEL" \
+        fail_payload=$(jq -n --argjson iteration "$iteration" --arg tool "$TOOL" --arg model "$used_model" \
             '{iteration: $iteration, tool: $tool, model: $model}' 2>/dev/null || echo '{}')
         emit_event "iteration_failed" "$fail_payload"
-        store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $SELECTED_MODEL)."
-        record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $SELECTED_MODEL did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
+        store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $used_model)."
+        record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $used_model did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
         return 2
     fi
     
@@ -1085,7 +1194,7 @@ execute_iteration() {
             --arg run_id "${RUN_ID:-}" \
             --argjson iteration "${iteration:-0}" \
             --arg tool "$TOOL" \
-            --arg model "$SELECTED_MODEL" \
+            --arg model "${_RALPH_ACTIVE_MODEL:-$SELECTED_MODEL}" \
             --argjson latency "${iteration_latency:-0}" \
             --argjson tokens "${est_tokens:-0}" \
             --argjson lazy_streak "${LAZY_STREAK:-0}" \
