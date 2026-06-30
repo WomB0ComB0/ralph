@@ -23,7 +23,7 @@ working tree.
 | `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (13) |
 | `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy / codex, headless flags, stdin vs positional, subshell-scoped env, agy flag-order + --model, per-call timeout, codex (exec/sandbox), tool validity, stderr/stdout capture separation, claude fallback/budget/auth, opt-in session resume (`--continue`) + `_should_resume` gating, agy `--add-dir` cwd binding, tool-aware `resolve_agents_file` (CLAUDE.md vs AGENTS.md, strict override) (80) |
 | `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude alias, amp/codex self-select, agy `agy models`, determine_model source precedence, param-count guard, alias validation (16) |
-| `test_fallback.sh` | Smart model management: `classify_tool_failure` (rate-limit/overload/quota/auth/timeout), `build_model_chain` (primary + fallbacks, local-first, dedup), `preferred_local_model`, `run_ai_with_fallback` graceful degradation, non-sticky (27) |
+| `test_fallback.sh` | Smart model management: `classify_tool_failure` (rate-limit/overload/quota/auth/timeout), `build_model_chain` (primary + fallbacks, local-first, dedup), `preferred_local_model`, `run_ai_with_fallback` graceful degradation, non-sticky, stderr-in-log classify (28) |
 | `test_memory.sh` | Genetic memory: `<memory>…</memory>` extraction from agent output, `store_lesson` dedup + defensive init, `recall_lessons` read-back, null-safety (13) |
 | `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 18 cases) |
 

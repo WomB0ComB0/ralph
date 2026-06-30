@@ -60,14 +60,19 @@ unset RALPH_LOCAL_MODEL RALPH_MODEL_FALLBACKS
 export SELECTED_MODEL="dup" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="dup,other"
 eq "consecutive dup collapsed" "dup|other" "$(build_model_chain opencode engineer | paste -sd'|' -)"
 unset SELECTED_MODEL SELECTED_MODEL_SOURCE RALPH_MODEL_FALLBACKS
+# empty entries (trailing/double comma) must NOT become empty model attempts
+export SELECTED_MODEL="p" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="a,,b,"
+eq "empty fallback entries dropped" "p|a|b" "$(build_model_chain opencode engineer | paste -sd'|' -)"
+unset SELECTED_MODEL SELECTED_MODEL_SOURCE RALPH_MODEL_FALLBACKS
 
 echo "== run_ai_with_fallback: graceful degradation on capacity failure (stubbed tool) =="
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 export AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0   # no slow backoff in tests
 TRIED="$TMP/tried"
-# Stub: model-a is "rate limited", model-b succeeds. Record every model attempted.
-run_ai_tool() { echo "$2" >> "$TRIED"; if [[ "$2" == "model-a" ]]; then echo '429 rate limit' > "$5"; return 1; fi; echo "done by $2" > "$5"; return 0; }
-: > "$TRIED"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
+# Stub: model-a is "rate limited" — error written to the LOG (stderr), $out empty, like a real
+# CLI. This guards the critical path: classify must read the log, not just the stdout file.
+run_ai_tool() { echo "$2" >> "$TRIED"; if [[ "$2" == "model-a" ]]; then echo '429 rate limit exceeded' >> "$4"; : > "$5"; return 1; fi; echo "done by $2" > "$5"; return 0; }
+: > "$TRIED"; : > "$TMP/log"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
 run_ai_with_fallback opencode engineer "p" "$TMP/log" "$TMP/out"; rc=$?
 eq "rate-limited primary -> overall success via fallback" 0 "$rc"
 eq "both models attempted in order" "model-a model-b" "$(paste -sd' ' "$TRIED")"
@@ -77,14 +82,14 @@ grep -q 'done by model-b' "$TMP/out" && ok "output is from the fallback model" |
 
 # A NON-capacity failure must NOT burn the chain.
 run_ai_tool() { echo "$2" >> "$TRIED"; echo 'fatal: nonsense bug' > "$5"; return 1; }
-: > "$TRIED"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
+: > "$TRIED"; : > "$TMP/log"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
 run_ai_with_fallback opencode engineer "p" "$TMP/log" "$TMP/out"; rc=$?
 [[ $rc -ne 0 ]] && ok "non-capacity failure returns non-zero" || bad "non-capacity failure masked as success"
 eq "non-capacity failure does NOT try the fallback" "model-a" "$(paste -sd' ' "$TRIED")"
 
 # Happy path: primary succeeds -> fallback never tried.
 run_ai_tool() { echo "$2" >> "$TRIED"; echo "ok $2" > "$5"; return 0; }
-: > "$TRIED"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
+: > "$TRIED"; : > "$TMP/log"; export SELECTED_MODEL="model-a" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="model-b"
 run_ai_with_fallback opencode engineer "p" "$TMP/log" "$TMP/out"; rc=$?
 eq "primary success rc" 0 "$rc"
 eq "fallback NOT tried when primary succeeds" "model-a" "$(paste -sd' ' "$TRIED")"

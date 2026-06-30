@@ -306,7 +306,7 @@ determine_model() {
 classify_tool_failure() {
     local out="$1" rc="${2:-1}" lc
     [[ "$rc" == "124" ]] && { echo timeout; return 0; }   # our `timeout` wrapper's exit code
-    lc=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')
+    lc="${out,,}"   # Bash 4 native lowercase
     case "$lc" in
         *"rate limit"*|*rate_limit*|*ratelimit*|*"429"*|*"too many requests"*) echo rate_limit ;;
         *overloaded*|*"529"*|*"503"*|*"server is busy"*|*"at capacity"*|*"service unavailable"*) echo overloaded ;;
@@ -331,7 +331,8 @@ preferred_local_model() {
         1|true|yes|on)
             if command_exists ollama; then
                 m=$(ollama list 2>/dev/null | awk 'NR==2{print $1}')   # first locally-pulled model
-                [[ -n "$m" ]] && { printf 'ollama/%s\n' "$m"; return 0; }
+                # Only trust a real model-id token (daemon down / errors can emit junk).
+                [[ "$m" =~ ^[A-Za-z0-9._:/-]+$ ]] && { printf 'ollama/%s\n' "$m"; return 0; }
             fi ;;
     esac
     return 1
@@ -360,9 +361,12 @@ build_model_chain() {
     local c prev="__none__"
     for c in "${chain[@]}"; do
         c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"   # trim
-        [[ "$c" == "$prev" ]] && continue
+        [[ -z "$c" ]] && continue        # drop empties (e.g. a trailing comma in fallbacks)
+        [[ "$c" == "$prev" ]] && continue # drop consecutive duplicates
         printf '%s\n' "$c"; prev="$c"
     done
+    # NB: a fully-empty result (self-selecting tools like agy/codex/amp) is intentional —
+    # run_ai_with_fallback falls back to a single self-select run in that case.
 }
 
 #######################################
@@ -838,7 +842,9 @@ run_ai_with_fallback() {
         retry_with_backoff "$attempts" "$delay" -- run_ai_tool "$tool" "$model" "$prompt" "$log" "$out" || rc=$?
         [[ $rc -eq 0 ]] && return 0
         [[ $idx -ge $total ]] && break   # chain exhausted -> graceful degradation done
-        category=$(classify_tool_failure "$(cat "$out" 2>/dev/null || true)" "$rc")
+        # Classify on stdout (the result file) PLUS the tail of the log — CLI tools write
+        # rate-limit/quota errors to STDERR, which run_ai_tool routes to the log, not $out.
+        category=$(classify_tool_failure "$(cat "$out" 2>/dev/null || true)$(printf '\n')$(tail -n 40 "$log" 2>/dev/null || true)" "$rc")
         case "$category" in
             rate_limit|overloaded|quota|timeout)
                 log_warning "Model '${model:-<self-select>}' hit '$category' — degrading to the next model" ;;
