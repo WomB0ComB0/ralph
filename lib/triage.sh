@@ -221,7 +221,7 @@ Automated fix by \`ralph triage --fix-ci\` (local model). Please review before m
 
 # Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
 _triage_parse_threads() {
-    jq -r '.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved==false)
+    jq -r '.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved==false and (.comments.nodes[0] != null))
         | [ .id,
             (.comments.nodes[0].author.login // "?"),
             (.comments.nodes[0].path // "-"),
@@ -289,7 +289,7 @@ triage_resolve_reviews() {
     if ! ( cd "$work" \
             && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
             && git add -A && git commit -q -m "fix: address review comments on #$pr (automated)" \
-            && git push >/dev/null 2>&1 ); then
+            && git push origin HEAD >/dev/null 2>&1 ); then
         log_error "[$repo#$pr] commit/push failed."; return 1
     fi
     local sha; sha=$(cd "$work" && git rev-parse --short HEAD 2>/dev/null || echo "")
@@ -333,7 +333,7 @@ handle_triage_command() {
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then
-        if [[ -z "$resolve_pr" ]]; then log_error "--resolve-reviews needs a PR number, e.g. 'ralph triage --resolve-reviews 475'."; return 1; fi
+        if [[ ! "$resolve_pr" =~ ^[0-9]+$ ]]; then log_error "--resolve-reviews needs a numeric PR number, e.g. 'ralph triage --resolve-reviews 475'."; return 1; fi
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): listing unresolved conversations only — nothing is pushed or resolved."
         local r
         for r in "${targets[@]}"; do triage_resolve_reviews "$r" "$resolve_pr" "$apply" || true; done

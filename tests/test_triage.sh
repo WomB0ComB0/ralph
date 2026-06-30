@@ -85,6 +85,7 @@ unset -f gh git
 echo "== resolve-reviews: thread parsing + safety + dry-run =="
 TJSON='{"data":{"repository":{"pullRequest":{"headRefName":"ralph/fix-ci-1","reviewThreads":{"nodes":[{"id":"T1","isResolved":false,"comments":{"nodes":[{"author":{"login":"gemini"},"path":"a.ts","line":5,"body":"please fix\nthis"}]}},{"id":"T2","isResolved":true,"comments":{"nodes":[{"author":{"login":"bob"},"path":"b.ts","line":9,"body":"old"}]}}]}}}}}'
 eq "parse: only the UNRESOLVED thread, TSV fields" "T1	gemini	a.ts	5	please fix this" "$(printf '%s' "$TJSON" | _triage_parse_threads)"
+eq "parse: skips a thread that has no comments" "T1	gemini	a.ts	5	please fix this" "$(printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"T0","isResolved":false,"comments":{"nodes":[]}},{"id":"T1","isResolved":false,"comments":{"nodes":[{"author":{"login":"gemini"},"path":"a.ts","line":5,"body":"please fix\nthis"}]}}]}}}}}' | _triage_parse_threads)"
 
 # SAFETY: refuse to resolve conversations on a non-ralph/fix branch (e.g. a human's PR)
 gh() { echo '{"data":{"repository":{"pullRequest":{"headRefName":"main","reviewThreads":{"nodes":[]}}}}}'; }

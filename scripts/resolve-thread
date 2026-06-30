@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# resolve-thread — reply to (optional) and mark a PR review thread resolved, by thread ID.
+# Pair with `pr-status` (which prints the thread IDs) to close out a review loop cheaply.
+#
+# Usage: scripts/resolve-thread <threadId> [reply text]
+set -euo pipefail
+id="${1:?usage: resolve-thread <threadId> [reply]}"
+reply="${2:-}"
+if [[ -n "$reply" ]]; then
+  gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' \
+    -f id="$id" -f b="$reply" >/dev/null
+fi
+gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
+  -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"'
