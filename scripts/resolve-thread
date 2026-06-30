@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # $vars in the single-quoted GraphQL queries are GraphQL variables, not shell
 # resolve-thread — reply to (optional) and mark a PR review thread resolved, by thread ID.
 # Pair with `pr-status` (which prints the thread IDs) to close out a review loop cheaply.
 #

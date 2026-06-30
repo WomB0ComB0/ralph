@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # $vars in the single-quoted GraphQL queries are GraphQL variables, not shell
 # pr-status — compact PR status in a few lines (mergeable, reviewers, UNRESOLVED review threads).
 # Replaces a long ad-hoc `gh api graphql ... --jq ...` so polling costs a fraction of the tokens.
 #

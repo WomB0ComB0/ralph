@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# run-tests — run the full Ralph suite and print the per-suite rollup + the total case count.
+# Usage: run-tests   (from anywhere inside the ralph repo)
+set -uo pipefail
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not in a git repo" >&2; exit 1; }
+[[ -x "$root/tests/run_all.sh" ]] || { echo "no tests/run_all.sh in $root" >&2; exit 1; }
+out=$("$root/tests/run_all.sh" 2>&1); rc=$?
+printf '%s\n' "$out" | grep -E '  (PASS|FAIL) |All suites|Some suites'
+total=$(printf '%s\n' "$out" | grep -oE 'TOTAL: [0-9]+ passed|Test Summary: [0-9]+ passed' | grep -oE '[0-9]+' | awk '{s+=$1} END{print s}')
+echo "total cases: ${total:-?}"
+exit "$rc"
