@@ -2,7 +2,7 @@
 # ci-fails — recent failing CI runs for a repo: <run-id>  <workflow>  [branch]  <url>.
 # Feed a run id straight into `ralph triage --fix-ci --run <id>`. Usage: ci-fails [owner/repo] [limit=10]
 set -euo pipefail
-repo="${1:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+repo="${1:-}"; [[ -n "$repo" ]] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "not in a GitHub repo; pass owner/repo" >&2; exit 1; }
 limit="${2:-10}"
 gh run list --repo "$repo" --status failure --limit "$limit" --json databaseId,name,headBranch,url \
   --jq '.[]? | "\(.databaseId)  \(.name // "workflow")  [\(.headBranch // "?")]  \(.url // "")"'

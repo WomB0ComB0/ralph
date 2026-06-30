@@ -3,13 +3,15 @@
 # The close-out dance in one command. Usage: pr-merge <pr> [owner/repo]
 set -euo pipefail
 pr="${1:?usage: pr-merge <pr> [owner/repo]}"
-repo="${2:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+repo="${2:-}"; [[ -n "$repo" ]] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "not in a GitHub repo; pass owner/repo" >&2; exit 1; }
 gh pr merge "$pr" --repo "$repo" --merge --delete-branch
 # Only touch the local checkout when the PR is in the repo we're standing in.
 if [[ "$repo" == "$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)" ]]; then
   def=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)
-  git checkout "$def" 2>/dev/null || true
-  git pull --ff-only 2>/dev/null || true
+  # Only pull if we actually switched to the default branch (don't pull into a stale branch).
+  if git checkout "$def" 2>/dev/null; then
+    git pull --ff-only 2>/dev/null || true
+  fi
   git fetch --prune 2>/dev/null || true
 fi
 echo "merged #$pr ($repo) and cleaned up."

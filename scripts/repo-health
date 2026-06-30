@@ -2,7 +2,7 @@
 # repo-health — one-line health rollup: open PRs / recent failing CI / open security alerts.
 # Usage: repo-health [owner/repo]   (defaults to the current repo)
 set -uo pipefail
-repo="${1:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+repo="${1:-}"; [[ -n "$repo" ]] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "not in a GitHub repo; pass owner/repo" >&2; exit 1; }
 
 # Count an alerts feed, returning "n/a" when the feature/scope is off (403 -> error object).
 count_alerts() {
