@@ -404,13 +404,12 @@ prune_signals() {
     [[ -d "$dir" ]] || return 0
     mkdir -p "$archive" 2>/dev/null || true
 
-    local now_epoch f status last sev last_epoch age_days
+    local now_epoch f status last last_epoch age_days
     now_epoch=$(_signal_epoch "$(_signal_now)")
     for f in "$dir"/*.json; do
         [[ -f "$f" ]] || continue
         status=$(jq -r '.status // "open"' "$f" 2>/dev/null)
         last=$(jq -r '.last_seen // ""' "$f" 2>/dev/null)
-        sev=$(jq -r '.severity // "low"' "$f" 2>/dev/null)
         last_epoch=$(_signal_epoch "$last")
         # Skip files with an unparseable/missing date rather than treating epoch 0 as
         # ancient and wrongly archiving a recent-but-corrupt signal.

@@ -811,6 +811,8 @@ run_ai_tool() {
     # leak into the parent shell or later iterations. stderr (tool diagnostics) goes to the
     # log only; stdout (the actual answer) goes to BOTH log and output_file, so the captured
     # result + per-step trace are clean for emptiness/observability.
+    # shellcheck disable=SC2094  # both redirections to $log_file are APPENDS (2>> and tee -a),
+    # not a read+overwrite — concurrent O_APPEND writes are atomic, so this is safe by design.
     if [[ "$_AI_STDIN" == "1" ]]; then
         ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     else
