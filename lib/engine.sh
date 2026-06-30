@@ -701,14 +701,16 @@ _build_ai_cmd() {
             # --dangerously-skip-permissions already bypasses; --permission-mode bypassPermissions
             # was redundant. Add resilience: fall back to a cheaper tier on overload (skip if it
             # equals the primary) and an opt-in per-call spend cap.
-            _AI_CMD=(claude -p --dangerously-skip-permissions --model "$model")
+            _AI_CMD=(claude -p --dangerously-skip-permissions)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> claude uses its default
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _fb="${RALPH_CLAUDE_FALLBACK_MODEL:-sonnet}"
             [[ -n "$_fb" && "$_fb" != "$model" ]] && _AI_CMD+=(--fallback-model "$_fb")
             [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
             ;;
         opencode)
-            _AI_CMD=(opencode run --model "$model")
+            _AI_CMD=(opencode run)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> let opencode self-select
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
         agy)
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it

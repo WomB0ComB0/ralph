@@ -19,6 +19,10 @@ _build_ai_cmd claude "m1"; eq "claude rc" 0 "$?"
 [[ "${_AI_CMD[*]}" == *" -p "* || "${_AI_CMD[*]}" == *" --print"* || "${_AI_CMD[*]}" == *"-p "* ]] && ok "claude is headless (-p/--print)" || bad "claude MISSING -p/--print: ${_AI_CMD[*]}"
 [[ "${_AI_CMD[*]}" == *"--model m1"* ]] && ok "claude passes --model" || bad "claude no model: ${_AI_CMD[*]}"
 eq "claude not stdin" 0 "$_AI_STDIN"
+# empty model -> the --model flag is OMITTED (tool self-selects), not passed as `--model ""`
+_build_ai_cmd opencode ""; [[ "${_AI_CMD[*]}" != *"--model"* ]] && ok "opencode empty model omits --model (self-select)" || bad "opencode passed empty --model: ${_AI_CMD[*]}"
+_build_ai_cmd opencode "x/y"; [[ "${_AI_CMD[*]}" == *"--model x/y"* ]] && ok "opencode non-empty model still passes --model" || bad "opencode dropped model: ${_AI_CMD[*]}"
+_build_ai_cmd claude "";   [[ "${_AI_CMD[*]}" != *"--model"* ]] && ok "claude empty model omits --model" || bad "claude passed empty --model: ${_AI_CMD[*]}"
 
 echo "== claude robustness: collapsed perms, fallback model, opt-in budget =="
 _build_ai_cmd claude opus

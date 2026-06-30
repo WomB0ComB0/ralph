@@ -107,6 +107,10 @@ triage_autofix_ci() {
         run_json=$(gh run view "$run_id" --repo "$repo" --json url,headBranch 2>/dev/null || echo '{}')
         run_url=$(printf '%s' "$run_json" | jq -r '.url // ""' 2>/dev/null || true)
         base_branch=$(printf '%s' "$run_json" | jq -r '.headBranch // empty' 2>/dev/null || true)
+        if [[ -z "$run_url" ]]; then
+            log_error "[$repo] run $run_id not found or could not be retrieved."
+            return 1
+        fi
     else
         run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch 2>/dev/null || echo '[]')
         run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
@@ -150,6 +154,10 @@ triage_autofix_ci() {
     full=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null || true)
     logs=$(printf '%s\n' "$full" | grep -iE 'error|failed|cannot|expected|undefined|not found|TS[0-9]{3,}' | grep -vE '^[[:space:]]*$' | tail -n 60)
     [[ -z "$logs" ]] && logs=$(printf '%s\n' "$full" | tail -n 80)
+    if [[ -z "$logs" ]]; then
+        log_error "[$repo] no failing-log output for run $run_id (expired/permissions?) — can't fix blind."
+        return 1
+    fi
     prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL source-code change (e.g. a type annotation, an import, or a renamed API) to the source files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do NOT deliberately change dependency versions or CI/workflow files — fix it in the source. (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs")
     # Agent log/out live OUTSIDE the clone so `git add -A` can never commit them into the PR.
     lf=$(mktemp); of=$(mktemp)
@@ -177,7 +185,10 @@ triage_autofix_ci() {
     # Discard any dependency/lockfile/workflow churn the agent may have introduced — a fix for a
     # dep-bump CI break should be SOURCE-ONLY (lockfiles are renovate/CI's domain). Done before the
     # change-check so a PR is opened only if there's a real source fix.
-    ( cd "$work" && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; git checkout -- .github 2>/dev/null ) || true
+    ( cd "$work" \
+        && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
+        git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
+        git checkout -- .github 2>/dev/null; git clean -fd -- .github 2>/dev/null ) || true
 
     if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
         log_warning "[$repo] fix attempt produced no changes — no PR opened."
@@ -221,8 +232,8 @@ handle_triage_command() {
         esac
         shift
     done
-    if ! command_exists gh; then
-        log_error "triage needs the GitHub CLI (gh) with an authenticated token."
+    if ! command_exists gh || ! command_exists jq; then
+        log_error "triage needs the GitHub CLI (gh, authenticated) and jq installed."
         return 1
     fi
     local -a targets=(); mapfile -t targets < <(triage_load_targets)
