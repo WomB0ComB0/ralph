@@ -61,6 +61,22 @@ sanitize_id() {
 # Excludes heavy directories for performance
 # Returns: MD5 hash string, or empty string on error
 #######################################
+# Max mtime (epoch secs) over the project's hashable files, honouring the configured
+# excludes. Drives the project-hash cache so it invalidates on ANY working-tree change —
+# including UNCOMMITTED ones. (The old git path keyed the cache on the last COMMIT time, so
+# files the agent created/edited but did not commit were invisible -> false "no files
+# modified" / spurious lazy streaks.)
+_project_files_mtime() {
+    local dir="${1:-.}" _ex=() _prune=() _n _fp=()
+    mapfile -t _ex < <(hash_exclude_names)
+    for _n in "${_ex[@]+"${_ex[@]}"}"; do
+        [[ ${#_prune[@]} -gt 0 ]] && _prune+=(-o)
+        _prune+=(-name "$_n")
+    done
+    [[ ${#_prune[@]} -gt 0 ]] && _fp=( -type d \( "${_prune[@]}" \) -prune -o )
+    find "$dir" "${_fp[@]+"${_fp[@]}"}" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1
+}
+
 compute_project_hash() {
     local project_dir="${PROJECT_DIR:-.}"
     local cache_file="${HOME}/.cache/ralph/project_hash_cache"
@@ -78,15 +94,9 @@ compute_project_hash() {
         cached_dir=$(head -n1 "$cache_meta")
         cached_mtime=$(tail -n1 "$cache_meta")
         
-        # Get current max mtime of project files
-        if is_git_repo; then
-            # Use git to find last modification
-            current_mtime=$(git -C "$project_dir" log -1 --format="%ct" 2>/dev/null || echo "0")
-        else
-            # Fallback: check modification time of most recent file
-            current_mtime=$(find "$project_dir" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1 || echo "0")
-        fi
-        
+        # Current max mtime over the hashable files (catches uncommitted changes too).
+        current_mtime=$(_project_files_mtime "$project_dir"); [[ -z "$current_mtime" ]] && current_mtime="0"
+
         # If same directory and no modifications, use cache
         if [[ "$cached_dir" == "$project_dir" ]] && [[ "$cached_mtime" == "$current_mtime" ]]; then
             log_debug "Using cached project hash"
@@ -115,9 +125,9 @@ compute_project_hash() {
             awk '{print $1}'
         )
         
-        # Cache with git commit time
+        # Cache keyed on working-tree mtime (NOT commit time) so uncommitted edits invalidate it.
         local mtime
-        mtime=$(git -C "$project_dir" log -1 --format="%ct" 2>/dev/null || date +%s)
+        mtime=$(_project_files_mtime "$project_dir"); [[ -z "$mtime" ]] && mtime=$(date +%s)
         printf '%s\n%s\n' "$project_dir" "$mtime" > "$cache_meta"
     else
         # Fallback to find with exclusions. Build the prune-expression from the
@@ -141,8 +151,11 @@ compute_project_hash() {
             awk '{print $1}'
         )
         
-        # Cache with current time
-        printf '%s\n%s\n' "$project_dir" "$(date +%s)" > "$cache_meta"
+        # Cache keyed on the same working-tree mtime the check uses, so the cache can hit
+        # when nothing changed (previously this wrote `date +%s`, which never matched).
+        local mtime
+        mtime=$(_project_files_mtime "$project_dir"); [[ -z "$mtime" ]] && mtime=$(date +%s)
+        printf '%s\n%s\n' "$project_dir" "$mtime" > "$cache_meta"
     fi
     
     if [[ -z "$hash" ]]; then
