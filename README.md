@@ -714,6 +714,12 @@ bd vc log
 - `RALPH_RESUME_SESSION`: Opt-in (`1`) session continuity — resume the tool's conversation across iterations (same as `--continue-session`). Supported on claude/opencode/agy (`--continue`); codex/amp run fresh each iteration. Default off (each iteration is freshly grounded). Spans iterations of a single run only — **not** across separate `--once`/cron ticks (the session-established flag is per-process)
 - `RALPH_MAX_BUDGET_USD`: Opt-in per-call spend cap for `--tool claude` (`--max-budget-usd`); unset = no cap
 - `RALPH_CLAUDE_FALLBACK_MODEL`: Tier claude falls back to on overload (default `sonnet`; skipped when it equals the primary). For `--tool claude`, do NOT set `ANTHROPIC_BASE_URL` unless you want a local/proxy endpoint — claude uses your normal Anthropic auth by default
+
+#### Smart model management (fallback chain + local-first + graceful degradation)
+Each iteration tries an ordered **model chain**; on a *capacity* failure (rate limit, overload, quota/token exhaustion, or timeout) it **degrades to the next model** automatically. Auth/other failures don't burn the chain. All opt-in — with none of these set the chain is one model and behavior is unchanged.
+- `RALPH_MODEL_FALLBACKS`: Comma-separated ordered fallback models appended after the primary, e.g. `RALPH_MODEL_FALLBACKS="anthropic/claude-sonnet,deepseek/deepseek-v4,glm/glm-5.2"`. These are *your* models — Ralph never hardcodes unverified IDs. Most useful with `--tool opencode` (its router reaches any provider) or claude tiers (`opus,sonnet,haiku`)
+- `RALPH_LOCAL_MODEL`: Prefer this local model as the primary when no model is pinned ("use local unless specified"), e.g. `ollama/qwen2.5-coder`. opencode only (the router that can reach a local provider). This is the safe way to opt into local-first
+- `RALPH_PREFER_LOCAL`: `auto` (default), `1`, or `0`. In `auto`, local-first applies **only if `RALPH_LOCAL_MODEL` is set** (so a host that merely has Ollama installed keeps its cloud default unchanged). Set `RALPH_PREFER_LOCAL=1` to additionally auto-detect Ollama (first `ollama list` model → `ollama/<name>`); `0` disables local-first entirely
 - `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
 - `RALPH_HASH_EXCLUDES`: Extra dir names to exclude from the project hash (also reads `.ralph/excludes`)
 - `GITDIFF_EXCLUDE`: Path to the diff-exclude file used by `--diff-context` (default: `gitdiff-exclude`)
@@ -743,7 +749,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (10 unit harnesses + the native --test) — 275 cases total
+# Run every suite (11 unit harnesses + the native --test) — 303 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
