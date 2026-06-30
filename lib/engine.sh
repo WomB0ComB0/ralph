@@ -313,7 +313,7 @@ classify_tool_failure() {
         # billing label is the accurate one. — OpenAI insufficient_quota / "exceeded your current
         # quota ... billing", OpenRouter 402 "Insufficient credits"/"negative credit balance",
         # context_length_exceeded. (Both quota and rate_limit fall back; this only sharpens the log.)
-        *quota*|*"402"*|*"insufficient credit"*|*insufficient_quota*|*"insufficient quota"*|*"payment required"*|*"out of credit"*|*"negative credit"*|*"exceeded your current"*|*"check your plan"*|*billing*|*"context length"*|*"context window"*|*"maximum context"*|*"token limit"*|*"too long"*) echo quota ;;
+        *quota*|*"402"*|*"insufficient credit"*|*"payment required"*|*"out of credit"*|*"negative credit"*|*"exceeded your current"*|*"check your plan"*|*billing*|*"context length"*|*"context window"*|*"maximum context"*|*"token limit"*|*"too long"*) echo quota ;;
         # rate limit — Anthropic rate_limit_error (429), OpenAI RateLimitError / "Too Many
         # Requests", Google RESOURCE_EXHAUSTED (429), OpenRouter "rate limited".
         *"rate limit"*|*rate_limit*|*ratelimit*|*"429"*|*"too many requests"*|*resource_exhausted*) echo rate_limit ;;
