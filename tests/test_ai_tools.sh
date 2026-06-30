@@ -72,7 +72,9 @@ echo "== agy: --model wired (agy DOES accept it), --print must stay LAST =="
 _build_ai_cmd agy "Gemini 3.5 Flash (Low)"; eq "agy rc" 0 "$?"
 [[ "${_AI_CMD[*]}" == *"--dangerously-skip-permissions"* ]] && ok "agy auto-approves" || bad "agy no skip-perms"
 # Without --add-dir, agy headless writes to its OWN scratch workspace, not the project cwd.
-[[ "${_AI_CMD[*]}" == *"--add-dir "* ]] && ok "agy binds the project dir (--add-dir) so it writes in cwd" || bad "agy missing --add-dir: ${_AI_CMD[*]}"
+# The value MUST be absolute (agy resolves a relative path against its own workspace).
+[[ "${_AI_CMD[*]}" == *"--add-dir /"* ]] && ok "agy binds the project dir via an ABSOLUTE --add-dir" || bad "agy --add-dir not absolute: ${_AI_CMD[*]}"
+( export PROJECT_DIR="$R"; _build_ai_cmd agy ""; [[ "${_AI_CMD[*]}" == *"--add-dir $R "* || "${_AI_CMD[*]}" == *"--add-dir $R" ]] ) && ok "agy --add-dir carries \$PROJECT_DIR" || bad "agy --add-dir did not honor PROJECT_DIR"
 [[ "${_AI_CMD[*]}" == *"--model Gemini 3.5 Flash (Low)"* ]] && ok "agy passes --model when set" || bad "agy dropped --model: ${_AI_CMD[*]}"
 # --print consumes the NEXT token as the prompt, so it MUST be the final flag in _AI_CMD;
 # run_ai_tool appends "$prompt" after it -> `agy ... --print "<prompt>"`.

@@ -613,7 +613,9 @@ _build_ai_cmd() {
             # Bind agy to the project dir. Without this, agy headless builds in its OWN scratch
             # workspace (~/.gemini/antigravity-cli/scratch/...) instead of the project, so Ralph's
             # file-change/lazy/git tracking sees "no files modified". --add-dir makes it write in cwd.
-            _AI_CMD+=(--add-dir "${PROJECT_DIR:-$PWD}")
+            # Pass an ABSOLUTE path — agy would resolve a relative one against its own workspace.
+            local _projdir; _projdir=$(cd "${PROJECT_DIR:-$PWD}" 2>/dev/null && pwd) || _projdir="${PROJECT_DIR:-$PWD}"
+            _AI_CMD+=(--add-dir "$_projdir")
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # agy accepts the human-readable `agy models` name
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _agytmo; _agytmo=$(_ai_timeout_secs)
