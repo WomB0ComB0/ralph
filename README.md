@@ -771,6 +771,20 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 Each suite is hermetic (sources `lib/*.sh`, uses `mktemp` sandboxes). See
 [`tests/README.md`](tests/README.md) for the per-suite breakdown.
 
+## Helper scripts (`scripts/`)
+A small library of `gh` workflow helpers — compact status polling and review close-out so the
+common GitHub chores cost a few tokens instead of a wall of inline `gh api graphql`. They pair
+naturally with `ralph triage`. See [`scripts/README.md`](scripts/README.md) for the full list.
+
+```bash
+scripts/repo-health WomB0ComB0/portfolio   # open PRs / failing CI / security alerts, one line
+scripts/ci-fails    WomB0ComB0/portfolio   # failing CI runs -> feed an id to triage --fix-ci --run
+scripts/pr-status   34                      # mergeable + reviewers + unresolved review threads
+scripts/pr-review   34                      # full bodies of the unresolved review comments
+scripts/pr-resolve-all 34 "Addressed in <sha>."   # resolve every thread after addressing
+scripts/pr-merge    34                      # merge + delete branch + sync the default branch
+```
+
 ## Required Dependencies
 
 ### Core

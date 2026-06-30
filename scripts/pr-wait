@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# pr-wait — poll a PR until it has at least one review (or timeout), then print its status.
+# Saves the manual sleep/poll while waiting for a reviewer (e.g. gemini-code-assist).
+# Usage: pr-wait <pr> [owner/repo] [max_seconds=180]
+set -uo pipefail
+pr="${1:?usage: pr-wait <pr> [owner/repo] [max_seconds]}"
+repo="${2:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+maxs="${3:-180}"
+dir="$(cd "$(dirname "$0")" && pwd)"
+elapsed=0
+while (( elapsed < maxs )); do
+  revs=$(gh pr view "$pr" --repo "$repo" --json reviews --jq '[.reviews[].author.login]|unique|join(",")' 2>/dev/null || echo "")
+  [[ -n "$revs" ]] && break
+  sleep 15; elapsed=$((elapsed + 15))
+done
+"$dir/pr-status" "$pr" "$repo"

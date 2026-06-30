@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# repo-health — one-line health rollup: open PRs / recent failing CI / open security alerts.
+# Usage: repo-health [owner/repo]   (defaults to the current repo)
+set -uo pipefail
+repo="${1:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Count an alerts feed, returning "n/a" when the feature/scope is off (403 -> error object).
+count_alerts() {
+  local out
+  out=$(gh api "repos/$repo/$1?state=open&per_page=100" 2>/dev/null) || { printf 'n/a'; return; }
+  printf '%s' "$out" | jq -r 'if type=="array" then (length|tostring) else "n/a" end' 2>/dev/null || printf 'n/a'
+}
+
+prs=$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo '?')
+fails=$(gh run list --repo "$repo" --status failure --limit 100 --json databaseId --jq 'length' 2>/dev/null || echo '?')
+printf '%s  open-PRs=%s  failing-CI(recent)=%s  dependabot=%s  code-scanning=%s  secrets=%s\n' \
+  "$repo" "$prs" "$fails" "$(count_alerts dependabot/alerts)" "$(count_alerts code-scanning/alerts)" "$(count_alerts secret-scanning/alerts)"

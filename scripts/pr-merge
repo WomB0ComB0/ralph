@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# pr-merge — merge a PR, delete its branch, and (for the current repo) sync the default branch.
+# The close-out dance in one command. Usage: pr-merge <pr> [owner/repo]
+set -euo pipefail
+pr="${1:?usage: pr-merge <pr> [owner/repo]}"
+repo="${2:-}"; [[ -z "$repo" ]] && repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+gh pr merge "$pr" --repo "$repo" --merge --delete-branch
+# Only touch the local checkout when the PR is in the repo we're standing in.
+if [[ "$repo" == "$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)" ]]; then
+  def=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)
+  git checkout "$def" 2>/dev/null || true
+  git pull --ff-only 2>/dev/null || true
+  git fetch --prune 2>/dev/null || true
+fi
+echo "merged #$pr ($repo) and cleaned up."
