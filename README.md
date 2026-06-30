@@ -749,7 +749,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (11 unit harnesses + the native --test) — 315 cases total
+# Run every suite (11 unit harnesses + the native --test) — 321 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

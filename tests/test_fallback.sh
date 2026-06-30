@@ -32,6 +32,13 @@ eq "exit 137 (SIGKILL / --kill-after / OOM) -> timeout" "timeout" "$(classify_to
 eq "exit 130 (SIGINT / Ctrl-C) -> other (no fallback)"  "other"   "$(classify_tool_failure '' 130)"
 eq "exit 143 (SIGTERM) -> other"            "other"   "$(classify_tool_failure '' 143)"
 eq "exit 127 (binary not found) -> other"   "other"   "$(classify_tool_failure 'opencode: command not found' 127)"
+# 128+N signal-exit range, mapped by signal semantics:
+eq "exit 152 (128+24 SIGXCPU, CPU limit) -> timeout"  "timeout" "$(classify_tool_failure '' 152)"
+eq "exit 153 (128+25 SIGXFSZ, file limit) -> timeout" "timeout" "$(classify_tool_failure '' 153)"
+eq "exit 139 (128+11 SIGSEGV crash) -> other"         "other"   "$(classify_tool_failure '' 139)"
+eq "exit 134 (128+6 SIGABRT crash) -> other"          "other"   "$(classify_tool_failure '' 134)"
+eq "exit 131 (128+3 SIGQUIT) -> other"                "other"   "$(classify_tool_failure '' 131)"
+eq "non-numeric rc is guarded (no arithmetic abort)"  "other"   "$(classify_tool_failure 'weird' '12x' 2>/dev/null)"
 # a code wins over misleading text: a 137-killed run whose stdout happens to say 'rate limit'
 eq "exit code beats stale text"             "timeout" "$(classify_tool_failure 'partial rate limit output' 137)"
 eq "generic exit 1 -> other"                "other"   "$(classify_tool_failure 'Segmentation fault somewhere' 1)"
