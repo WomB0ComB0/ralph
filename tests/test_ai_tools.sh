@@ -154,6 +154,9 @@ rm -f "$RD/AGENTS.md"; : > "$RD/CLAUDE.md"
 eq "codex falls back to CLAUDE.md when no AGENTS.md"  "$RD/CLAUDE.md" "$(resolve_agents_file codex)"
 : > "$RD/CUSTOM.md"; export AGENTS_FILE="CUSTOM.md"
 eq "explicit AGENTS_FILE override wins"               "$RD/CUSTOM.md" "$(resolve_agents_file claude)"
+# Strict: a set-but-missing AGENTS_FILE must NOT fall back, even if AGENTS.md/CLAUDE.md exist.
+: > "$RD/AGENTS.md"; : > "$RD/CLAUDE.md"; export AGENTS_FILE="DOES_NOT_EXIST.md"
+resolve_agents_file claude >/dev/null 2>&1 && bad "AGENTS_FILE override silently fell back" || ok "explicit AGENTS_FILE is strict (missing -> rc 1, no fallback)"
 unset AGENTS_FILE; rm -f "$RD"/*.md
 resolve_agents_file claude >/dev/null 2>&1 && bad "resolve_agents_file found a file when none exist" || ok "no instructions file -> rc 1"
 unset PROJECT_DIR; rm -rf "$RD"

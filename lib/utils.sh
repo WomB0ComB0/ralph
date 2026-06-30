@@ -222,20 +222,20 @@ hash_exclude_names() {
 #######################################
 resolve_agents_file() {
     local tool="${1:-${TOOL:-}}" dir="${PROJECT_DIR:-.}" order=() f p
-    # IMPROVEMENT: explicit AGENTS_FILE override could short-circuit here before
-    # building and looping the tool-native list — avoids the case+loop entirely:
-    #   if [[ -n "${AGENTS_FILE:-}" ]]; then p="${AGENTS_FILE}"; [[ "$p" != /* ]] && p="$dir/$p"; [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }; fi
-    # Kept as-is for now so AGENTS_FILE still participates in the fallback chain if
-    # the named file doesn't exist (less surprising behaviour).
-    [[ -n "${AGENTS_FILE:-}" ]] && order+=("$AGENTS_FILE")
+    # An explicit AGENTS_FILE is STRICT: use exactly that file, never fall back — a typo
+    # should surface, not silently resolve to a different file.
+    if [[ -n "${AGENTS_FILE:-}" ]]; then
+        p="$AGENTS_FILE"; [[ "$AGENTS_FILE" != /* ]] && p="$dir/$AGENTS_FILE"
+        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+        return 1
+    fi
     case "$tool" in
-        claude) order+=("CLAUDE.md" "AGENTS.md" "GEMINI.md") ;;
-        gemini) order+=("GEMINI.md" "AGENTS.md" "CLAUDE.md") ;;
-        *)      order+=("AGENTS.md" "CLAUDE.md" "GEMINI.md") ;;
+        claude) order=("CLAUDE.md" "AGENTS.md" "GEMINI.md") ;;
+        gemini) order=("GEMINI.md" "AGENTS.md" "CLAUDE.md") ;;
+        *)      order=("AGENTS.md" "CLAUDE.md" "GEMINI.md") ;;
     esac
     for f in "${order[@]}"; do
-        [[ -z "$f" ]] && continue
-        p="$f"; [[ "$f" != /* ]] && p="$dir/$f"
+        p="$dir/$f"
         [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
     done
     return 1
@@ -1513,7 +1513,8 @@ EOF
     # if none exists. Claude Code reads CLAUDE.md; codex/agy/opencode/amp read AGENTS.md.
     if ! resolve_agents_file "${TOOL:-}" >/dev/null 2>&1; then
         local agents_name="AGENTS.md"; [[ "${TOOL:-}" == "claude" ]] && agents_name="CLAUDE.md"
-        cat > "$agents_name" <<'AGENTS_EOF'
+        local agents_path="${PROJECT_DIR:-.}/$agents_name"
+        cat > "$agents_path" <<'AGENTS_EOF'
 # Agent Instructions
 
 You are an autonomous software engineer. The objective, user stories, and success metrics
@@ -1529,7 +1530,7 @@ Each iteration:
 Make actual file changes every iteration. When the goal is fully met and verified, say so
 clearly so the loop can stop.
 AGENTS_EOF
-        log_success "Created $agents_name (agent operating prompt)"
+        log_success "Created $agents_path (agent operating prompt)"
     fi
 
     # Initialize other artifacts via orchestrator
