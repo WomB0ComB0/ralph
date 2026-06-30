@@ -305,7 +305,14 @@ determine_model() {
 # Echoes: rate_limit | overloaded | quota | auth | timeout | other
 classify_tool_failure() {
     local out="$1" rc="${2:-1}" lc
-    [[ "$rc" == "124" ]] && { echo timeout; return 0; }   # our `timeout` wrapper's exit code
+    # Deterministic process exit/signal codes take precedence over text (providers reword their
+    # messages; exit codes don't). 124 = `timeout` killed it; 137 = SIGKILL (our --kill-after on a
+    # hung tool, or the OOM-killer); 130 = SIGINT (user Ctrl-C); 143 = SIGTERM; 126/127 = the tool
+    # binary isn't runnable/installed. Only 124/137 are capacity-ish (fall back to another model).
+    case "$rc" in
+        124|137) echo timeout; return 0 ;;
+        130|143|126|127) echo other; return 0 ;;   # interrupt / external term / missing binary -> don't fall back
+    esac
     lc="${out,,}"   # Bash 4 native lowercase
     case "$lc" in
         # quota / credit / billing exhaustion + context-window overflow ("running out of tokens").
