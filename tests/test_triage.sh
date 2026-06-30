@@ -69,13 +69,16 @@ _triage_safe_push_branch "" "main"              && bad "push allowed for empty b
 # DRY-RUN must print the plan and call NEITHER git nor a push. Stub gh (failing run + default
 # branch) and git (records any invocation); assert git is never touched.
 GITLOG="$TMP/gitcalls"; : > "$GITLOG"
-gh()  { case "$1" in run) echo '[{"databaseId":555,"url":"https://x/run/555"}]';; repo) echo "main";; *) echo "";; esac; }
+# the failing run is on a renovate/* branch (not the default) — the fix must target THAT branch
+gh()  { case "$1" in run) echo '[{"databaseId":555,"url":"https://x/run/555","headBranch":"renovate/dep-1"}]';; repo) echo "main";; *) echo "";; esac; }
 git() { echo "git $*" >> "$GITLOG"; }
 export -f gh git 2>/dev/null || true
 dry=$(triage_autofix_ci "o/r" 0 2>&1)
 printf '%s' "$dry" | grep -q 'DRY-RUN' && ok "dry-run announces itself" || bad "no DRY-RUN marker"
 printf '%s' "$dry" | grep -q 'ralph/fix-ci-555' && ok "dry-run shows the bot branch" || bad "branch missing from plan"
-printf '%s' "$dry" | grep -q 'NEVER push' && ok "dry-run states the never-push-default guarantee" || bad "no never-push note"
+printf '%s' "$dry" | grep -q 'failing branch renovate/dep-1' && ok "dry-run bases the fix on the FAILING branch, not default" || bad "fix not based on failing branch"
+printf '%s' "$dry" | grep -q -- '--base renovate/dep-1' && ok "PR targets the failing branch" || bad "PR base is not the failing branch"
+printf '%s' "$dry" | grep -q 'NEVER push to main' && ok "still NEVER pushes the default branch" || bad "no never-push-default note"
 [[ ! -s "$GITLOG" ]] && ok "dry-run invoked git ZERO times (no writes)" || bad "dry-run touched git: $(cat "$GITLOG")"
 unset -f gh git
 

@@ -701,14 +701,16 @@ _build_ai_cmd() {
             # --dangerously-skip-permissions already bypasses; --permission-mode bypassPermissions
             # was redundant. Add resilience: fall back to a cheaper tier on overload (skip if it
             # equals the primary) and an opt-in per-call spend cap.
-            _AI_CMD=(claude -p --dangerously-skip-permissions --model "$model")
+            _AI_CMD=(claude -p --dangerously-skip-permissions)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> claude uses its default
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _fb="${RALPH_CLAUDE_FALLBACK_MODEL:-sonnet}"
             [[ -n "$_fb" && "$_fb" != "$model" ]] && _AI_CMD+=(--fallback-model "$_fb")
             [[ "${RALPH_MAX_BUDGET_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && _AI_CMD+=(--max-budget-usd "$RALPH_MAX_BUDGET_USD")
             ;;
         opencode)
-            _AI_CMD=(opencode run --model "$model")
+            _AI_CMD=(opencode run)
+            [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> let opencode self-select
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
         agy)
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
@@ -816,7 +818,10 @@ run_ai_tool() {
     if [[ "$_AI_STDIN" == "1" ]]; then
         ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     else
-        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        # Redirect stdin from /dev/null: these tools take the prompt as an argv, and some (e.g.
+        # opencode run) abort immediately on a non-interactive/inherited stdin. A clean EOF makes
+        # the autonomous invocation behave the same as an interactive one.
+        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
     
@@ -834,7 +839,7 @@ run_ai_tool() {
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
-    
+
     # Clear line and show final success/fail
     printf "\r\033[K"
     
