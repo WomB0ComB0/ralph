@@ -306,12 +306,22 @@ determine_model() {
 classify_tool_failure() {
     local out="$1" rc="${2:-1}" lc
     # Deterministic process exit/signal codes take precedence over text (providers reword their
-    # messages; exit codes don't). 124 = `timeout` killed it; 137 = SIGKILL (our --kill-after on a
-    # hung tool, or the OOM-killer); 130 = SIGINT (user Ctrl-C); 143 = SIGTERM; 126/127 = the tool
-    # binary isn't runnable/installed. Only 124/137 are capacity-ish (fall back to another model).
+    # messages; exit codes don't). A process killed by signal N exits with code 128+N; we map by
+    # the signal's SEMANTICS (ref: WomB0ComB0/bash-testing process-signal signal table):
+    #   SIGKILL(9) / SIGXCPU(24, CPU-time limit) / SIGXFSZ(25, file-size limit) -> resource/capacity
+    #     (our `timeout --kill-after`, the OOM-killer, or a cgroup/ulimit cap) -> treat like a
+    #     timeout and fall back to a lighter model.
+    #   SIGINT(2) / SIGQUIT(3) / SIGTERM(15) -> user/external stop -> do NOT fall back.
+    #   crashes (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE) -> a tool bug, not model-specific -> don't fall back.
+    if (( rc > 128 && rc < 160 )); then
+        case "$(( rc - 128 ))" in
+            9|24|25) echo timeout; return 0 ;;
+            *)       echo other;   return 0 ;;
+        esac
+    fi
     case "$rc" in
-        124|137) echo timeout; return 0 ;;
-        130|143|126|127) echo other; return 0 ;;   # interrupt / external term / missing binary -> don't fall back
+        124)     echo timeout; return 0 ;;   # GNU `timeout`'s own "timed out" exit code
+        126|127) echo other;   return 0 ;;   # not executable / command not found -> no model helps
     esac
     lc="${out,,}"   # Bash 4 native lowercase
     case "$lc" in
