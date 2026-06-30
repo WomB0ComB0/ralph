@@ -736,7 +736,8 @@ A central, locally-run, scoped alternative to per-repo cloud workflows: point Ra
 - **Scope (required):** `RALPH_TARGETS="owner/repo,owner/repo"` *or* a `ralph.targets` file (one `owner/repo` per line, `#` comments allowed). The allowlist is the safety boundary — triage never touches a repo you didn't list.
 - **What it finds:** failing CI runs (`gh run list --status failure`) + open **Dependabot**, **code-scanning**, and **secret-scanning** alerts; prints a severity-sorted report and records deduped signals (`ralph signal ls`).
 - **Tuning:** `RALPH_TARGETS_FILE` (allowlist path), `RALPH_TRIAGE_CI_LIMIT` (failing runs per repo, default 5).
-- **Writes nothing.** Autofix→PR and suggest→issue modes are separate and opt-in.
+- **Autofix CI → PR (opt-in):** `ralph triage --fix-ci` prints a dry-run plan; add `--apply` to clone to a throwaway worktree, run the loop (local model) to fix the failing CI, and open a PR on a bot-namespaced `ralph/fix-*` branch against the default branch. It **never pushes to a default branch** (a `ralph/fix-*`-only push gate enforces this) and the PR is flagged for review.
+- **Suggest→issue mode is still separate and opt-in (next).**
 ```bash
 RALPH_TARGETS="me/api,me/web" ralph triage      # or: echo "me/api" > ralph.targets && ralph triage
 ```
@@ -759,7 +760,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (12 unit harnesses + the native --test) — 338 cases total
+# Run every suite (12 unit harnesses + the native --test) — 347 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
