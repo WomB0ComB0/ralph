@@ -26,8 +26,15 @@ eq "out of credits -> quota"         "quota"      "$(classify_tool_failure 'insu
 eq "context length -> quota"         "quota"      "$(classify_tool_failure 'This model maximum context length is 8192 tokens' 1)"
 eq "unauthorized text -> auth"       "auth"       "$(classify_tool_failure '401 Unauthorized: invalid api key' 1)"
 eq "bare '401' number alone -> other (no false auth-stop)" "other" "$(classify_tool_failure 'see line 401 of the source' 1)"
-eq "exit 124 -> timeout"             "timeout"    "$(classify_tool_failure '' 124)"
-eq "generic -> other"               "other"      "$(classify_tool_failure 'Segmentation fault somewhere' 1)"
+echo "== classify_tool_failure: deterministic process exit/signal codes (override text) =="
+eq "exit 124 (timeout wrapper) -> timeout"  "timeout" "$(classify_tool_failure '' 124)"
+eq "exit 137 (SIGKILL / --kill-after / OOM) -> timeout" "timeout" "$(classify_tool_failure 'Killed' 137)"
+eq "exit 130 (SIGINT / Ctrl-C) -> other (no fallback)"  "other"   "$(classify_tool_failure '' 130)"
+eq "exit 143 (SIGTERM) -> other"            "other"   "$(classify_tool_failure '' 143)"
+eq "exit 127 (binary not found) -> other"   "other"   "$(classify_tool_failure 'opencode: command not found' 127)"
+# a code wins over misleading text: a 137-killed run whose stdout happens to say 'rate limit'
+eq "exit code beats stale text"             "timeout" "$(classify_tool_failure 'partial rate limit output' 137)"
+eq "generic exit 1 -> other"                "other"   "$(classify_tool_failure 'Segmentation fault somewhere' 1)"
 
 echo "== classify_tool_failure: REAL provider error payloads (from their docs) =="
 # Anthropic 529 overloaded_error
