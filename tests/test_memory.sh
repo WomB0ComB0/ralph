@@ -39,5 +39,11 @@ export MEMORY_DIR="$TMP/fresh"; export GLOBAL_MEMORY_FILE="$MEMORY_DIR/global.js
 store_lesson "bootstrap lesson"
 grep -q 'bootstrap lesson' "$GLOBAL_MEMORY_FILE" 2>/dev/null && ok "store_lesson inits the store when absent" || bad "store_lesson lost the lesson (no init)"
 
+echo "== null-safe: store/recall tolerate a store file with no .lessons key =="
+printf '%s' '{}' > "$GLOBAL_MEMORY_FILE"
+store_lesson "keyless-file lesson"
+grep -q 'keyless-file lesson' "$GLOBAL_MEMORY_FILE" && ok "store_lesson handles missing .lessons key" || bad "store failed on keyless file"
+recall_lessons | grep -q 'keyless-file lesson' && ok "recall_lessons handles missing .lessons key" || bad "recall failed on keyless file"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -1864,7 +1864,7 @@ recall_lessons() {
     local lessons
     # Last 5 lessons. (Was `last(5)`, which in jq returns the scalar 5 — not "last 5
     # elements" — so this errored and recalled NOTHING. `.lessons[-5:]` is the slice.)
-    lessons=$(jq -r '.lessons[-5:] | .[] | "- " + .' "$GLOBAL_MEMORY_FILE" 2>/dev/null)
+    lessons=$(jq -r '(.lessons // [])[-5:] | .[] | "- " + .' "$GLOBAL_MEMORY_FILE" 2>/dev/null)
     
     if [[ -n "$lessons" ]]; then
         echo -e "\n<genetic_memory>\nHistorical lessons from previous projects:\n$lessons\n</genetic_memory>"
@@ -1884,7 +1884,7 @@ store_lesson() {
     local tmp; tmp=$(mktemp)
     # Dedup exact repeats (agents re-emit the same lesson across iterations); keep the last 50.
     if jq --arg msg "$lesson" \
-         'if (.lessons | index($msg)) then . else .lessons += [$msg] end | .lessons = .lessons[-50:]' \
+         '(.lessons // []) as $l | .lessons = ((if ($l | index($msg)) then $l else $l + [$msg] end) | .[-50:])' \
          "$GLOBAL_MEMORY_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$GLOBAL_MEMORY_FILE"; then
         log_debug "Stored genetic lesson: $lesson"
     else
@@ -1904,7 +1904,7 @@ _extract_memory_blocks() {
                 b = index(s, "</memory>")
                 if (b == 0) break
                 m = substr(s, 1, b - 1)
-                gsub(/[ \t\r\n]+/, " ", m); gsub(/^ +| +$/, "", m)
+                gsub(/[[:space:]]+/, " ", m); gsub(/^ +| +$/, "", m)
                 if (m != "") print m
                 s = substr(s, b + 9)
             }
