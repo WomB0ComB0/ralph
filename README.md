@@ -702,6 +702,7 @@ bd vc log
 ### Environment Variables
 - `TOOL`: AI tool to use (opencode, claude, amp, agy, codex)
 - `RALPH_ROLE`: Role driving model routing — `planner` | `engineer` (default) | `tester` | `thinker`
+- `AGENTS_FILE`: Explicit path to the agent-instructions/operating prompt. By default Ralph auto-detects each tool's native file — **`CLAUDE.md`** for `--tool claude` (Claude Code's convention), **`AGENTS.md`** for codex/agy/opencode/amp, `GEMINI.md` for gemini — with fallbacks. `ralph --init` scaffolds the right one; the loop errors clearly if none exists
 - `SELECTED_MODEL`: Specific model to pin (honored from CLI `--model`, `ralph.json`, `.ralphrc`, or this env var; otherwise auto-selected per tool+role)
 - `MAX_ITERATIONS`: Maximum iterations (default: 10)
 - `LOG_FILE`: Path to log file (default: ralph.log)
@@ -742,7 +743,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (9 unit harnesses + the native --test) — 253 cases total
+# Run every suite (9 unit harnesses + the native --test) — 260 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test

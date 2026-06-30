@@ -142,5 +142,21 @@ grep -q DIAG "$of" && bad "stderr leaked into output_file" || ok "stderr NOT in 
 grep -q '2>&1 | tee -a "\$log_file"' "$R/lib/engine.sh" && bad "run_ai_tool still merges stderr (2>&1) into output" || ok "run_ai_tool separates stderr from the result file"
 rm -rf "$cdir"
 
+echo "== resolve_agents_file: tool-native instructions file (claude=CLAUDE.md) + fallbacks =="
+RD=$(mktemp -d); export PROJECT_DIR="$RD"; unset AGENTS_FILE
+: > "$RD/AGENTS.md"; : > "$RD/CLAUDE.md"
+eq "claude -> CLAUDE.md (native)"  "$RD/CLAUDE.md" "$(resolve_agents_file claude)"
+eq "codex  -> AGENTS.md (native)"  "$RD/AGENTS.md" "$(resolve_agents_file codex)"
+eq "agy    -> AGENTS.md (native)"  "$RD/AGENTS.md" "$(resolve_agents_file agy)"
+rm -f "$RD/CLAUDE.md"
+eq "claude falls back to AGENTS.md when no CLAUDE.md" "$RD/AGENTS.md" "$(resolve_agents_file claude)"
+rm -f "$RD/AGENTS.md"; : > "$RD/CLAUDE.md"
+eq "codex falls back to CLAUDE.md when no AGENTS.md"  "$RD/CLAUDE.md" "$(resolve_agents_file codex)"
+: > "$RD/CUSTOM.md"; export AGENTS_FILE="CUSTOM.md"
+eq "explicit AGENTS_FILE override wins"               "$RD/CUSTOM.md" "$(resolve_agents_file claude)"
+unset AGENTS_FILE; rm -f "$RD"/*.md
+resolve_agents_file claude >/dev/null 2>&1 && bad "resolve_agents_file found a file when none exist" || ok "no instructions file -> rc 1"
+unset PROJECT_DIR; rm -rf "$RD"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
