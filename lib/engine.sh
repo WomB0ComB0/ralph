@@ -610,6 +610,10 @@ _build_ai_cmd() {
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
             # first it swallowed --dangerously-skip-permissions and ignored the prompt.)
             _AI_CMD=(agy --dangerously-skip-permissions)
+            # Bind agy to the project dir. Without this, agy headless builds in its OWN scratch
+            # workspace (~/.gemini/antigravity-cli/scratch/...) instead of the project, so Ralph's
+            # file-change/lazy/git tracking sees "no files modified". --add-dir makes it write in cwd.
+            _AI_CMD+=(--add-dir "${PROJECT_DIR:-$PWD}")
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # agy accepts the human-readable `agy models` name
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue)
             local _agytmo; _agytmo=$(_ai_timeout_secs)

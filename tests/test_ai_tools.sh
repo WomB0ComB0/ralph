@@ -71,6 +71,8 @@ eq "opencode not stdin" 0 "$_AI_STDIN"
 echo "== agy: --model wired (agy DOES accept it), --print must stay LAST =="
 _build_ai_cmd agy "Gemini 3.5 Flash (Low)"; eq "agy rc" 0 "$?"
 [[ "${_AI_CMD[*]}" == *"--dangerously-skip-permissions"* ]] && ok "agy auto-approves" || bad "agy no skip-perms"
+# Without --add-dir, agy headless writes to its OWN scratch workspace, not the project cwd.
+[[ "${_AI_CMD[*]}" == *"--add-dir "* ]] && ok "agy binds the project dir (--add-dir) so it writes in cwd" || bad "agy missing --add-dir: ${_AI_CMD[*]}"
 [[ "${_AI_CMD[*]}" == *"--model Gemini 3.5 Flash (Low)"* ]] && ok "agy passes --model when set" || bad "agy dropped --model: ${_AI_CMD[*]}"
 # --print consumes the NEXT token as the prompt, so it MUST be the final flag in _AI_CMD;
 # run_ai_tool appends "$prompt" after it -> `agy ... --print "<prompt>"`.
