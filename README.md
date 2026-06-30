@@ -1,754 +1,196 @@
-# Ralph Wiggum Agent Architecture
+# Ralph
 
-Ralph is a sophisticated autonomous AI agent system that uses "Grounded Architecture" principles to maintain consistency across three key artifacts (PRD, Plan, Diagram) while employing reflexion techniques to detect and break out of unproductive loops.
+Ralph is a long-running autonomous agent loop for software projects. It keeps an AI coding tool grounded in project artifacts, task state, logs, and recent changes; detects stalls or loops; and can resume, retry, and coordinate bounded multi-agent work.
 
-## System Overview
+Use Ralph when you want an agent to keep working from a persistent plan instead of a single prompt.
 
-```mermaid
-graph TB
-    subgraph "Entry Point"
-        CLI[Command Line Interface]
-        Config[Configuration Loading]
-    end
-    
-    subgraph "Setup & Validation"
-        Setup[Setup Mode]
-        Deps[Dependency Installer]
-        Validate[Config Validator]
-    end
-    
-    subgraph "Core State Management"
-        PRD["prd.json<br/>goals & requirements"]
-        BeadsDB[".ralph/beads/tasks.db<br/>task database"]
-        Plan["ralph_plan.md<br/>human-readable tasks"]
-        Diagram["ralph_architecture.md<br/>mermaid diagrams"]
-        Progress["progress.txt<br/>run metadata"]
-        Checkpoint[".ralph_checkpoint<br/>resume point"]
-    end
-    
-    subgraph "Iteration Engine"
-        Loop[Main Loop Controller]
-        Context[Context Builder]
-        Prompt[System Prompt Generator]
-        AITool[AI Tool Executor]
-        Validator[Artifact Validator]
-        Analysis[Post-Execution Analysis]
-    end
-    
-    subgraph "AI Tool Integration"
-        OpenCode[opencode - Primary]
-        AMP[amp - Anthropic MCP]
-        Claude[claude-cli]
-        Agy[agy - Google Antigravity]
-        Codex[codex - OpenAI]
-        Copilot[GitHub Copilot]
-    end
-    
-    subgraph "Task Management"
-        Beads[Beads CLI - bd]
-        Dolt[Dolt - Time Travel]
-        SQLite[SQLite Backend]
-    end
-    
-    subgraph "State Detection"
-        HashBefore[Pre-Hash Calculator]
-        HashAfter[Post-Hash Calculator]
-        LoopDetect[Loop Detection]
-        LazyDetect[Lazy Detection]
-    end
-    
-    subgraph "Reflexion System"
-        Trigger[Reflexion Trigger]
-        Correction[Error Correction]
-        Steering[User Steering]
-    end
-    
-    subgraph "Compounding Memory (.ralph/artifacts, cross-run)"
-        Signals["signals/*.json<br/>deduped recurring problems<br/>freq · severity · related[]"]
-        LogMd["LOG.md<br/>append-only narrative"]
-        Skills["skills/*.json<br/>proven resolutions<br/>candidate to approved"]
-        GlobalSkills["~/.config/ralph/skills<br/>cross-project skills"]
-        GenMemory["~/.config/ralph/memory<br/>genetic lessons"]
-    end
+## What Ralph Does
 
-    subgraph "Curator Pass (review_run · --review/--once)"
-        Prune["prune signals/skills (TTL)"]
-        LinkRel[link_related_signals]
-        Lint["lint: gaps / orphaned /<br/>stale / high-severity"]
-        Tune["self-tune LAZY_THRESHOLD"]
-    end
+- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, and GitHub Copilot.
+- Grounds each iteration in project instructions, Beads task state, run artifacts, git context, and optional extra context files.
+- Detects lazy/no-op iterations and repeated loop signatures, then injects corrective prompts.
+- Stores recurring problems as signals and promotes proven fixes into guarded skills.
+- Supports resumable runs, retry/backoff, circuit breakers, bounded swarm workers, and GitHub triage helpers.
 
-    subgraph "Swarm (bounded scheduler)"
-        Spawn["spawn_agent + slot gate"]
-        Reap[reap dead agents]
-        SoO["soo: plan to drain<br/>+ retry/cycle cap"]
-        WarRoom["war-room event bus"]
-        SwarmHist[run history]
-    end
+<!-- Self-benchmarking note: the next small docs improvement would be adding a short real-world walkthrough from `./ralph.sh --init` to a completed Beads task. -->
 
-    subgraph "Triggers & Durability"
-        Once["--once / backlog-drain"]
-        Review["--review"]
-        Unattended["--unattended (sandbox)"]
-        Retry["retry + backoff"]
-        Breaker["circuit breaker"]
-        Recovery["recovery checkpoint"]
-        RunDir[".ralph/runs/RUN_ID<br/>step traces"]
-    end
-    
-    subgraph "Utilities"
-        Git[Git Operations]
-        Archive[Archive Manager]
-        Logger[Logging System]
-        Metrics[Metrics Tracker]
-    end
-    
-    CLI --> Config
-    Config --> Setup
-    Config --> Validate
-    
-    Setup --> Deps
-    Deps --> OpenCode
-    Deps --> AMP
-    Deps --> Claude
-    Deps --> Copilot
-    Deps --> Beads
-    Deps --> Dolt
-    
-    Validate --> Loop
-    
-    Loop --> Context
-    Context --> PRD
-    Context --> BeadsDB
-    Context --> Plan
-    Context --> Diagram
-    Context --> Git
-    Context --> GenMemory
-    Context --> WarRoom
-    
-    Context --> Prompt
-    Prompt --> AITool
-    
-    AITool --> OpenCode
-    AITool --> AMP
-    AITool --> Claude
-    AITool --> Agy
-    AITool --> Codex
-    AITool --> Copilot
-    
-    BeadsDB --> Dolt
-    BeadsDB --> SQLite
-    Beads --> BeadsDB
-    
-    AITool --> Validator
-    Validator --> PRD
-    Validator --> Plan
-    Validator --> Diagram
-    
-    Validator --> Analysis
-    
-    Analysis --> HashBefore
-    Analysis --> HashAfter
-    HashAfter --> LazyDetect
-    HashAfter --> LoopDetect
-    
-    LazyDetect --> Trigger
-    LoopDetect --> Trigger
-    Validator --> Correction
-    
-    Trigger --> Loop
-    Correction --> Loop
-    Steering --> Loop
-    
-    Loop --> Checkpoint
-    Loop --> Progress
-    Loop --> Metrics
-    Loop --> Logger
-    
-    Archive --> PRD
-    Archive --> Plan
-    Archive --> Progress
+## Quick Start
 
-    %% Compounding memory: recalled into context, captured from analysis
-    Context --> Signals
-    Context --> Skills
-    Context --> LogMd
-    Analysis --> Signals
-    Signals --> Skills
-    Skills --> GlobalSkills
-    GlobalSkills --> Skills
-    Analysis --> LogMd
+```bash
+# Install or verify dependencies
+./ralph.sh --setup
 
-    %% Triggers & durability around the loop / AI call
-    Once --> Loop
-    Review --> Loop
-    Unattended --> Loop
-    Retry --> AITool
-    Breaker --> Loop
-    Loop --> Recovery
-    Loop --> RunDir
+# Initialize Ralph artifacts in a project
+./ralph.sh --init
 
-    %% Curator pass (review_run) maintains the compounding layer
-    Loop --> Prune
-    Loop --> LinkRel
-    Loop --> Lint
-    Loop --> Tune
-    LinkRel --> Signals
-    Lint --> Signals
-    Lint --> Skills
-    Tune --> LazyDetect
+# Run one agent loop with the default tool
+./ralph.sh
 
-    %% Swarm bounded scheduler
-    Loop --> Spawn
-    SoO --> Spawn
-    Spawn --> Reap
-    Spawn --> WarRoom
-    Spawn --> SwarmHist
-
-    style PRD fill:#e1f5ff
-    style BeadsDB fill:#e1f5ff
-    style Plan fill:#e1f5ff
-    style Diagram fill:#e1f5ff
-    style Loop fill:#fff4e1
-    style AITool fill:#f0e1ff
-    style Trigger fill:#ffe1e1
-    style Beads fill:#e1ffe1
-    style GenMemory fill:#ffe1f0
-    style Signals fill:#fff0d0
-    style Skills fill:#fff0d0
-    style GlobalSkills fill:#fff0d0
-    style LogMd fill:#fff0d0
-    style Lint fill:#e1ffe1
-    style LinkRel fill:#e1ffe1
-    style SoO fill:#f0e1ff
+# Run a single iteration, useful for cron or CI
+./ralph.sh --once
 ```
 
-## Data Flow Sequence
+Run all tests:
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Setup
-    participant MainLoop
-    participant Context
-    participant AI
-    participant Validator
-    participant State
-    participant Beads
-    participant Files
-
-    User->>CLI: ./ralph.sh [--tool opencode]
-    CLI->>Setup: Load config & validate
-    Setup->>State: Check for resume checkpoint
-    State-->>Setup: Last iteration (if any)
-    
-    Setup->>MainLoop: Start main loop
-    Setup->>Beads: Initialize task engine
-    
-    rect rgb(13, 17, 23)
-        Note over MainLoop,Files: Iteration Loop (1 to MAX_ITERATIONS)
-        
-        MainLoop->>Context: Build context window
-        Context->>Files: Read PRD, Plan, Diagram
-        Context->>Beads: Read task status (bd ready)
-        Files-->>Context: Current state
-        Context->>Files: Read git diff (optional)
-        Files-->>Context: Recent changes
-        
-        Context->>Context: Generate system prompt
-        Context->>State: Hash project state (before)
-        
-        MainLoop->>AI: Execute tool with prompt
-        Note over AI: Model automatically routedbased on role (planner/engineer/tester)
-        AI-->>MainLoop: Agent response
-        
-        MainLoop->>Validator: Validate artifacts
-        Validator->>Files: Check PRD JSON validity
-        Validator->>Files: Check Mermaid syntax
-        Validator->>Files: Check Plan checkboxes
-        Validator->>Beads: Verify task states
-        Validator-->>MainLoop: Errors (if any)
-        
-        MainLoop->>State: Hash project state (after)
-        State->>State: Compare hashes
-        
-        alt No changes detected
-            State->>State: Increment lazy streak
-            State->>MainLoop: Inject reflexion trigger
-        else Changes detected
-            State->>State: Reset lazy streak
-        end
-        
-        alt Loop detected
-            State->>MainLoop: Inject loop-breaking trigger
-        end
-        
-        MainLoop->>Beads: Sync task state to plan file
-        MainLoop->>Beads: Commit task state (Dolt)
-        MainLoop->>State: Save checkpoint
-        MainLoop->>Files: Update metrics log
-        
-        alt Completion signal detected AND all tasks closed
-            MainLoop-->>User: Task complete!
-        else Tasks remain
-            MainLoop->>MainLoop: Continue iteration
-        end
-    end
-    
-    MainLoop-->>User: Max iterations reached
+```bash
+./tests/run_all.sh
 ```
 
-## State Tracking & Reflexion
-
-```mermaid
-stateDiagram-v2
-    [*] --> Initializing
-    Initializing --> LoadingContext: Config valid
-    
-    LoadingContext --> ExecutingAI: Prompt ready
-    
-    ExecutingAI --> ValidatingArtifacts: AI response received
-    
-    ValidatingArtifacts --> AnalyzingChanges: Artifacts valid
-    ValidatingArtifacts --> InjectingCorrection: Artifacts invalid
-    
-    InjectingCorrection --> LoadingContext: Correction queued
-    
-    AnalyzingChanges --> DetectingProgress: Hash comparison done
-    
-    DetectingProgress --> ProgressMade: Files changed
-    DetectingProgress --> NoProgress: No changes
-    
-    NoProgress --> CheckingLazyStreak: Increment streak
-    ProgressMade --> ResetStreak: Reset streak
-    
-    CheckingLazyStreak --> InjectingReflexion: Streak >= 2
-    CheckingLazyStreak --> CheckingLoop: Streak < 2
-    
-    ResetStreak --> CheckingLoop
-    
-    CheckingLoop --> InjectingLoopBreaker: Loop detected
-    CheckingLoop --> SavingCheckpoint: No loop
-    
-    InjectingReflexion --> SavingCheckpoint
-    InjectingLoopBreaker --> SavingCheckpoint
-    
-    SavingCheckpoint --> SyncingBeads: Checkpoint saved
-    
-    SyncingBeads --> CheckingCompletion: Plan synced
-    
-    CheckingCompletion --> Completed: COMPLETE AND all tasks closed
-    CheckingCompletion --> LoadingContext: Continue iteration
-    CheckingCompletion --> MaxIterations: Iteration limit reached
-    
-    Completed --> [*]
-    MaxIterations --> [*]
-```
-
-## Dependency Installation Flow
+## How It Fits Together
 
 ```mermaid
 flowchart TD
-    Start([Setup Mode]) --> DetectOS{Detect OS & Arch}
-    
-    DetectOS -->|Linux| CheckPkgMgr
-    DetectOS -->|macOS| CheckPkgMgr
-    DetectOS -->|Windows| CheckPkgMgr
-    
-    CheckPkgMgr{Package Manager?}
-    CheckPkgMgr -->|Found| InstallCore
-    CheckPkgMgr -->|Missing| InstallPkgMgr[Install Package Manager]
-    
-    InstallPkgMgr --> InstallCore
-    
-    InstallCore[Install Core Dependencies]
-    InstallCore --> Git[Install Git]
-    InstallCore --> JQ[Install jq]
-    InstallCore --> BC[Install bc]
-    InstallCore --> SQLite[Install sqlite3]
-    InstallCore --> Python[Install Python3]
-    InstallCore --> Bun[Install Bun]
-    
-    Bun --> PromptAI
-    
-    PromptAI{Auto-Install AI Tools}
-    
-    PromptAI --> InstallOpenCode[Install opencode]
-    PromptAI --> InstallBeads[Install beads - bd]
-    PromptAI --> InstallDolt[Install dolt]
-    PromptAI --> InstallPython[Install tiktoken & ruff]
-    PromptAI --> InstallNode[Install claude-code & ast-grep]
-    
-    InstallOpenCode --> Complete([Setup Complete])
-    InstallBeads --> Complete
-    InstallDolt --> Complete
-    InstallPython --> Complete
-    InstallNode --> Complete
+    CLI["ralph.sh"] --> Config["config + AGENTS.md"]
+    Config --> Loop["iteration engine"]
+
+    Loop --> Context["context builder"]
+    Context --> Artifacts["PRD / plan / diagrams"]
+    Context --> Tasks["Beads tasks"]
+    Context --> Git["git diff + repo state"]
+    Context --> Memory["signals + skills + genetic memory"]
+
+    Context --> Tool["AI tool executor"]
+    Tool --> Validate["artifact + task validation"]
+    Validate --> Analyze["progress, lazy, and loop analysis"]
+
+    Analyze -->|progress| Persist["checkpoint, logs, metrics"]
+    Analyze -->|stalled or looping| Reflexion["corrective prompt"]
+    Reflexion --> Loop
+    Persist --> Loop
+
+    Loop --> Swarm["optional bounded swarm"]
+    Loop --> Triage["optional GitHub triage"]
 ```
 
-## File Management & Archiving
+Ralph revolves around a few durable files and stores:
 
-```mermaid
-graph LR
-    subgraph "Active Run"
-        PRD1[prd.json]
-        Plan1[ralph_plan.md]
-        Diagram1[ralph_architecture.md]
-        Progress1[progress.txt]
-        Log1[ralph.log]
-        Branch1[.last-branch]
-        Beads1[.beads/]
-    end
-    
-    subgraph "Branch Detection"
-        Check{Branch Changed?}
-    end
-    
-    subgraph "Archive Structure"
-        ArchiveDir[archives/]
-        Date1[2026-01-25_14-30-00-feature-auth/]
-        Date2[2026-01-24_09-15-30-bugfix-login/]
-    end
-    
-    Branch1 --> Check
-    PRD1 --> Check
-    
-    Check -->|Yes| Archive[Archive Previous Run]
-    Check -->|No| Continue[Continue Current Run]
-    
-    Archive --> Date1
-    PRD1 -.copy.-> Date1
-    Plan1 -.copy.-> Date1
-    Progress1 -.copy.-> Date1
-    Log1 -.copy.-> Date1
-    
-    Continue --> PRD1
+| Path | Purpose |
+|------|---------|
+| `AGENTS.md` | Project-specific agent instructions. |
+| `prd.json` | Product requirements, when the target project uses Ralph-managed requirements. |
+| `ralph_plan.md` | Human-readable task plan synced from Beads. |
+| `ralph_architecture.md` | Architecture notes and Mermaid diagrams. |
+| `.ralph_checkpoint` | Resume point for interrupted runs. |
+| `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
+| `.ralph/artifacts/signals/` | Deduplicated recurring problems. |
+| `.ralph/artifacts/skills/` | Candidate and approved project-local fixes. |
+| `~/.config/ralph/skills/` | Optional cross-project skills. |
+| `~/.config/ralph/memory/` | Cross-project genetic memory. |
 
-    style Check fill:#fff4e1
-    style Archive fill:#ffe1e1
-```
+## Common Commands
 
-## Task Management with Beads
+### Agent Loop
 
-```mermaid
-graph TD
-    subgraph "Beads Task Database"
-        BeadsRoot[.beads/]
-        DB[tasks.dbSQLite or Dolt]
-    end
-    
-    subgraph "Task Operations"
-        Create[bd create]
-        List[bd ready]
-        Close[bd close]
-        Status[bd count]
-        VC[bd vc - Time Travel]
-    end
-    
-    subgraph "Task States"
-        Open[Open]
-        InProgress[In Progress]
-        Blocked[Blocked]
-        Closed[Closed]
-    end
-    
-    subgraph "Sync to Human-Readable"
-        PlanFile[ralph_plan.md]
-    end
-    
-    BeadsRoot --> DB
-    
-    Create --> DB
-    List --> DB
-    Close --> DB
-    Status --> DB
-    VC --> DB
-    
-    DB --> Open
-    DB --> InProgress
-    DB --> Blocked
-    DB --> Closed
-    
-    DB --> PlanFile
-    
-    style DB fill:#e1ffe1
-    style PlanFile fill:#e1f5ff
-    style VC fill:#ffe1f0
-```
-
-## Intelligent Model Routing
-
-```mermaid
-flowchart LR
-    Start[Agent Role] --> Router{Model Router}
-    
-    Router -->|planner| Planner[High-Reasoning Models]
-    Router -->|engineer| Engineer[High-Speed Models]
-    Router -->|tester| Tester[Efficient Models]
-    Router -->|thinker| Thinker[Deep Reasoning Models]
-    
-    Planner --> GeminiPro[Gemini 2.0 Pro/Thinking]
-    Engineer --> GeminiFlash[Gemini 2.0 Flash]
-    Tester --> GeminiLite[Gemini 2.0 Flash/Lite]
-    Thinker --> GeminiThinking[Gemini 2.0 Thinking]
-    
-    GeminiPro --> Fallback{Model Available?}
-    GeminiFlash --> Fallback
-    GeminiLite --> Fallback
-    GeminiThinking --> Fallback
-    
-    Fallback -->|No| Alternative[Alternative Models]
-    Fallback -->|Yes| Execute[Execute]
-    
-    Alternative --> Opus[Claude Opus]
-    Alternative --> DeepSeek[DeepSeek]
-    Alternative --> Mistral[Mistral]
-    
-    Opus --> Execute
-    DeepSeek --> Execute
-    Mistral --> Execute
-    
-    style Router fill:#fff4e1
-    style GeminiPro fill:#e1ffe1
-    style GeminiFlash fill:#e1ffe1
-```
-
-## Key Features
-
-### 1. Grounded Architecture
-Ralph maintains synchronized artifacts for consistent execution:
-- **prd.json**: Product requirements in JSON format
-- **ralph_plan.md**: Human-readable execution plan synced from Beads
-- **ralph_architecture.md**: Mermaid diagrams of system architecture
-- **AGENTS.md**: Project-specific instructions and conventions (highly effective for agent alignment)
-
-### 2. Time-Travel Task Management
-- Uses **Beads** (`bd` CLI) for dependency-aware task tracking
-- Optional **Dolt** backend provides git-like version control for tasks
-- Full task history and ability to replay states
-- Tasks automatically synced to human-readable plan file
-
-### 3. Intelligent Model Routing (dynamic, tool-aware)
-- Resolves the model **live, per tool + role** — preferring each tool's own source over any pinned string (`resolve_model_for_tool`):
-  - **agy** (Google Antigravity — the gemini CLI is deprecated/archived): live-lists via `agy models` and picks the newest model for the role (e.g. Planner → newest reasoning tier like Claude Opus 4.6; Tester → an efficient flash tier); empty ⇒ agy auto-selects latest.
-  - **claude / amp**: tier **aliases** (`opus` for planner/thinker, `sonnet` otherwise) that resolve to the latest server-side — never a pinned date.
-  - **opencode**: dynamic discovery via the `opencode models` router.
-- Role tiers and "newest" are chosen by version (dominant) then capability keyword; `RALPH_MODEL_FAMILIES` still tunes opencode family preference.
-- No hardcoded `…-2.0-…`/dated-model pins on the hot path.
-
-### 4. Reflexion & Loop Detection
-- **Lazy Detection**: Identifies when agent isn't making progress (no file changes)
-- **Loop Detection**: Catches repetitive actions via log signature analysis
-- **Automatic Correction**: Injects reflexion prompts to break unproductive patterns
-- **User Steering**: Interactive mode for mid-iteration guidance
-
-### 5. Genetic Memory
-- Persists engineering lessons across projects
-- Stored in `~/.config/ralph/memory/global.json`
-- Automatically recalls relevant patterns
-- Helps avoid repeating mistakes
-
-### 6. Self-Healing Tooling
-- Auto-detects missing dependencies (pytest, npm, cargo, etc.)
-- Attempts autonomous installation via `ralph setup`
-- Graceful degradation when tools unavailable
-
-### 7. War Room Coordination
-- Real-time event system for multi-agent coordination
-- Message passing between agents
-- Task board for swarm orchestration
-
-### 8. Compounding Artifact Layer
-- **Signals**: deduplicated "patterns the loop keeps re-hitting" — one git-diffable JSON per signal under `.ralph/artifacts/signals/`, keyed by a normalized `theme_key`, with frequency, severity, and lifecycle (open → ack → resolved, auto-reopen on regression). A bounded digest is surfaced into the prompt each iteration. Signals that recur in the same run are linked (`related`), so recall surfaces *clusters* of problems that tend to appear together.
-- **LOG.md**: an append-only cross-run narrative at `.ralph/artifacts/LOG.md`.
-- **Guarded Skills**: when a recurring signal is resolved with a note, Ralph auto-authors a *candidate* skill (a proven resolution). Candidates are never surfaced until you `approve` them; approved skills are then injected ("you fixed this before: …") whenever the matching signal is open again. An approved skill can be **`globalize`d** into a HOME-global store so the proven fix is recalled in *every* repo (mirrors genetic memory; project-local skills take precedence).
-- Manage via the `ralph signal`, `ralph skill`, and `ralph lint` (read-only knowledge-hygiene curator: gaps, orphaned/stale skills, approval backlog, unresolved high-severity) CLIs (see Usage).
-
-### 9. Durable Execution & Bounded Orchestration
-- **Retry/backoff** around the AI call, plus **recovery checkpoints** persisted per run so `--resume` can continue after a crash.
-- **Failure ≠ done**: a failed iteration never counts as success, and a **circuit breaker** stops the loop after repeated hard failures.
-- **Triggers**: `--once` (single pass), backlog-drain (stop once the task queue stays empty for a streak), and a `--review` self-tuning pass that adjusts the lazy-detection threshold from run metrics.
-- **Per-run workspace**: each run gets a `RUN_ID` and a `.ralph/runs/<id>/` directory with step traces; old runs are pruned.
-- **Bounded swarm scheduler**: live-PID-aware concurrency cap, dead-agent reaping, run history, and per-task + global retry caps so orchestration can't loop forever.
-
-## Usage
-
-### Basic Usage
 ```bash
-# Run with default tool (opencode)
-./ralph.sh
-
-# Specify a tool
-./ralph.sh --tool opencode
-./ralph.sh --tool amp
-./ralph.sh --tool claude
-./ralph.sh --tool agy       # Google Antigravity
-./ralph.sh --tool codex     # OpenAI Codex (codex exec, sandboxed)
-
-# Specify model
-./ralph.sh --model "google/gemini-2.0-flash-001"
-
-# Set max iterations
-./ralph.sh --max-iterations 20
-
-# Resume from checkpoint
-./ralph.sh --resume
-
-# Interactive mode (pause between iterations)
-./ralph.sh --interactive
-
-# Run internal tests
-./ralph.sh --test
-
-# Single pass (one iteration) then exit — ideal for cron/CI triggers
-./ralph.sh --once
-
-# Self-tuning review pass: refresh the lazy threshold from run metrics (no AI call)
-./ralph.sh --review
-
-# Unattended: never pause for input (headless/cron runs)
-./ralph.sh --unattended
-
-# Run in Docker sandbox
-./ralph.sh --sandbox
-
-# Add context files
-./ralph.sh --context docs/api.md --context lib/utils.sh
-
-# Include recent git diffs in context
-./ralph.sh --diff-context
-
-# Disable archiving
-./ralph.sh --no-archive
+./ralph.sh                         # default tool
+./ralph.sh --tool opencode         # choose a tool
+./ralph.sh --tool codex            # OpenAI Codex via `codex exec`
+./ralph.sh --model "provider/id"   # pin a model
+./ralph.sh --max-iterations 20     # change loop limit
+./ralph.sh --resume                # resume from checkpoint
+./ralph.sh --interactive           # pause between iterations
+./ralph.sh --unattended            # no interactive prompts
+./ralph.sh --sandbox               # run in Docker sandbox
+./ralph.sh --context docs/api.md   # add context files
+./ralph.sh --diff-context          # include recent git diff
+./ralph.sh --review                # self-tuning review pass, no AI call
+./ralph.sh --test                  # native runtime self-test
 ```
 
-### Copilot Integration
+Supported AI tools:
+
+| Tool | Notes |
+|------|-------|
+| `opencode` | Default and recommended general router. |
+| `claude` | Uses Claude Code conventions, including `CLAUDE.md` when present. |
+| `amp` | Anthropic MCP workflow. |
+| `agy` | Google Antigravity CLI. |
+| `codex` | OpenAI Codex CLI, executed in sandboxed mode. |
+| `copilot` | Available through the Copilot subcommands below. |
+
+### Copilot
+
 ```bash
-# Run an agentic task with Copilot
-./ralph.sh copilot run "Refactor the login function"
-
-# Ask for an explanation
-./ralph.sh copilot explain "How does the event bus work?"
-
-# Authenticate Copilot
 ./ralph.sh copilot auth
+./ralph.sh copilot run "Refactor the login function"
+./ralph.sh copilot explain "How does the event bus work?"
 ```
 
-### Setup
+### Signals, Skills, and Lint
+
 ```bash
-# Auto-install all dependencies
-./ralph.sh --setup
+./ralph.sh signal ls
+./ralph.sh signal show <key>
+./ralph.sh signal resolve <key> "fixed by adding the missing module"
+./ralph.sh signal recall
 
-# Initialize a new project
-./ralph.sh --init
-```
-
-### Task Management
-```bash
-# Create a task
-bd create "Implement user authentication" -d "Add JWT-based auth" --deps "tk-001"
-
-# List ready tasks (unblocked)
-bd ready
-
-# Close a task
-bd close tk-123
-
-# View task history (with Dolt)
-bd vc log
-```
-
-### Compounding Memory (Signals & Skills)
-```bash
-# Signals — recurring problems the loop keeps hitting
-./ralph.sh signal ls                                    # list, most urgent first
-./ralph.sh signal show <key>                            # inspect one signal
-./ralph.sh signal resolve <key> "added the missing module"  # resolve (may auto-author a skill)
-./ralph.sh signal recall                                # the digest surfaced to the agent
-
-# Skills — proven resolutions; candidates stay hidden until approved
 ./ralph.sh skill ls
-./ralph.sh skill approve <theme>     # surface this fix when the matching signal recurs
+./ralph.sh skill approve <theme>
 ./ralph.sh skill reject <theme>
-./ralph.sh skill globalize <theme>   # promote a proven fix to the cross-repo store (recalled in EVERY project)
-./ralph.sh skill global              # list global (cross-project) skills
+./ralph.sh skill globalize <theme>
+./ralph.sh skill global
 
-# Lint — periodic curator sweep over the knowledge store (read-only)
-./ralph.sh lint                      # knowledge gaps, orphaned/stale skills, approval backlog, high-severity
+./ralph.sh lint
 ```
 
-### Swarm Commands
+Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that can be recalled when matching signals reappear. `lint` is a read-only curator pass over that knowledge store.
+
+### Swarm
+
 ```bash
-# Spawn a sub-agent
 ./ralph.sh swarm spawn --role "Frontend Developer" --task "Build UI"
-
-# Send message to agent
 ./ralph.sh swarm msg --to agent-123 --content "Status update?"
-
-# List all agents
 ./ralph.sh swarm list
-
-# Series of Orchestrations: auto-plan then drain the task queue with bounded workers
 ./ralph.sh swarm soo
-
-# Reap crashed agents / view the run history
 ./ralph.sh swarm reap
 ./ralph.sh swarm history
 ```
 
-## Configuration
+The swarm scheduler is bounded by concurrency, retry, cycle, and slot-timeout limits so orchestration cannot expand indefinitely.
 
-### Environment Variables
-- `TOOL`: AI tool to use (opencode, claude, amp, agy, codex)
-- `RALPH_ROLE`: Role driving model routing — `planner` | `engineer` (default) | `tester` | `thinker`
-- `AGENTS_FILE`: Explicit path to the agent-instructions/operating prompt. By default Ralph auto-detects each tool's native file — **`CLAUDE.md`** for `--tool claude` (Claude Code's convention), **`AGENTS.md`** for codex/agy/opencode/amp, `GEMINI.md` for gemini — with fallbacks. `ralph --init` scaffolds the right one; the loop errors clearly if none exists
-- `SELECTED_MODEL`: Specific model to pin (honored from CLI `--model`, `ralph.json`, `.ralphrc`, or this env var; otherwise auto-selected per tool+role)
-- `MAX_ITERATIONS`: Maximum iterations (default: 10)
-- `LOG_FILE`: Path to log file (default: ralph.log)
-- `VERBOSE`: Enable debug logging (true/false)
-- `RALPH_UNATTENDED`: Autonomous mode (same as `--unattended`) — prefers the Docker sandbox for isolation and suppresses interactive prompts (e.g. sudo). For interactive pausing between iterations use `-i/--interactive`
-- `RALPH_TOOL_TIMEOUT`: Per-iteration wall-clock cap (seconds) for the AI tool call; the loop is wrapped in `timeout`/`gtimeout` so a hung tool can't block it (default 1800; `0` removes Ralph's wrapper — note agy still self-terminates at its built-in ~5m `--print` default; set a large value to extend instead)
-- `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY`: Retry count / base backoff (s) for a failed tool call (default 3 / 5)
-- `MAX_CONSECUTIVE_FAILURES`: Consecutive failed iterations before the loop aborts (default 3)
-- `RALPH_RESUME_SESSION`: Opt-in (`1`) session continuity — resume the tool's conversation across iterations (same as `--continue-session`). Supported on claude/opencode/agy (`--continue`); codex/amp run fresh each iteration. Default off (each iteration is freshly grounded). Spans iterations of a single run only — **not** across separate `--once`/cron ticks (the session-established flag is per-process)
-- `RALPH_MAX_BUDGET_USD`: Opt-in per-call spend cap for `--tool claude` (`--max-budget-usd`); unset = no cap
-- `RALPH_CLAUDE_FALLBACK_MODEL`: Tier claude falls back to on overload (default `sonnet`; skipped when it equals the primary). For `--tool claude`, do NOT set `ANTHROPIC_BASE_URL` unless you want a local/proxy endpoint — claude uses your normal Anthropic auth by default
+### GitHub Triage
 
-#### Smart model management (fallback chain + local-first + graceful degradation)
-Each iteration tries an ordered **model chain**; on a *capacity* failure (rate limit, overload, quota/token exhaustion, or timeout) it **degrades to the next model** automatically. Auth/other failures don't burn the chain. All opt-in — with none of these set the chain is one model and behavior is unchanged.
-- `RALPH_MODEL_FALLBACKS`: Comma-separated ordered fallback models appended after the primary, e.g. `RALPH_MODEL_FALLBACKS="anthropic/claude-sonnet,deepseek/deepseek-v4,glm/glm-5.2"`. These are *your* models — Ralph never hardcodes unverified IDs. Most useful with `--tool opencode` (its router reaches any provider) or claude tiers (`opus,sonnet,haiku`)
-- `RALPH_LOCAL_MODEL`: Prefer this local model as the primary when no model is pinned ("use local unless specified"), e.g. `ollama/qwen2.5-coder`. opencode only (the router that can reach a local provider). This is the safe way to opt into local-first
-- `RALPH_PREFER_LOCAL`: `auto` (default), `1`, or `0`. In `auto`, local-first applies **only if `RALPH_LOCAL_MODEL` is set** (so a host that merely has Ollama installed keeps its cloud default unchanged). Set `RALPH_PREFER_LOCAL=1` to additionally auto-detect Ollama (first `ollama list` model → `ollama/<name>`); `0` disables local-first entirely
-- `LAZY_THRESHOLD`: Iterations without file changes before a reflexion nudge (auto-tuned by `--review`)
-- `RALPH_HASH_EXCLUDES`: Extra dir names to exclude from the project hash (also reads `.ralph/excludes`)
-- `GITDIFF_EXCLUDE`: Path to the diff-exclude file used by `--diff-context` (default: `gitdiff-exclude`)
-- `RALPH_HEALTH_PORTS` / `RALPH_MODEL_FAMILIES` / `RALPH_SANDBOX_ALLOW_ENV`: Override the built-in port / model-family / sandbox-env-passthrough lists
-- `RALPH_SIGNAL_RECALL` / `RALPH_SIGNAL_OPEN_TTL_DAYS`: Signal digest size / prune age for open signals
-- `RALPH_SIGNAL_RELATED_MAX`: Max co-occurrence (`related`) links stored/surfaced per signal (default 8)
-- `RALPH_SKILL_MIN_FREQ` / `RALPH_SKILL_RECALL` / `RALPH_SKILL_TTL_DAYS`: Skill auto-capture frequency threshold / recall size / prune age
-- `RALPH_LINT_MIN_FREQ` / `RALPH_LINT_STALE_DAYS`: Knowledge-lint gap-frequency threshold / stale-skill idle age
-- `RALPH_GLOBAL_SKILL_DIR`: Cross-project (HOME-global) skill store (default: `~/.config/ralph/skills`)
-- `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
+Ralph can inspect an explicit allowlist of GitHub repositories and record findings as signals:
 
-#### Cross-repo GitHub triage (`ralph triage`)
-A central, locally-run, scoped alternative to per-repo cloud workflows: point Ralph at an **explicit allowlist** of repos and it surfaces actionable work via `gh` — **read-only**, recording each finding as a Ralph signal so it compounds across runs. Pairs with cron + local models.
-- **Scope (required):** `RALPH_TARGETS="owner/repo,owner/repo"` *or* a `ralph.targets` file (one `owner/repo` per line, `#` comments allowed). The allowlist is the safety boundary — triage never touches a repo you didn't list.
-- **What it finds:** failing CI runs (`gh run list --status failure`) + open **Dependabot**, **code-scanning**, and **secret-scanning** alerts; prints a severity-sorted report and records deduped signals (`ralph signal ls`).
-- **Tuning:** `RALPH_TARGETS_FILE` (allowlist path), `RALPH_TRIAGE_CI_LIMIT` (failing runs per repo, default 5).
-- **Autofix CI → PR (opt-in):** `ralph triage --fix-ci` prints a dry-run plan; add `--apply` to clone to a throwaway worktree, run the loop (local model) to fix the failing CI, and open a PR on a bot-namespaced `ralph/fix-*` branch. It targets the **actual failing branch** (e.g. a renovate PR branch), discards any dependency/lockfile/workflow churn (source-only fix), and `--run <id>` picks a specific run. It **never pushes to a default branch** (a `ralph/fix-*`-only push gate enforces this) and the PR is flagged for review.
-- **Remediate security alerts → PR (opt-in):** `ralph triage --fix-security [alert]` takes the highest-severity open **code-scanning** (CodeQL etc.) alert — or a specific `[alert]` number — clones the default branch, fixes the vulnerability at the flagged location, and opens a `ralph/fix-sec-*` PR against the default branch (same source-only + never-push-default + review-flagged guarantees). Dependabot dependency bumps are intentionally left to Dependabot/renovate.
-- **Resolve PR review conversations (opt-in):** `ralph triage --resolve-reviews <pr>` addresses the unresolved review threads on one of Ralph's own `ralph/fix-*` PRs, pushes, and marks each conversation resolved. Refuses any non-`ralph/fix-*` PR (never auto-dismisses a human's review); resolves only after pushing a real change.
-- **Suggest → issue (opt-in, no code changes):** `ralph triage --suggest [--apply]` digests a repo's findings into a single GitHub **issue** (a review checklist) instead of opening fix PRs — idempotent (comments an existing open `ralph-triage` issue rather than spamming). Lowest blast radius: it never touches code.
 ```bash
-RALPH_TARGETS="me/api,me/web" ralph triage      # or: echo "me/api" > ralph.targets && ralph triage
+RALPH_TARGETS="owner/api,owner/web" ./ralph.sh triage
 ```
 
-### Configuration File
-Ralph supports `ralph.json` (JSON) or `.ralphrc` (shell) for persistent settings.
-Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
+It can also prepare opt-in fixes:
 
-`ralph.json` keys: `tool`, `model`, `maxIterations`, `sandbox`, `verbose`:
+```bash
+./ralph.sh triage --fix-ci
+./ralph.sh triage --fix-ci --apply --run <run-id>
+./ralph.sh triage --fix-security
+./ralph.sh triage --resolve-reviews <pr>
+./ralph.sh triage --suggest --apply
+```
+
+Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches.
+
+## Task Management
+
+Ralph uses Beads through the `bd` CLI for dependency-aware work queues. Dolt is optional for time-travel task history.
+
+```bash
+bd create "Implement user authentication" -d "Add JWT-based auth"
+bd ready
+bd close tk-123
+bd vc log
+```
+
+The loop reads ready tasks, updates task state, and syncs the queue back to `ralph_plan.md`.
+
+## Configuration
+
+Ralph reads configuration in this priority order:
+
+1. Command-line flags
+2. `.ralphrc`
+3. `ralph.json`
+4. Built-in defaults
+
+Example `ralph.json`:
 
 ```json
 {
@@ -760,161 +202,122 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 }
 ```
 
+Common environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, or `codex`. |
+| `RALPH_ROLE` | Routing role: `planner`, `engineer`, `tester`, or `thinker`. |
+| `AGENTS_FILE` | Explicit instruction file override. |
+| `SELECTED_MODEL` | Specific model to pin. |
+| `MAX_ITERATIONS` | Loop limit, default `10`. |
+| `LOG_FILE` | Log path, default `ralph.log`. |
+| `VERBOSE` | Enable debug logs. |
+| `RALPH_UNATTENDED` | Same behavior as `--unattended`. |
+| `RALPH_TOOL_TIMEOUT` | Per-iteration timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
+| `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
+| `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
+| `RALPH_RESUME_SESSION` | Reuse supported tool sessions within a run. |
+| `RALPH_MAX_BUDGET_USD` | Claude per-call spend cap. |
+| `RALPH_MODEL_FALLBACKS` | Ordered fallback model list. |
+| `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
+| `RALPH_PREFER_LOCAL` | Local-first behavior: `auto`, `1`, or `0`. |
+| `LAZY_THRESHOLD` | No-change iterations before a reflexion nudge. |
+| `RALPH_HASH_EXCLUDES` | Extra names excluded from project hashing. |
+| `GITDIFF_EXCLUDE` | Diff-exclude file for `--diff-context`. |
+| `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
+| `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
+| `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
+| `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
+
+## Dependencies
+
+Core dependencies:
+
+- Bash 4+
+- Git
+- `jq`
+- `curl`
+- `bc`
+- `sqlite3`
+- Python 3
+- Bun or npm
+
+At least one AI tool is required for normal operation. Optional dependencies include Docker for sandbox mode, Dolt for task history, `ruff` for Python linting, `ast-grep` for code analysis, and `tiktoken` for token estimation.
+
 ## Testing
-```bash
-# Run every suite (12 unit harnesses + the native --test) — 370 cases total
-./tests/run_all.sh
-
-# Just the native runtime self-test
-./ralph.sh --test
-```
-Each suite is hermetic (sources `lib/*.sh`, uses `mktemp` sandboxes). See
-[`tests/README.md`](tests/README.md) for the per-suite breakdown.
-
-## Helper scripts (`scripts/`)
-A small library of `gh` workflow helpers — compact status polling and review close-out so the
-common GitHub chores cost a few tokens instead of a wall of inline `gh api graphql`. They pair
-naturally with `ralph triage`. See [`scripts/README.md`](scripts/README.md) for the full list.
 
 ```bash
-scripts/repo-health WomB0ComB0/portfolio   # open PRs / failing CI / security alerts, one line
-scripts/ci-fails    WomB0ComB0/portfolio   # failing CI runs -> feed an id to triage --fix-ci --run
-scripts/pr-status   34                      # mergeable + reviewers + unresolved review threads
-scripts/pr-review   34                      # full bodies of the unresolved review comments
-scripts/pr-resolve-all 34 "Addressed in <sha>."   # resolve every thread after addressing
-scripts/pr-merge    34                      # merge + delete branch + sync the default branch
+./tests/run_all.sh       # full suite
+./ralph.sh --test        # native runtime self-test
+scripts/run-tests        # helper wrapper with rollup
 ```
 
-## Required Dependencies
+The test suites are plain Bash harnesses that source `lib/*.sh` directly and use temporary sandboxes. See [`tests/README.md`](tests/README.md) for the suite breakdown.
 
-### Core
-- bash (4.0+)
-- git
-- jq
-- curl
-- bc
-- sqlite3
-- python3
-- bun (preferred) or npm
+## Helper Scripts
 
-### AI Tools (at least one)
-- opencode (recommended)
-- amp (Anthropic MCP)
-- claude-cli
+The `scripts/` directory contains small `gh` workflow helpers:
 
-### Task Management
-- bd (beads) - installed via `go install`
-- dolt (optional) - for time-travel capabilities
-
-### Optional
-- docker (for sandbox mode)
-- ruff (Python linting)
-- ast-grep (code analysis)
-- tiktoken (accurate token counting)
-
-## Architecture Principles
-
-### Cognitive Process
-Every agent response follows:
-1. **Reflect**: Analyze recent changes and context
-2. **Plan**: Identify next unblocked task from Beads
-3. **Reason**: Determine efficient tool-path
-4. **Anticipate**: Identify potential side effects
-
-### Verification Mandatory
-- All code changes require tests
-- Tasks not closed until tests pass
-- Runtime verification for services
-- Architectural integrity checks
-
-### Constraints
-- **Diagram First**: Update architecture before complex features
-- **Valid Artifacts**: Ensure JSON and Mermaid validity
-- **No Loops**: Detect and break unproductive cycles
-- **Termination**: Only signal completion when all tasks closed
-
-## Project Structure
-
+```bash
+scripts/repo-health owner/repo
+scripts/ci-fails owner/repo
+scripts/pr-status 34
+scripts/pr-review 34
+scripts/pr-checks 34
+scripts/pr-resolve-all 34 "Addressed in <sha>."
+scripts/pr-merge 34
 ```
+
+See [`scripts/README.md`](scripts/README.md) for details.
+
+## Repository Layout
+
+```text
 .
-├── ralph.sh                  # Main entry point
-├── lib/
-│   ├── utils.sh             # Utility functions
-│   ├── engine.sh            # Core iteration engine
-│   └── tools.sh             # Tool integrations
-├── prd.json                 # Product requirements
-├── AGENTS.md                # Project-specific instructions
-├── ralph_plan.md            # Execution plan (synced from Beads)
-├── ralph_architecture.md    # System diagrams
-├── progress.txt             # Run metadata
-├── ralph.log                # Execution log
-├── .ralph_checkpoint        # Resume state
-├── .last-branch             # Branch tracking
-├── .beads/                  # Task database
-│   └── tasks.db             # SQLite or Dolt
-└── archives/                # Previous runs
-    └── 2026-01-28_10-30-00-feature/
+|-- ralph.sh                  # entry point
+|-- lib/
+|   |-- engine.sh             # core loop and validation
+|   |-- lint.sh               # knowledge-store curator checks
+|   |-- signals.sh            # recurring-problem capture
+|   |-- skills.sh             # guarded skill capture and recall
+|   |-- tools.sh              # AI tool command builders
+|   |-- triage.sh             # GitHub triage workflows
+|   `-- utils.sh              # shared utilities
+|-- scripts/                  # GitHub workflow helpers
+|-- tests/                    # Bash test harnesses
+|-- benchmark.sh              # benchmark runner
+|-- benchmark_analyzer.py     # benchmark analysis
+|-- install.sh                # installer
+`-- AGENTS.md                 # local operating instructions
 ```
 
-## Advanced Features
+## Design Principles
 
-### Context Windowing
-Ralph intelligently manages context window size:
-- Prioritizes recent and relevant information
-- Compresses older context
-- Maintains critical artifacts in full
-
-### Token Estimation
-Multiple estimation methods:
-- Simple (chars/4)
-- Advanced (heuristic with code detection)
-- tiktoken (accurate, requires Python library)
-
-### Runtime Verification
-Automatically identifies and verifies:
-- Rust projects (`cargo check`)
-- Node.js projects (package.json validation)
-- Python projects (`ruff check`)
-- Go projects (`go vet`)
-- Running services (health checks, benchmarks)
-
-### Performance Monitoring
-- Tracks iteration metrics
-- Monitors lazy streaks
-- Logs token usage
-- Detects performance regressions
+- Ground every iteration in durable artifacts, not just chat history.
+- Prefer explicit task state over hidden agent memory.
+- Treat no-op iterations and repeated actions as failures to correct.
+- Keep learned fixes guarded until approved.
+- Require verification before closing tasks.
+- Stop bounded orchestration before it can loop forever.
 
 ## Troubleshooting
 
-### Agent Making No Progress
-- Check `ralph.log` for errors
-- Review lazy streak counter
-- Enable `--interactive` mode for steering
-- Try different role or model
-
-### Tasks Not Closing
-- Verify tests are passing
-- Check `bd ready` for blockers
-- Review task dependencies
-
-### Model Not Available
-- Check `opencode models` for available options
-- Specify model explicitly with `--model`
-- Fallback chain will try alternatives
-
-### Memory Issues
-- Reduce `MAX_ITERATIONS`
-- Enable archiving to clear old runs
-- Check for large excluded directories
+| Symptom | First checks |
+|---------|--------------|
+| Agent makes no progress | Inspect `ralph.log`, reduce scope, try `--interactive`, or switch `RALPH_ROLE`. |
+| Tasks do not close | Run tests, inspect `bd ready`, and check task dependencies. |
+| Model is unavailable | Run the tool's model list command, pin `--model`, or set `RALPH_MODEL_FALLBACKS`. |
+| Context is too large | Reduce `--context`, tune excludes, or archive stale run artifacts. |
+| A run crashed | Resume with `./ralph.sh --resume` and inspect `.ralph/runs/<run-id>/`. |
 
 ## Contributing
 
-Ralph is designed to be extensible:
-- Add new AI tools in `lib/tools.sh`
-- Extend validation in `lib/engine.sh`
-- Add new roles in `get_role_instructions()`
-- Implement new features as skills
+- Add new AI tool support in `lib/tools.sh`.
+- Extend loop behavior in `lib/engine.sh`.
+- Add signal or skill behavior in `lib/signals.sh` and `lib/skills.sh`.
+- Add or update tests in `tests/` for behavior changes.
 
 ## License
 
-See LICENSE file for details.
+See the project license file, if present.
