@@ -837,7 +837,7 @@ run_ai_tool() {
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
-    
+
     # Clear line and show final success/fail
     printf "\r\033[K"
     

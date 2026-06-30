@@ -545,7 +545,7 @@ render_status_bar() {
     # Beads Stats (War Room context)
     local ready_tasks
     ready_tasks=$(bd count --status open --quiet 2>/dev/null || echo "0")
-    local model_short=${SELECTED_MODEL##*/}
+    local model_short=${SELECTED_MODEL:-}; model_short=${model_short##*/}   # guarded: triage/standalone callers don't set SELECTED_MODEL (set -u safe)
     
     # Format: [CHAR] [ITER/MAX] [READY] [MODEL] STEP: Task... (Time)
     printf "\r\033[K%b[%s]%b %b[%d/%d]%b %b[Ready:%s]%b %b[%s]%b %b%s:%b %s %b(%s)%b" \
