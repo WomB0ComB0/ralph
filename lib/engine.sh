@@ -1333,6 +1333,11 @@ main() {
         handle_lint_command "$@"
         exit $?
     fi
+    if [[ "${1:-}" == "triage" ]]; then
+        shift
+        handle_triage_command "$@"
+        exit $?
+    fi
 
     parse_arguments "$@"
     

@@ -731,6 +731,16 @@ Each iteration tries an ordered **model chain**; on a *capacity* failure (rate l
 - `RALPH_GLOBAL_SKILL_DIR`: Cross-project (HOME-global) skill store (default: `~/.config/ralph/skills`)
 - `RALPH_SWARM_MAX_CONCURRENT` / `RALPH_SWARM_MAX_RETRIES` / `RALPH_SWARM_MAX_CYCLES` / `RALPH_SWARM_SLOT_TIMEOUT` / `RALPH_SWARM_ROOT`: Swarm scheduler bounds and state location
 
+#### Cross-repo GitHub triage (`ralph triage`)
+A central, locally-run, scoped alternative to per-repo cloud workflows: point Ralph at an **explicit allowlist** of repos and it surfaces actionable work via `gh` — **read-only**, recording each finding as a Ralph signal so it compounds across runs. Pairs with cron + local models.
+- **Scope (required):** `RALPH_TARGETS="owner/repo,owner/repo"` *or* a `ralph.targets` file (one `owner/repo` per line, `#` comments allowed). The allowlist is the safety boundary — triage never touches a repo you didn't list.
+- **What it finds:** failing CI runs (`gh run list --status failure`) + open **Dependabot**, **code-scanning**, and **secret-scanning** alerts; prints a severity-sorted report and records deduped signals (`ralph signal ls`).
+- **Tuning:** `RALPH_TARGETS_FILE` (allowlist path), `RALPH_TRIAGE_CI_LIMIT` (failing runs per repo, default 5).
+- **Writes nothing.** Autofix→PR and suggest→issue modes are separate and opt-in.
+```bash
+RALPH_TARGETS="me/api,me/web" ralph triage      # or: echo "me/api" > ralph.targets && ralph triage
+```
+
 ### Configuration File
 Ralph supports `ralph.json` (JSON) or `.ralphrc` (shell) for persistent settings.
 Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
@@ -749,7 +759,7 @@ Priority: command-line args > `.ralphrc` > `ralph.json` > defaults.
 
 ## Testing
 ```bash
-# Run every suite (11 unit harnesses + the native --test) — 321 cases total
+# Run every suite (12 unit harnesses + the native --test) — 335 cases total
 ./tests/run_all.sh
 
 # Just the native runtime self-test
