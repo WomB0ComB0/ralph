@@ -4,6 +4,7 @@ R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
+source "$R/lib/tools.sh"   # compute_project_hash + _project_files_mtime
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  PASS: %s\n' "$1"; }
@@ -44,6 +45,27 @@ mkdir -p "$TMP/proj"; : > "$TMP/proj/gitdiff-exclude"
   && ok "repo-root gitdiff-exclude is the default" || bad "repo default"
 ( unset GITDIFF_EXCLUDE; [[ -z "$(resolve_gitdiff_exclude "$TMP/empty")" ]] ) \
   && ok "no file -> empty" || bad "empty case"
+
+echo "== compute_project_hash: UNCOMMITTED changes invalidate the cache (lazy-detection) =="
+# Isolate the hash cache under a temp HOME so this doesn't read/pollute the real cache.
+_OLDHOME="$HOME"; HPHASH=$(mktemp -d); export HOME="$HPHASH"
+HPROJ=$(mktemp -d)
+( cd "$HPROJ" && git init -q && git config user.email a@a && git config user.name a \
+    && echo seed > a.txt && git add -A && git commit -qm seed ) >/dev/null 2>&1
+# The loop runs with cwd == PROJECT_DIR (git ls-files | xargs md5 needs that); mirror it.
+_OLDPWD="$PWD"; cd "$HPROJ" || true
+PROJECT_DIR="$HPROJ"
+hh1=$(compute_project_hash 2>/dev/null)
+hh1b=$(compute_project_hash 2>/dev/null)
+[[ -n "$hh1" && "$hh1" != "d41d8cd98f00b204e9800998ecf8427e" ]] && ok "compute_project_hash hashes the files" || bad "empty/null hash: $hh1"
+eq "stable hash when nothing changes (cache hit)" "$hh1" "$hh1b"
+# The bug: an uncommitted new file left the git-path cache valid (keyed on commit time) ->
+# the SAME stale hash -> false 'no files modified'. After the fix it must change.
+sleep 1; echo created-by-agent > "$HPROJ/uncommitted.js"
+hh2=$(compute_project_hash 2>/dev/null)
+[[ -n "$hh2" && "$hh2" != "$hh1" ]] && ok "uncommitted new file changes the hash (cache invalidated)" || bad "stale hash: uncommitted file undetected (h1=$hh1 h2=$hh2)"
+cd "$_OLDPWD" || true
+export HOME="$_OLDHOME"; rm -rf "$HPHASH" "$HPROJ"; unset PROJECT_DIR
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
