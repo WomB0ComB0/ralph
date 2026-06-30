@@ -29,6 +29,20 @@ eq "bare '401' number alone -> other (no false auth-stop)" "other" "$(classify_t
 eq "exit 124 -> timeout"             "timeout"    "$(classify_tool_failure '' 124)"
 eq "generic -> other"               "other"      "$(classify_tool_failure 'Segmentation fault somewhere' 1)"
 
+echo "== classify_tool_failure: REAL provider error payloads (from their docs) =="
+# Anthropic 529 overloaded_error
+eq "anthropic overloaded_error" "overloaded" "$(classify_tool_failure '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' 1)"
+# Google Gemini RESOURCE_EXHAUSTED (429) and 503 UNAVAILABLE
+eq "gemini RESOURCE_EXHAUSTED"  "rate_limit" "$(classify_tool_failure 'google.api_core.exceptions: 429 RESOURCE_EXHAUSTED' 1)"
+eq "gemini 503 UNAVAILABLE"     "overloaded" "$(classify_tool_failure '503 UNAVAILABLE: The model is overloaded. Please try again later.' 1)"
+# OpenAI quota / insufficient_quota
+eq "openai insufficient_quota"  "quota"      "$(classify_tool_failure 'Error code: 429 - insufficient_quota: You exceeded your current quota, please check your plan and billing details' 1)"
+# OpenRouter 402 insufficient credits
+eq "openrouter 402 credits"     "quota"      "$(classify_tool_failure '{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}' 1)"
+# Anthropic / Gemini auth
+eq "anthropic authentication_error" "auth"   "$(classify_tool_failure '{"error":{"type":"authentication_error","message":"invalid x-api-key"}}' 1)"
+eq "gemini PERMISSION_DENIED"   "auth"       "$(classify_tool_failure '403 PERMISSION_DENIED: API key not valid' 1)"
+
 echo "== preferred_local_model: opencode-only, RALPH_LOCAL_MODEL, opt-out =="
 export RALPH_LOCAL_MODEL="ollama/qwen2.5-coder"
 eq "opencode + RALPH_LOCAL_MODEL -> that model" "ollama/qwen2.5-coder" "$(preferred_local_model opencode)"

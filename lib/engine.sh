@@ -308,10 +308,22 @@ classify_tool_failure() {
     [[ "$rc" == "124" ]] && { echo timeout; return 0; }   # our `timeout` wrapper's exit code
     lc="${out,,}"   # Bash 4 native lowercase
     case "$lc" in
-        *"rate limit"*|*rate_limit*|*ratelimit*|*"429"*|*"too many requests"*) echo rate_limit ;;
-        *overloaded*|*"529"*|*"503"*|*"server is busy"*|*"at capacity"*|*"service unavailable"*) echo overloaded ;;
-        *quota*|*"out of credit"*|*"insufficient credit"*|*"exceeded your current"*|*billing*|*"context length"*|*"maximum context"*|*"token limit"*|*"context window"*) echo quota ;;
-        *unauthorized*|*authentication*|*"invalid api key"*|*"missing bearer"*|*forbidden*|*"permission denied"*) echo auth ;;
+        # quota / credit / billing exhaustion + context-window overflow ("running out of tokens").
+        # Checked BEFORE rate_limit because OpenAI returns insufficient_quota WITH HTTP 429 — the
+        # billing label is the accurate one. — OpenAI insufficient_quota / "exceeded your current
+        # quota ... billing", OpenRouter 402 "Insufficient credits"/"negative credit balance",
+        # context_length_exceeded. (Both quota and rate_limit fall back; this only sharpens the log.)
+        *quota*|*"402"*|*"insufficient credit"*|*"payment required"*|*"out of credit"*|*"negative credit"*|*"exceeded your current"*|*"check your plan"*|*billing*|*"context length"*|*"context window"*|*"maximum context"*|*"token limit"*|*"too long"*) echo quota ;;
+        # rate limit — Anthropic rate_limit_error (429), OpenAI RateLimitError / "Too Many
+        # Requests", Google RESOURCE_EXHAUSTED (429), OpenRouter "rate limited".
+        *"rate limit"*|*rate_limit*|*ratelimit*|*"429"*|*"too many requests"*|*resource_exhausted*) echo rate_limit ;;
+        # provider/model overloaded or temporarily unavailable — Anthropic 529 overloaded_error
+        # / "Overloaded", Google 503 UNAVAILABLE / "model is overloaded" / "high demand",
+        # OpenAI "The server is overloaded" (503). Capacity codes only (graceful: just falls back).
+        *overloaded*|*"529"*|*"503"*|*unavailable*|*"server is busy"*|*"at capacity"*|*"high demand"*) echo overloaded ;;
+        # auth — Anthropic authentication_error/permission_error, Google PERMISSION_DENIED/
+        # UNAUTHENTICATED, OpenAI invalid_api_key. TEXT only (a false match here STOPS the chain).
+        *unauthorized*|*authentication*|*"invalid api key"*|*"api key not valid"*|*"missing bearer"*|*forbidden*|*permission_denied*|*"permission denied"*|*permission_error*|*unauthenticated*) echo auth ;;
         *) echo other ;;
     esac
 }
