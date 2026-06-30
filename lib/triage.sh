@@ -98,7 +98,9 @@ _triage_safe_push_branch() {
 # default branch, and never touches the default branch itself.
 triage_autofix_ci() {
     local repo="$1" apply="${2:-0}"
-    local run_json run_id run_url default_branch branch
+    # iteration is referenced by run_ai_tool (status bar/logging); set it so the call doesn't
+    # trip `set -u` when invoked outside the normal iteration loop.
+    local run_json run_id run_url default_branch branch iteration=1
     run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url 2>/dev/null || echo '[]')
     run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
     if [[ -z "$run_id" ]]; then
@@ -131,7 +133,9 @@ triage_autofix_ci() {
     logs=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null | tail -n 120 || true)
     prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nFailing log (tail):\n%s\n\nFix the failing CI with MINIMAL changes to the code/tests. Do not edit unrelated files. Do not change CI workflow files unless the workflow itself is the bug.' "$run_url" "$repo" "$logs")
     lf="$work/.ralph-fix.log"; of="$work/.ralph-fix.out"
-    ( cd "$work" && git checkout -b "$branch" >/dev/null 2>&1 \
+    # PROJECT_DIR must point at the CLONE so tools that bind a working dir (e.g. agy --add-dir)
+    # operate on the throwaway checkout, not the original repo.
+    ( cd "$work" && export PROJECT_DIR="$work" && git checkout -b "$branch" >/dev/null 2>&1 \
         && RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of" ) || true
 
     if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
@@ -143,7 +147,11 @@ triage_autofix_ci() {
         log_error "[$repo] refusing to push: on '$cur' (not a ralph/fix-* branch off '$default_branch')."
         return 1
     fi
-    if ! ( cd "$work" && git add -A \
+    # Local identity in the clone so the commit succeeds even with no global git user config.
+    if ! ( cd "$work" \
+            && git config user.name "ralph-bot" \
+            && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git add -A \
             && git commit -q -m "fix: resolve failing CI (run $run_id)
 
 Automated fix by \`ralph triage --fix-ci\` (local model). Please review before merging." \
