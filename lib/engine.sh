@@ -475,7 +475,7 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 7. **Swarm Orchestration:** You can act as a Team Leader or Specialist.
    - Spawn sub-agents: \`ralph swarm spawn --role "RoleName" --task "Task description"\`
    - Send messages: \`ralph swarm msg --to <agent_id> --content "Message"\`
-8. **Long-Term Virtual Memory:** Use the \`save_memory\` tool to persist project-wide engineering patterns, architectural decisions, and "lessons learned" across all future projects.
+8. **Long-Term Memory:** To persist a durable, cross-project lesson (an engineering pattern, architectural decision, or "lesson learned"), emit a line \`<memory>the lesson in one sentence</memory>\` in your response. Ralph captures these into long-term memory (surfaced as \`<genetic_memory>\` in future runs). Use sparingly — only genuinely reusable lessons, not per-task notes.
 </capabilities>
 
 <workflow>
@@ -1018,6 +1018,9 @@ execute_iteration() {
     if [[ -z "$output" ]]; then
         log_warning "AI tool produced no output"
     fi
+
+    # Capture any <memory>…</memory> notes the agent emitted into cross-project genetic memory.
+    extract_and_store_memories "$output"
 
     # Persist a per-step trace (prompt in, output out) for post-hoc observability.
     if [[ -n "${RUN_DIR:-}" ]]; then
@@ -1859,7 +1862,9 @@ recall_lessons() {
     
     # Get last 5 lessons
     local lessons
-    lessons=$(jq -r '.lessons | last(5) | .[] | "- " + .' "$GLOBAL_MEMORY_FILE" 2>/dev/null)
+    # Last 5 lessons. (Was `last(5)`, which in jq returns the scalar 5 — not "last 5
+    # elements" — so this errored and recalled NOTHING. `.lessons[-5:]` is the slice.)
+    lessons=$(jq -r '.lessons[-5:] | .[] | "- " + .' "$GLOBAL_MEMORY_FILE" 2>/dev/null)
     
     if [[ -n "$lessons" ]]; then
         echo -e "\n<genetic_memory>\nHistorical lessons from previous projects:\n$lessons\n</genetic_memory>"
@@ -1874,16 +1879,52 @@ recall_lessons() {
 store_lesson() {
     local lesson="$1"
     [[ -z "$lesson" ]] && return 0
-    
-    if command_exists jq; then
-        local tmp
-        tmp=$(mktemp)
-        jq --arg msg "$lesson" '.lessons += [$msg] | .lessons = .lessons[-50:]' "$GLOBAL_MEMORY_FILE" > "$tmp" && mv "$tmp" "$GLOBAL_MEMORY_FILE"
-        log_debug "Stored new genetic lesson: $lesson"
-        
-        # Suggest to agent to save to virtual memory if in high-verbosity mode
-        echo -e "\n[VIRTUAL MEMORY] Please remember this lesson: $lesson" >> "${LOG_FILE:-/dev/null}"
+    command_exists jq || return 0
+    [[ -f "$GLOBAL_MEMORY_FILE" ]] || init_memory   # don't silently lose lessons on a fresh host
+    local tmp; tmp=$(mktemp)
+    # Dedup exact repeats (agents re-emit the same lesson across iterations); keep the last 50.
+    if jq --arg msg "$lesson" \
+         'if (.lessons | index($msg)) then . else .lessons += [$msg] end | .lessons = .lessons[-50:]' \
+         "$GLOBAL_MEMORY_FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$GLOBAL_MEMORY_FILE"; then
+        log_debug "Stored genetic lesson: $lesson"
+    else
+        rm -f "$tmp"
     fi
+}
+
+# Extract <memory>…</memory> payloads (multiple, possibly multiline) the agent emitted.
+# Each is flattened to one trimmed line. Portable awk (index/substr, no GNU-only features).
+_extract_memory_blocks() {
+    awk '
+        { buf = buf $0 "\n" }
+        END {
+            s = buf
+            while ((a = index(s, "<memory>")) > 0) {
+                s = substr(s, a + 8)
+                b = index(s, "</memory>")
+                if (b == 0) break
+                m = substr(s, 1, b - 1)
+                gsub(/[ \t\r\n]+/, " ", m); gsub(/^ +| +$/, "", m)
+                if (m != "") print m
+                s = substr(s, b + 9)
+            }
+        }'
+}
+
+# Persist any <memory>…</memory> notes from agent output into cross-project genetic memory.
+# This is the real implementation behind the prompt's "save a memory" instruction — Ralph
+# scans the agent's output (as it does for <promise>COMPLETE</promise>) and stores them.
+extract_and_store_memories() {
+    local text="${1:-}" mem n=0
+    [[ -z "$text" ]] && return 0
+    while IFS= read -r mem; do
+        [[ -z "$mem" ]] && continue
+        store_lesson "$mem"
+        n=$((n + 1))
+        [[ $n -ge 10 ]] && break   # cap per iteration; store dedups + bounds to 50 overall
+    done < <(printf '%s\n' "$text" | _extract_memory_blocks)
+    [[ $n -gt 0 ]] && log_info "Captured $n cross-project memory note(s) into genetic memory"
+    return 0
 }
 
 #######################################
