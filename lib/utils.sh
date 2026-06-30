@@ -213,6 +213,34 @@ hash_exclude_names() {
 #   $1 - (Optional) project dir (default: PROJECT_DIR or cwd)
 # Returns: the chosen path on stdout, or empty if none
 #######################################
+#######################################
+# Resolve the agent-instructions file for a tool, honouring each CLI's native convention:
+# Claude Code reads CLAUDE.md, the agents.md standard (codex/agy/opencode/amp) reads
+# AGENTS.md, Gemini reads GEMINI.md. Falls back across the known names so a repo with only
+# one of them still works. An explicit AGENTS_FILE always wins.
+# Arguments: $1 - tool (default $TOOL). Echoes the resolved path; returns 1 if none exist.
+#######################################
+resolve_agents_file() {
+    local tool="${1:-${TOOL:-}}" dir="${PROJECT_DIR:-.}" order=() f p
+    # An explicit AGENTS_FILE is STRICT: use exactly that file, never fall back — a typo
+    # should surface, not silently resolve to a different file.
+    if [[ -n "${AGENTS_FILE:-}" ]]; then
+        p="$AGENTS_FILE"; [[ "$AGENTS_FILE" != /* ]] && p="$dir/$AGENTS_FILE"
+        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+        return 1
+    fi
+    case "$tool" in
+        claude) order=("CLAUDE.md" "AGENTS.md" "GEMINI.md") ;;
+        gemini) order=("GEMINI.md" "AGENTS.md" "CLAUDE.md") ;;
+        *)      order=("AGENTS.md" "CLAUDE.md" "GEMINI.md") ;;
+    esac
+    for f in "${order[@]}"; do
+        p="$dir/$f"
+        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    return 1
+}
+
 resolve_gitdiff_exclude() {
     if [[ -n "${GITDIFF_EXCLUDE:-}" ]]; then
         printf '%s\n' "$GITDIFF_EXCLUDE"
@@ -584,7 +612,9 @@ load_config() {
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
-    AGENTS_FILE="${AGENTS_FILE:-AGENTS.md}"
+    # Optional EXPLICIT override of the agent-instructions file. Empty by default so
+    # resolve_agents_file() can pick each tool's native convention (CLAUDE.md / AGENTS.md / …).
+    AGENTS_FILE="${AGENTS_FILE:-}"
     LOG_FILE="${LOG_FILE:-$RUN_DIR/ralph.log}"
     METRICS_FILE="${METRICS_FILE:-$STATE_DIR/metrics.json}"
     ARCHIVE_DIR="${ARCHIVE_DIR:-$_RALPH_DIR/archives}"
@@ -1478,7 +1508,31 @@ EOF
 EOF
         log_success "Created $prd_file"
     fi
-    
+
+    # Scaffold the agent-instructions file (the operating prompt the loop feeds the agent)
+    # if none exists. Claude Code reads CLAUDE.md; codex/agy/opencode/amp read AGENTS.md.
+    if ! resolve_agents_file "${TOOL:-}" >/dev/null 2>&1; then
+        local agents_name="AGENTS.md"; [[ "${TOOL:-}" == "claude" ]] && agents_name="CLAUDE.md"
+        local agents_path="${PROJECT_DIR:-.}/$agents_name"
+        cat > "$agents_path" <<'AGENTS_EOF'
+# Agent Instructions
+
+You are an autonomous software engineer. The objective, user stories, and success metrics
+live in `.ralph/artifacts/prd.json`; the task list is `.ralph/artifacts/ralph_plan.md`.
+
+Each iteration:
+1. Read prd.json and ralph_plan.md to see the goal and what remains.
+2. Make CONCRETE progress — create or edit real source files toward the goal (write code,
+   don't just plan).
+3. Verify your change builds and tests (use this project's build/test commands).
+4. Check off completed items in ralph_plan.md.
+
+Make actual file changes every iteration. When the goal is fully met and verified, say so
+clearly so the loop can stop.
+AGENTS_EOF
+        log_success "Created $agents_path (agent operating prompt)"
+    fi
+
     # Initialize other artifacts via orchestrator
     log_info "Run './ralph.sh' to start the engineering loop."
 }

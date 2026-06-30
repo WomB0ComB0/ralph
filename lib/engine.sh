@@ -890,11 +890,13 @@ execute_iteration() {
     current_log_signature=$(tail -n 50 "${LOG_FILE:-/dev/null}" 2>/dev/null | md5sum_wrapper | awk '{print $1}' || echo "none")
     log_debug "Log signature: $current_log_signature"
     
-    # Read user's task prompt
-    if [[ -f "${PROJECT_DIR:-.}/AGENTS.md" ]]; then
-        prompt_content=$(cat "${PROJECT_DIR:-.}/AGENTS.md")
+    # Read the agent-instructions prompt (tool-native: CLAUDE.md for claude, AGENTS.md for
+    # codex/agy/opencode/amp, GEMINI.md for gemini — with fallbacks).
+    local agents_path
+    if agents_path=$(resolve_agents_file "${TOOL:-}"); then
+        prompt_content=$(cat "$agents_path")
     else
-        log_error "No prompt file found (AGENTS.md)"
+        log_error "No agent-instructions file in ${PROJECT_DIR:-.} (looked for CLAUDE.md / AGENTS.md). Create one, or run: ralph --init"
         return 1
     fi
     
@@ -913,9 +915,10 @@ execute_iteration() {
         diagram_context="No architecture diagrams found. Create one for complex systems or multi-component features."
     fi
 
-    if [[ -f "${AGENTS_FILE:-AGENTS.md}" ]]; then
-        project_instructions=$(cat "${AGENTS_FILE:-AGENTS.md}")
-        log_debug "Loaded project-specific instructions from ${AGENTS_FILE:-AGENTS.md}"
+    # Same resolved instructions file (already located above as $agents_path).
+    if [[ -n "${agents_path:-}" && -f "$agents_path" ]]; then
+        project_instructions=$(cat "$agents_path")
+        log_debug "Loaded project-specific instructions from $agents_path"
     fi
     
     # Load system resources and user context
@@ -1214,6 +1217,14 @@ main() {
     # --help/--version/--init/--setup/--test/--review and the read-only subcommands have
     # already exited above, and TOOL is now known so the correct AI tool is verified.
     check_dependencies || exit 1
+
+    # Fail loudly NOW if there is no agent-instructions file — otherwise every iteration
+    # aborts internally and the loop misreads it as benign progress, burning all iterations.
+    if ! resolve_agents_file "${TOOL:-}" >/dev/null; then
+        log_error "No agent-instructions file in ${PROJECT_DIR:-.}."
+        log_error "Create one ($([[ "${TOOL:-}" == claude ]] && echo CLAUDE.md || echo AGENTS.md) — the operating prompt for the agent), or run: ralph --init"
+        exit 1
+    fi
 
     # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
     # Skip when already inside the sandbox container (we are the isolation boundary).
