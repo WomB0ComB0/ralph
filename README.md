@@ -166,7 +166,7 @@ It can also prepare opt-in fixes:
 ./ralph.sh triage --suggest --apply
 ```
 
-Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches.
+Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches. Untrusted GitHub content (PR review comments, CI logs, code-scanning descriptions) is fenced as data before it enters any prompt, and self-triage can never rewrite Ralph's own control surface (`lib/`, `ralph.sh`, `scripts/`, config/allowlist).
 
 ## Task Management
 
@@ -223,6 +223,10 @@ Common environment variables:
 | `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
 | `RALPH_PREFER_LOCAL` | Local-first behavior: `auto`, `1`, or `0`. |
 | `LAZY_THRESHOLD` | No-change iterations before a reflexion nudge. |
+| `RALPH_MAX_LAZY_STREAK` | No-progress iterations before the run hard-aborts (stall ceiling), default `5`; `0` disables. Keep `> LAZY_THRESHOLD` so the nudge fires first. |
+| `RALPH_MAX_RUN_TOKENS` | Aggregate estimated-token ceiling for the whole run; hard-aborts when reached, default `0` (unlimited). |
+| `RALPH_MAX_RUN_SECONDS` | Wall-clock ceiling (seconds) for the whole run; hard-aborts when reached, default `0` (unlimited). |
+| `RALPH_REQUIRE_VERIFY_ON_COMPLETE` | Reject a `COMPLETE` promise while build/artifact verification is failing, default `1`; `0` allows completion over failing checks. |
 | `RALPH_HASH_EXCLUDES` | Extra names excluded from project hashing. |
 | `GITDIFF_EXCLUDE` | Diff-exclude file for `--diff-context`. |
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
