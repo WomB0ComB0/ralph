@@ -1323,7 +1323,8 @@ execute_iteration() {
             # over a broken tree. The failing details were queued in NEXT_INSTRUCTION
             # above; reinforce that completion is blocked until they pass.
             log_warning "Agent signaled completion, but verification is failing — completion REJECTED until it passes."
-            export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED because build/artifact verification is still failing. Fix the errors below, confirm they pass, and only then complete:\n${artifact_errors}${runtime_errors}"
+            export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED because build/artifact verification is still failing. Fix the errors below, confirm they pass, and only then complete:
+${artifact_errors}${runtime_errors}"
             record_signal completion_blocked "completion promise rejected while verification is failing" "verify-gate-block" "fix the failing build/artifact checks, then re-emit completion" "verify_gate" "high" >/dev/null 2>&1 || true
         elif verify_beads_complete; then
             log_success "Agent signaled completion and all Beads tasks are closed"
@@ -1338,7 +1339,8 @@ execute_iteration() {
             log_warning "Agent signaled completion but incomplete tasks remain in Beads"
             local ready_tasks
             ready_tasks=$(_bd ready --pretty)
-            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:\n$ready_tasks"
+            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
+$ready_tasks"
         fi
     fi
 
