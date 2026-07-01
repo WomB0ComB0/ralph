@@ -14,30 +14,30 @@ IFS=$'\n\t'
 estimate_tokens() {
     local content="$1"
     local method="${2:-advanced}"
-    
+
     case "$method" in
         simple)
             # Simple heuristic: characters / 4
             local char_count=${#content}
             echo $((char_count / 4))
             ;;
-            
+
         advanced)
             # More accurate multi-factor estimation
             local char_count word_count line_count code_count
-            
+
             char_count=${#content}
             word_count=$(echo "$content" | wc -w | xargs)
             line_count=$(echo "$content" | wc -l | xargs)
-            
+
             # Detect code content (has common programming patterns)
             # IMPROVEMENT: Consider using a more comprehensive regex or a dedicated tool like 'cloc' for better language-agnostic code detection
             code_count=$(echo "$content" | grep -cE '^\s*(function|def|class|import|const|let|var|if|for|while|\{|\}|;)' || true)
-            
+
             # Constants for estimation
             local TOKEN_CHARS_PER_TOKEN=4
             local CODE_DENSITY_THRESHOLD=4  # 1/4 of lines
-            
+
             # Adjust estimation based on content type
             if [[ "$code_count" -gt $((line_count / CODE_DENSITY_THRESHOLD)) ]]; then
                 # Code-heavy content: chars/3.5 (code is more token-dense)
@@ -47,7 +47,7 @@ estimate_tokens() {
                 echo $(( (char_count / TOKEN_CHARS_PER_TOKEN + word_count * 13 / 10) / 2 ))
             fi
             ;;
-            
+
         tiktoken)
             # Use tiktoken if available (Python required)
             if command_exists python3 && python3 -c "import tiktoken" 2>/dev/null; then
@@ -67,7 +67,7 @@ try:
     except:
         # Fallback to cl100k_base (used by GPT-4 and many modern models)
         encoding = tiktoken.get_encoding("cl100k_base")
-    
+
     tokens = encoding.encode(content)
     print(len(tokens))
 except Exception as e:
@@ -79,7 +79,7 @@ EOF
                 estimate_tokens "$content" "advanced"
             fi
             ;;
-            
+
         *)
             log_warning "Unknown token estimation method: $method, using advanced"
             estimate_tokens "$content" "advanced"
@@ -96,9 +96,9 @@ EOF
 ensure_model_router() {
     local cache_dir="${HOME}/.cache/ralph"
     local router_path="${cache_dir}/.model_router.py"
-    
+
     mkdir -p "$cache_dir"
-    
+
     # Embedded router script content
     local router_content
     read -r -d '' router_content <<'EOF'
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     if not re.match(r'^[a-zA-Z_]+$', arg):
         sys.exit(1)
     arg = arg.upper()
-    
+
     if arg == "DISCOVER":
         if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
         print("Discovery triggered")
@@ -191,7 +191,7 @@ EOF
         ) 200>"$router_path.lock"
         log_debug "Updated model router script at $router_path"
     fi
-    
+
     echo "$router_path"
 }
 
@@ -205,7 +205,7 @@ get_model_for_role() {
     local role="${1:-engineer}"
     local router_script
     router_script=$(ensure_model_router)
-    
+
     python3 "$router_script" "$role"
 }
 
@@ -289,7 +289,7 @@ determine_model() {
     SELECTED_MODEL="$auto_selected_model"
     SELECTED_MODEL_SOURCE="auto"
     export SELECTED_MODEL SELECTED_MODEL_SOURCE
-    
+
     log_debug "Model routed for role '$current_role': $SELECTED_MODEL"
     return 0
 }
@@ -409,17 +409,17 @@ build_model_chain() {
 validate_model_availability() {
     local model="$1"
     local tool="${2:-$TOOL}"
-    
+
     case "$tool" in
         opencode)
             if ! command_exists opencode; then
                 log_error "opencode not installed, cannot validate model"
                 return 1
             fi
-            
+
             local available_models
             available_models=$(opencode models 2>/dev/null || echo "")
-            
+
             if echo "$available_models" | grep -qF "$model"; then
                 log_debug "Model validated: $model"
                 return 0
@@ -428,7 +428,7 @@ validate_model_availability() {
                 return 1
             fi
             ;;
-            
+
         amp|claude)
             # Can't validate without an API call; accept tier aliases (opus/sonnet/haiku,
             # which resolve to the latest server-side) or a dated claude- identifier.
@@ -440,7 +440,7 @@ validate_model_availability() {
                 return 1
             fi
             ;;
-            
+
         *)
             log_debug "Cannot validate model for unknown tool: $tool"
             return 0
@@ -462,7 +462,7 @@ print_header() {
     local max=$2
     local tool=$3
     local model=$4
-    
+
     echo ""
     echo -e "${_RALPH_COLOR_BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${_RALPH_COLOR_NC}"
     echo -e "${_RALPH_COLOR_BLUE}║${_RALPH_COLOR_NC} ${_RALPH_COLOR_YELLOW}RALPH AGENT${_RALPH_COLOR_NC} | Iteration: ${_RALPH_COLOR_CYAN}${iteration}/${max}${_RALPH_COLOR_NC} | Tool: ${_RALPH_COLOR_MAGENTA}${tool}${_RALPH_COLOR_NC}"
@@ -545,7 +545,7 @@ generate_system_prompt() {
     local resource_context="$8"
     local user_provided_context="$9"
     local project_instructions="${10:-}"
-    
+
     local role_instructions
     role_instructions=$(get_role_instructions "${RALPH_ROLE:-engineer}")
 
@@ -773,10 +773,10 @@ run_ai_tool() {
     local prompt="$3"
     local log_file="$4"
     local output_file="$5"
-    
+
     log_info "Running ${_RALPH_COLOR_MAGENTA}${tool}${_RALPH_COLOR_NC} with model: ${_RALPH_COLOR_GREEN}${model}${_RALPH_COLOR_NC}"
     log_debug "Prompt length: ${#prompt} characters"
-    
+
     local pid i exit_code
 
     # Opt-in session continuity: resume the tool's prior conversation once a session has
@@ -824,25 +824,25 @@ run_ai_tool() {
         ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
-    
+
     # Animated spinner while tool runs
     local i=0
     start_progress_timer
     update_status "Thinking" "$(basename "${PROJECT_DIR:-.}")"
-    
+
     while kill -0 $pid 2>/dev/null; do
         render_status_bar "$iteration" "$MAX_ITERATIONS" "$i"
         i=$(( (i+1) % 10 ))
         sleep 0.1
     done
-    
+
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
 
     # Clear line and show final success/fail
     printf "\r\033[K"
-    
+
     if [[ $exit_code -eq 0 ]]; then
         log_success "Iteration $iteration: AI Response Received"
         # A successful call establishes a session the next iteration can --continue.
@@ -900,18 +900,18 @@ run_ai_with_fallback() {
 #######################################
 load_plan_context() {
     local plan_file="${PLAN_FILE:-ralph_plan.md}"
-    
+
     if [[ ! -f "$plan_file" ]]; then
         echo "No plan file found."
         return
     fi
-    
+
     # Extract Header + Last 3 Done + First 10 Todo
     local plan_header plan_done plan_todo
     plan_header=$(head -n 5 "$plan_file")
     plan_done=$(grep -F "[x]" "$plan_file" 2>/dev/null | tail -n 3)
     plan_todo=$(grep -F "[ ]" "$plan_file" 2>/dev/null | head -n 10)
-    
+
     cat <<EOF
 $plan_header
 
@@ -965,7 +965,7 @@ EOF
 generate_loop_instruction() {
     local prev_hash="$1"
     local curr_hash="$2"
-    
+
     if [[ -n "$prev_hash" ]] && [[ "$prev_hash" == "$curr_hash" ]]; then
         cat <<EOF
 <reflexion_trigger>
@@ -994,6 +994,36 @@ EOF
 #   $1 - Current iteration number
 # Returns: 0 if complete, 1 to continue
 #######################################
+# stall_limit_reached STREAK CEILING
+# Return 0 when a no-progress streak has hit an enabled ceiling (CEILING>0). The
+# reflexion nudge at LAZY_THRESHOLD gets first crack; this is the hard stop that
+# keeps a wholly-stuck agent from burning every iteration. Pure + unit-tested.
+stall_limit_reached() {
+    local streak="${1:-0}" ceiling="${2:-0}"
+    [[ "$streak" =~ ^[0-9]+$ && "$ceiling" =~ ^[0-9]+$ ]] || return 1
+    [[ "$ceiling" -gt 0 && "$streak" -ge "$ceiling" ]]
+}
+
+# run_budget_exceeded TOKENS_TOTAL TOKENS_MAX ELAPSED_SECONDS SECONDS_MAX
+# Return 0 (and echo a human reason) when any enabled aggregate ceiling is hit —
+# the FinOps guard for unattended loops. A ceiling of 0 means "unlimited". Pure.
+run_budget_exceeded() {
+    local tok="${1:-0}" tok_max="${2:-0}" elapsed="${3:-0}" sec_max="${4:-0}"
+    [[ "$tok" =~ ^[0-9]+$ ]] || tok=0
+    [[ "$tok_max" =~ ^[0-9]+$ ]] || tok_max=0
+    [[ "$elapsed" =~ ^[0-9]+$ ]] || elapsed=0
+    [[ "$sec_max" =~ ^[0-9]+$ ]] || sec_max=0
+    if [[ "$tok_max" -gt 0 && "$tok" -ge "$tok_max" ]]; then
+        echo "token budget exhausted (${tok}/${tok_max} est. tokens)"
+        return 0
+    fi
+    if [[ "$sec_max" -gt 0 && "$elapsed" -ge "$sec_max" ]]; then
+        echo "time budget exhausted (${elapsed}/${sec_max}s)"
+        return 0
+    fi
+    return 1
+}
+
 execute_iteration() {
     local iteration=$1
     local temp_output gitdiff_exclude_args
@@ -1004,19 +1034,19 @@ execute_iteration() {
     local user_provided_context=""
     local project_instructions=""
     local prompt_content structured_prompt output
-    
+
     # Display iteration header
     print_header "$iteration" "$MAX_ITERATIONS" "${TOOL:-opencode}" "$SELECTED_MODEL"
-    
+
     # Create temporary output file
     temp_output=$(create_temp_file) || {
         log_error "Failed to create temporary file"
         return 1
     }
-    
+
     # Build git diff exclusions
     mapfile -t gitdiff_exclude_args < <(build_gitdiff_exclude_args)
-    
+
     # Capture recent changes if requested
     if [[ "${DIFF_CONTEXT_FLAG:-false}" == "true" ]]; then
         if command_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -1029,17 +1059,17 @@ execute_iteration() {
             recent_changes="Not in a Git repository."
         fi
     fi
-    
+
     # Capture project state before execution
     local project_hash_before
     project_hash_before=$(compute_project_hash)
     log_debug "Project hash before: $project_hash_before"
-    
+
     # Generate current log signature for loop detection
     local current_log_signature
     current_log_signature=$(tail -n 50 "${LOG_FILE:-/dev/null}" 2>/dev/null | md5sum_wrapper | awk '{print $1}' || echo "none")
     log_debug "Log signature: $current_log_signature"
-    
+
     # Read the agent-instructions prompt (tool-native: CLAUDE.md for claude, AGENTS.md for
     # codex/agy/opencode/amp, GEMINI.md for gemini — with fallbacks).
     local agents_path
@@ -1049,16 +1079,16 @@ execute_iteration() {
         log_error "No agent-instructions file in ${PROJECT_DIR:-.} (looked for CLAUDE.md / AGENTS.md). Create one, or run: ralph --init"
         return 1
     fi
-    
+
     # Load context with active windowing
     plan_context=$(load_plan_context)
-    
+
     if [[ -f "$PRD_FILE" ]]; then
         prd_context=$(cat "$PRD_FILE")
     else
         prd_context="No PRD found. Create one if the task is complex enough to warrant structured requirements."
     fi
-    
+
     if [[ -f "$DIAGRAM_FILE" ]]; then
         diagram_context=$(cat "$DIAGRAM_FILE")
     else
@@ -1070,11 +1100,11 @@ execute_iteration() {
         project_instructions=$(cat "$agents_path")
         log_debug "Loaded project-specific instructions from $agents_path"
     fi
-    
+
     # Load system resources and user context
     resource_context=$(get_resource_usage)
     user_provided_context=$(read_context_files)
-    
+
     # Recall historical lessons (Genetic Memory)
     local genetic_memory
     genetic_memory=$(recall_lessons)
@@ -1118,7 +1148,7 @@ execute_iteration() {
         reflection_instruction=$(generate_loop_instruction "$PREVIOUS_LOG_HASH" "$current_log_signature")
         record_signal loop_detected "repeating the same actions across iterations" "repeating-same-actions" "change approach; the last action produced no new state" "loop_detection" >/dev/null 2>&1 || true
     fi
-    
+
     # Generate complete system prompt
     structured_prompt=$(generate_system_prompt \
         "$prompt_content" \
@@ -1131,12 +1161,12 @@ execute_iteration() {
         "$resource_context" \
         "$user_provided_context" \
         "$project_instructions")
-    
+
     # Estimate token count
     local est_tokens
     est_tokens=$(estimate_tokens "$structured_prompt")
     log_debug "Estimated prompt tokens: $est_tokens"
-    
+
     # Execute AI tool
     local start_ts end_ts iteration_latency
     start_ts=$(get_high_res_time)
@@ -1160,10 +1190,10 @@ execute_iteration() {
         record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $used_model did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
         return 2
     fi
-    
+
     end_ts=$(get_high_res_time)
     iteration_latency=$(echo "$end_ts - $start_ts" | bc 2>/dev/null || echo "0")
-    
+
     # Read output
     output=$(cat "$temp_output" 2>/dev/null || echo "")
 
@@ -1182,13 +1212,14 @@ execute_iteration() {
             printf '%s' "$output" > "$step_dir/output.txt" 2>/dev/null || true
         fi
     fi
-    
+
     # Validate artifacts and queue corrections for next iteration
-    local artifact_errors runtime_errors
+    local artifact_errors runtime_errors verify_ok=true
     artifact_errors=$(validate_artifacts)
     runtime_errors=$(verify_runtime)
-    
+
     if [[ -n "$artifact_errors" || -n "$runtime_errors" ]]; then
+        verify_ok=false
         export NEXT_INSTRUCTION="${artifact_errors}${runtime_errors}"
         log_warning "Validation or runtime errors detected, will correct in next iteration"
         SIGNAL_CLEAN_STREAK=0
@@ -1203,12 +1234,12 @@ execute_iteration() {
             _signal_auto_resolve_family runtime_failure || true
         fi
     fi
-    
+
     # Analyze project changes
     local project_hash_after
     project_hash_after=$(compute_project_hash)
     log_debug "Project hash after: $project_hash_after"
-    
+
     if [[ "$project_hash_before" == "$project_hash_after" ]]; then
         LAZY_STREAK=$(( ${LAZY_STREAK:-0} + 1 ))
         log_warning "No files modified this iteration (streak: $LAZY_STREAK)"
@@ -1222,7 +1253,7 @@ execute_iteration() {
         _signal_auto_resolve_family lazy_streak >/dev/null 2>&1 || true
         _signal_auto_resolve_family loop_detected >/dev/null 2>&1 || true
     fi
-    
+
     # Log metrics (JSONL). Build with jq so special chars in TOOL/SELECTED_MODEL
     # can't emit malformed JSON that would later break review_run's parsing.
     local timestamp metrics_payload
@@ -1230,6 +1261,13 @@ execute_iteration() {
     # Normalize numerics (bc can emit ".5" without a leading zero -> invalid JSON).
     [[ "$iteration_latency" =~ ^[0-9]+(\.[0-9]+)?$ ]] || iteration_latency=0
     [[ "$est_tokens" =~ ^[0-9]+$ ]] || est_tokens=0
+    # Aggregate token accounting for the run-wide FinOps ceiling (checked in main()).
+    RUN_TOKENS_TOTAL=$(( ${RUN_TOKENS_TOTAL:-0} + est_tokens ))
+    export RUN_TOKENS_TOTAL
+    # Structured run-ledger enrichments: did project state change, and did this
+    # iteration's build/artifact verification pass? (booleans, emitted as JSON.)
+    local changed_json=false verify_json="${verify_ok:-true}"
+    [[ "$project_hash_before" != "$project_hash_after" ]] && changed_json=true
     metrics_payload=""
     if command_exists jq; then
         metrics_payload=$(jq -nc \
@@ -1240,16 +1278,19 @@ execute_iteration() {
             --arg model "${_RALPH_ACTIVE_MODEL:-$SELECTED_MODEL}" \
             --argjson latency "${iteration_latency:-0}" \
             --argjson tokens "${est_tokens:-0}" \
+            --argjson tokens_total "${RUN_TOKENS_TOTAL:-0}" \
             --argjson lazy_streak "${LAZY_STREAK:-0}" \
+            --argjson changed "$changed_json" \
+            --argjson verify_ok "$verify_json" \
             --arg project_hash "$project_hash_after" \
-            '{timestamp:$timestamp, run_id:$run_id, iteration:$iteration, tool:$tool, model:$model, latency:$latency, tokens:$tokens, lazy_streak:$lazy_streak, project_hash:$project_hash}' 2>/dev/null)
+            '{timestamp:$timestamp, run_id:$run_id, iteration:$iteration, tool:$tool, model:$model, latency:$latency, tokens:$tokens, tokens_total:$tokens_total, lazy_streak:$lazy_streak, changed:$changed, verify_ok:$verify_ok, project_hash:$project_hash}' 2>/dev/null)
     fi
     if [[ -n "$metrics_payload" ]]; then
         log_metrics "$metrics_payload"
     else
-        log_metrics "{\"timestamp\": \"$timestamp\", \"run_id\": \"${RUN_ID:-}\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": ${iteration_latency:-0}, \"tokens\": ${est_tokens:-0}, \"lazy_streak\": ${LAZY_STREAK:-0}, \"project_hash\": \"$project_hash_after\"}"
+        log_metrics "{\"timestamp\": \"$timestamp\", \"run_id\": \"${RUN_ID:-}\", \"iteration\": $iteration, \"tool\": \"$TOOL\", \"model\": \"$SELECTED_MODEL\", \"latency\": ${iteration_latency:-0}, \"tokens\": ${est_tokens:-0}, \"tokens_total\": ${RUN_TOKENS_TOTAL:-0}, \"lazy_streak\": ${LAZY_STREAK:-0}, \"changed\": ${changed_json}, \"verify_ok\": ${verify_json}, \"project_hash\": \"$project_hash_after\"}"
     fi
-    
+
     # Save checkpoint
     save_checkpoint "$iteration"
 
@@ -1262,7 +1303,7 @@ execute_iteration() {
 
     # Sync human-readable plan (Beads style)
     sync_plan_file
-    
+
     # Commit task state (Dolt Time-Travel)
     commit_task_state "Ralph Iteration $iteration: $est_tokens tokens"
 
@@ -1273,26 +1314,36 @@ execute_iteration() {
         "[prompt](${RUN_DIR:-.}/steps/iter-$iteration/prompt.txt) · [output](${RUN_DIR:-.}/steps/iter-$iteration/output.txt)" \
         "" \
         "changed=$_changed · lazy_streak=${LAZY_STREAK:-0} · tokens=$est_tokens" || true
-    
+
     # Check for completion signal
     if echo "$output" | grep -qF "<promise>COMPLETE</promise>"; then
-        if verify_beads_complete; then
+        if [[ "${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}" == "1" && "${verify_ok:-true}" != "true" ]]; then
+            # Blocking verification gate: a COMPLETE promise is REJECTED while the
+            # build/artifact checks are failing, so the loop cannot declare success
+            # over a broken tree. The failing details were queued in NEXT_INSTRUCTION
+            # above; reinforce that completion is blocked until they pass.
+            log_warning "Agent signaled completion, but verification is failing — completion REJECTED until it passes."
+            export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED because build/artifact verification is still failing. Fix the errors below, confirm they pass, and only then complete:
+${artifact_errors}${runtime_errors}"
+            record_signal completion_blocked "completion promise rejected while verification is failing" "verify-gate-block" "fix the failing build/artifact checks, then re-emit completion" "verify_gate" "high" >/dev/null 2>&1 || true
+        elif verify_beads_complete; then
             log_success "Agent signaled completion and all Beads tasks are closed"
-            
+
             # Store lesson learned (basic heuristic: extract summary or use project name)
             local project_name
             project_name=$(basename "$(pwd)")
             store_lesson "Project '$project_name' completed successfully with $iteration iterations."
-            
+
             return 0
         else
             log_warning "Agent signaled completion but incomplete tasks remain in Beads"
             local ready_tasks
             ready_tasks=$(_bd ready --pretty)
-            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:\n$ready_tasks"
+            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
+$ready_tasks"
         fi
     fi
-    
+
     return 1
 }
 
@@ -1345,7 +1396,7 @@ main() {
     fi
 
     parse_arguments "$@"
-    
+
     # Handle Smart Init
     if [[ "${INIT_MODE:-false}" == "true" ]]; then
         smart_init
@@ -1446,12 +1497,12 @@ main() {
         log_warning "No sandbox isolation: the agent runs with full host permissions."
         log_warning "For unattended use prefer './ralph.sh --unattended' (Docker-isolated)."
     fi
-    
+
     # Display startup information
     log_info "Starting Ralph AI Agent"
     log_info "OS: $OS_TYPE ($ARCH_TYPE)"
     log_info "Tool: $TOOL | Max Iterations: $MAX_ITERATIONS"
-    
+
     # Setup execution environment
     archive_previous_run
     track_current_branch
@@ -1459,22 +1510,26 @@ main() {
     init_signals
     init_skills
     init_task_engine
-    
+
     if [[ ! -f "$PROGRESS_FILE" ]]; then
         initialize_progress_file
     fi
-    
+
     # Determine model to use
     determine_model || {
         log_error "Failed to determine model"
         exit 1
     }
-    
+
     # Initialize state variables (fresh-run defaults)
     export LAZY_STREAK=0
     export SIGNAL_CLEAN_STREAK=0
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
+    # Aggregate run budget accounting (per invocation; a --resume run starts a
+    # fresh token/time budget). Consumed by the FinOps ceiling check below.
+    export RUN_TOKENS_TOTAL=0
+    RUN_START_TS=$(date +%s); export RUN_START_TS
     local CONSECUTIVE_FAILURES=0
     local DRAIN_STREAK=0
 
@@ -1500,25 +1555,25 @@ main() {
             log_warning "No valid checkpoint found, starting from beginning"
         fi
     fi
-    
+
     # Main iteration loop
     for i in $(seq "$start_iter" "$MAX_ITERATIONS"); do
-        
+
         # Interactive mode: pause for user input
         if [[ "${INTERACTIVE_MODE:-false}" == "true" ]]; then
             echo ""
             echo -e "${_RALPH_COLOR_YELLOW}>>> Interactive Mode: Paused <<<${_RALPH_COLOR_NC}"
             echo -e "Press ${_RALPH_COLOR_GREEN}[Enter]${_RALPH_COLOR_NC} to continue, or type an instruction for Ralph:"
-            
+
             local user_input
             read -r user_input
-            
+
             if [[ -n "$user_input" ]]; then
                 export NEXT_INSTRUCTION="<user_steering>$user_input</user_steering>"
                 log_info "User instruction queued for next iteration"
             fi
         fi
-        
+
         # Execute iteration. Return codes: 0=complete, 1=continue, 2=hard tool failure.
         local iter_rc=0
         execute_iteration "$i" || iter_rc=$?
@@ -1562,6 +1617,29 @@ main() {
             DRAIN_STREAK=0
         fi
 
+        # Hard stop: no-progress ceiling (stall). The reflexion nudge at
+        # LAZY_THRESHOLD gets first crack; this aborts a wholly-stuck run instead of
+        # burning every remaining iteration. Only after a normal iteration.
+        if [[ $iter_rc -eq 1 ]] && stall_limit_reached "${LAZY_STREAK:-0}" "${RALPH_MAX_LAZY_STREAK:-0}"; then
+            log_error "Stall ceiling reached: ${LAZY_STREAK} consecutive no-progress iterations (RALPH_MAX_LAZY_STREAK=${RALPH_MAX_LAZY_STREAK}). Aborting."
+            record_signal stall_abort "run aborted after ${LAZY_STREAK} no-progress iterations" "stall-ceiling" "break the task down or intervene; the agent stopped changing state" "stall_abort" "high" >/dev/null 2>&1 || true
+            send_notification "Ralph stopped" "Stalled: no progress for ${LAZY_STREAK} iterations" "critical"
+            review_run
+            exit 1
+        fi
+
+        # Hard stop: aggregate run budget (estimated tokens / wall-clock) — the
+        # FinOps ceiling so an unattended loop cannot rack up unbounded cost.
+        local _run_elapsed _budget_reason=""
+        _run_elapsed=$(( $(date +%s) - ${RUN_START_TS:-$(date +%s)} ))
+        if _budget_reason=$(run_budget_exceeded "${RUN_TOKENS_TOTAL:-0}" "${RALPH_MAX_RUN_TOKENS:-0}" "$_run_elapsed" "${RALPH_MAX_RUN_SECONDS:-0}"); then
+            log_error "Run budget exceeded: ${_budget_reason}. Aborting."
+            record_signal budget_abort "run aborted: ${_budget_reason}" "run-budget" "raise RALPH_MAX_RUN_TOKENS / RALPH_MAX_RUN_SECONDS, or split the work" "budget_abort" "high" >/dev/null 2>&1 || true
+            send_notification "Ralph stopped" "Run budget exceeded: ${_budget_reason}" "critical"
+            review_run
+            exit 1
+        fi
+
         # Single-iteration mode: let an external scheduler (cron/systemd) own cadence.
         if [[ "${RUN_ONCE:-false}" == "true" ]]; then
             log_info "Single-iteration mode (--once): stopping. Use --resume to continue."
@@ -1575,7 +1653,7 @@ main() {
             exit 0
         fi
     done
-    
+
     # Max iterations reached
     echo ""
     log_warning "╔════════════════════════════════════════════╗"
@@ -1599,21 +1677,21 @@ validate_artifacts() {
     local instructions=""
     local errors=0
     local warnings=0
-    
+
     log_debug "Validating Ralph artifacts..."
-    
+
     # Validate PRD (Product Requirements Document)
     if ! validate_prd; then
         ((errors++))
         instructions+=$'\n'"<priority_interrupt>CRITICAL: PRD validation failed. See errors above and fix immediately before proceeding.</priority_interrupt>"
     fi
-    
+
     # Validate Architecture Diagram
     if ! validate_architecture_diagram "warn"; then
         ((warnings++))
         instructions+=$'\n'"<priority_interrupt>WARNING: Architecture diagram validation failed. Consider updating '${DIAGRAM_FILE:-ralph_architecture.md}' with valid Mermaid syntax.</priority_interrupt>"
     fi
-    
+
     # Validate Execution Plan
     if ! validate_execution_plan "warn"; then
         ((warnings++))
@@ -1630,14 +1708,14 @@ validate_artifacts() {
     else
         declare -F _signal_auto_resolve_family >/dev/null && _signal_auto_resolve_family arch_drift >/dev/null 2>&1 || true
     fi
-    
+
     # Log summary
     if [[ $errors -gt 0 ]] || [[ $warnings -gt 0 ]]; then
         log_warning "Artifact validation completed: $errors error(s), $warnings warning(s)"
     else
         log_debug "All artifacts validated successfully"
     fi
-    
+
     echo "$instructions"
 }
 
@@ -1647,59 +1725,59 @@ validate_artifacts() {
 #######################################
 validate_prd() {
     local prd_file="${PRD_FILE:-prd.json}"
-    
+
     if [[ ! -f "$prd_file" ]]; then
         log_debug "PRD file not found: $prd_file (will be created)"
         return 0
     fi
-    
+
     # Check if jq is available
     if ! command_exists jq; then
         log_warning "jq not installed, cannot validate PRD JSON structure"
         return 0  # Don't fail if jq is missing
     fi
-    
+
     # Validate JSON syntax
     if ! jq empty "$prd_file" >/dev/null 2>&1; then
         log_error "PRD contains invalid JSON: $prd_file"
-        
+
         # Try to show the error
         local json_error
         json_error=$(jq empty "$prd_file" 2>&1)
         log_debug "JSON error: $json_error"
-        
+
         return 1
     fi
-    
+
     # Validate expected structure
     local has_required_fields=true
     local missing_fields=()
-    
+
     # Check for key fields (adjust based on your PRD schema)
     local required_fields=("projectName" "goals")
-    
+
     for field in "${required_fields[@]}"; do
         if ! jq -e ".$field" "$prd_file" >/dev/null 2>&1; then
             missing_fields+=("$field")
             has_required_fields=false
         fi
     done
-    
+
     if ! $has_required_fields; then
         log_warning "PRD is missing recommended fields: ${missing_fields[*]}"
         log_info "Consider adding these fields for better context"
     fi
-    
+
     # Validate specific field types
     if jq -e '.branchName' "$prd_file" >/dev/null 2>&1; then
         local branch_name
         branch_name=$(jq -r '.branchName // empty' "$prd_file")
-        
+
         if [[ -n "$branch_name" ]]; then
             log_debug "PRD branch: $branch_name"
         fi
     fi
-    
+
     log_success "PRD validation passed: $prd_file"
     return 0
 }
@@ -1713,12 +1791,12 @@ validate_prd() {
 validate_architecture_diagram() {
     local severity="${1:-warn}"
     local diagram_file="${DIAGRAM_FILE:-ralph_architecture.md}"
-    
+
     if [[ ! -f "$diagram_file" ]]; then
         log_debug "Architecture diagram not found: $diagram_file (will be created)"
         return 0
     fi
-    
+
     # Check file is not empty
     if [[ ! -s "$diagram_file" ]]; then
         if [[ "$severity" == "error" ]]; then
@@ -1728,7 +1806,7 @@ validate_architecture_diagram() {
         fi
         return 1
     fi
-    
+
     # Valid Mermaid diagram types
     local mermaid_keywords=(
         "graph"
@@ -1745,14 +1823,14 @@ validate_architecture_diagram() {
         "timeline"
         "quadrantChart"
     )
-    
+
     # Check for Mermaid code blocks
     local has_mermaid_block=false
     if grep -qE '```mermaid|~~~mermaid' "$diagram_file"; then
         has_mermaid_block=true
         log_debug "Found Mermaid code block in diagram"
     fi
-    
+
     # Check for Mermaid diagram keywords
     local has_mermaid_syntax=false
     for keyword in "${mermaid_keywords[@]}"; do
@@ -1762,7 +1840,7 @@ validate_architecture_diagram() {
             break
         fi
     done
-    
+
     if ! $has_mermaid_syntax; then
         if [[ "$severity" == "error" ]]; then
             log_error "Architecture diagram missing valid Mermaid syntax: $diagram_file"
@@ -1772,12 +1850,12 @@ validate_architecture_diagram() {
         log_info "Expected keywords: ${mermaid_keywords[*]}"
         return 1
     fi
-    
+
     if ! $has_mermaid_block; then
         log_warning "Architecture diagram missing Mermaid code block markers (\`\`\`mermaid)"
         log_info "Consider wrapping diagram in proper markdown code blocks"
     fi
-    
+
     log_success "Architecture diagram validation passed: $diagram_file"
     return 0
 }
@@ -1791,12 +1869,12 @@ validate_architecture_diagram() {
 validate_execution_plan() {
     local severity="${1:-warn}"
     local plan_file="${PLAN_FILE:-ralph_plan.md}"
-    
+
     if [[ ! -f "$plan_file" ]]; then
         log_debug "Execution plan not found: $plan_file (will be created)"
         return 0
     fi
-    
+
     # Check file is not empty
     if [[ ! -s "$plan_file" ]]; then
         if [[ "$severity" == "error" ]]; then
@@ -1806,20 +1884,20 @@ validate_execution_plan() {
         fi
         return 1
     fi
-    
+
     # Count checkbox items (Single pass optimization)
     local total_checkboxes=0 unchecked_boxes=0 checked_boxes=0
-    
+
     # Use awk to count in one pass
-    eval "$(awk '/^\s*[-*+]\s+\[[ x]\]/ { 
-        total++; 
-        if ($0 ~ /\[x\]/) checked++; 
-        else unchecked++; 
-    } 
-    END { 
-        print "total_checkboxes=" total+0 "; checked_boxes=" checked+0 "; unchecked_boxes=" unchecked+0 
+    eval "$(awk '/^\s*[-*+]\s+\[[ x]\]/ {
+        total++;
+        if ($0 ~ /\[x\]/) checked++;
+        else unchecked++;
+    }
+    END {
+        print "total_checkboxes=" total+0 "; checked_boxes=" checked+0 "; unchecked_boxes=" unchecked+0
     }' "$plan_file")"
-    
+
     if [[ $total_checkboxes -eq 0 ]]; then
         if [[ "$severity" == "error" ]]; then
             log_error "Execution plan has no checkbox items: $plan_file"
@@ -1829,25 +1907,25 @@ validate_execution_plan() {
         log_info "Expected format: '- [ ] Task description' or '- [x] Completed task'"
         return 1
     fi
-    
+
     # Calculate completion percentage
     local completion_pct=0
     if [[ $total_checkboxes -gt 0 ]]; then
         completion_pct=$((checked_boxes * 100 / total_checkboxes))
     fi
-    
+
     log_debug "Execution plan: $total_checkboxes tasks ($checked_boxes completed, $unchecked_boxes pending) - ${completion_pct}% complete"
-    
+
     # Warn if no progress
     if [[ $checked_boxes -eq 0 ]] && [[ $total_checkboxes -gt 0 ]]; then
         log_info "Execution plan has $total_checkboxes tasks, none completed yet"
     fi
-    
+
     # Warn if everything is checked (might need new tasks)
     if [[ $checked_boxes -eq $total_checkboxes ]] && [[ $total_checkboxes -gt 0 ]]; then
         log_info "All tasks completed! Consider updating plan with new objectives."
     fi
-    
+
     log_success "Execution plan validation passed: $plan_file (${completion_pct}% complete)"
     return 0
 }
@@ -1861,9 +1939,9 @@ validate_execution_plan() {
 verify_runtime() {
     local errors=""
     local project_dir="${PROJECT_DIR:-.}"
-    
+
     log_debug "Starting runtime verification..."
-    
+
     # 1. Identify and verify Rust services
     if [[ -f "$project_dir/Cargo.toml" ]]; then
         log_info "Verifying Rust project..."
@@ -1871,7 +1949,7 @@ verify_runtime() {
             errors+=$'\n'"- Rust build check failed ('cargo check')."
         fi
     fi
-    
+
     # 2. Identify and verify Node.js services
     if [[ -f "$project_dir/package.json" ]]; then
         log_info "Verifying Node.js project..."
@@ -1908,7 +1986,7 @@ verify_runtime() {
             errors+=$'\n'"- Go validation failed ('go vet')."
         fi
     fi
-    
+
     # 5. Liveness Probe (Port scanning & Health checks)
     # Checks common dev ports
     local ports=()
@@ -1918,7 +1996,7 @@ verify_runtime() {
         if command_exists ss; then
             if ss -tuln | grep -q ":$port "; then
                 log_success "Service detected on port $port"
-                
+
                 # Dynamic Health Check
                 if command_exists curl; then
                     # Try common health endpoints across all identified ports
@@ -1928,7 +2006,7 @@ verify_runtime() {
                         code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
                         if [[ "$code" == "200" ]]; then
                             log_success "Health check passed: $url"
-                            
+
                             # Trigger Benchmarking if port is 8080 (Primary API)
                             if [[ "$port" == "8080" ]]; then
                                 local bench_result
@@ -1952,7 +2030,7 @@ verify_runtime() {
             fi
         fi
     done
-    
+
     if [[ -n "$errors" ]]; then
         echo "<runtime_error>$errors</runtime_error>"
     fi
@@ -1965,13 +2043,13 @@ verify_runtime() {
 verify_architecture() {
     local diagram_file="${DIAGRAM_FILE:-ralph_architecture.md}"
     if [[ ! -f "$diagram_file" ]]; then return 0; fi
-    
+
     log_debug "Performing architectural verification..."
-    
+
     # Extract potential filenames from Mermaid nodes (e.g., [main.rs] or {app.tsx})
     local nodes
     nodes=$(grep -oE '[a-zA-Z0-9_/-]+\.(rs|ts|tsx|py|go|js|json|sql|md)' "$diagram_file" | sort -u)
-    
+
     local missing=()
     for node in $nodes; do
         if [[ ! -f "$node" ]]; then
@@ -1981,7 +2059,7 @@ verify_architecture() {
             fi
         fi
     done
-    
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "<architecture_drift>Warning: The following components in your diagram do not exist on disk: ${missing[*]}. Please align your diagram with reality.</architecture_drift>"
     fi
@@ -2002,7 +2080,7 @@ init_memory() {
     if [[ ! -d "$MEMORY_DIR" ]]; then
         mkdir -p "$MEMORY_DIR"
     fi
-    
+
     if [[ ! -f "$GLOBAL_MEMORY_FILE" ]]; then
         echo "{\"lessons\": []}" > "$GLOBAL_MEMORY_FILE"
     fi
@@ -2016,13 +2094,13 @@ recall_lessons() {
     if [[ ! -f "$GLOBAL_MEMORY_FILE" ]] || ! command_exists jq; then
         return 0
     fi
-    
+
     # Get last 5 lessons
     local lessons
     # Last 5 lessons. (Was `last(5)`, which in jq returns the scalar 5 — not "last 5
     # elements" — so this errored and recalled NOTHING. `.lessons[-5:]` is the slice.)
     lessons=$(jq -r '(.lessons // [])[-5:] | .[] | "- " + .' "$GLOBAL_MEMORY_FILE" 2>/dev/null)
-    
+
     if [[ -n "$lessons" ]]; then
         echo -e "\n<genetic_memory>\nHistorical lessons from previous projects:\n$lessons\n</genetic_memory>"
     fi
@@ -2114,7 +2192,7 @@ init_task_engine() {
     local beads_dir="${_RALPH_DIR:-.ralph}/beads"
     if [[ ! -d "$beads_dir" ]]; then
         mkdir -p "$beads_dir"
-        
+
         # Determine backend: prefer Dolt if available
         local backend="sqlite"
         if [[ -n "$DOLT_BIN" ]]; then
@@ -2137,7 +2215,7 @@ init_task_engine() {
 #######################################
 commit_task_state() {
     local msg="${1:-Agent iteration sync}"
-    
+
     # Check if we are using Dolt backend
     if _bd info 2>/dev/null | grep -q "Backend: dolt"; then
         log_debug "Committing task state to Dolt..."
@@ -2158,21 +2236,21 @@ hi_create_task() {
     local desc="$2"
     local deps="${3:-}"
     local assignee="${4:-}"
-    
+
     local cmd=(_bd create "$title" -d "$desc" --silent)
-    
+
     # Handle dependencies (ensure they are comma-separated for bd)
     if [[ -n "$deps" ]]; then
         cmd+=(--deps "$deps")
     fi
-    
+
     if [[ -n "$assignee" && "$assignee" != "null" ]]; then
         cmd+=(--assignee "$assignee")
     fi
-    
+
     local task_id
     task_id=$("${cmd[@]}")
-    
+
     emit_event "task_created" "{\"id\": \"$task_id\", \"title\": \"$title\"}"
     echo "$task_id"
 }
@@ -2206,14 +2284,14 @@ verify_beads_complete() {
     if [[ ! -d "$beads_dir" ]]; then
         return 0
     fi
-    
+
     local open_count in_progress_count blocked_count
     open_count=$(_bd count --status open --quiet)
     in_progress_count=$(_bd count --status in_progress --quiet)
     blocked_count=$(_bd count --status blocked --quiet)
-    
+
     local total_incomplete=$((open_count + in_progress_count + blocked_count))
-    
+
     if [[ $total_incomplete -eq 0 ]]; then
         return 0
     else
@@ -2227,18 +2305,18 @@ verify_beads_complete() {
 #######################################
 sync_plan_file() {
     local plan_file="${PLAN_FILE:-ralph_plan.md}"
-    
+
     {
         echo "# Ralph High-Integrity Execution Plan"
         echo "Generated: $(date)"
         echo ""
         echo "## Ready Tasks (Unblocked)"
         _bd ready --pretty
-        
+
         echo ""
         echo "## All Open Tasks"
         _bd list --status open --pretty
-        
+
         echo ""
         echo "## Recently Closed"
         _bd list --status closed --limit 5 --pretty
@@ -2364,4 +2442,3 @@ backlog_drained() {
 
     [[ "$closed" -gt 0 && $(( open + inprog + blocked )) -eq 0 ]]
 }
-

@@ -586,6 +586,13 @@ load_config() {
     # Set defaults
     TOOL="${TOOL:-opencode}"
     MAX_ITERATIONS="${MAX_ITERATIONS:-10}"
+    # Reliability ceilings — hard stops so an autonomous/unattended loop cannot run
+    # away (stall forever, or rack up unbounded cost). 0 disables that ceiling.
+    RALPH_MAX_LAZY_STREAK="${RALPH_MAX_LAZY_STREAK:-5}"        # abort after N consecutive no-progress iterations (keep > LAZY_THRESHOLD so the reflexion nudge fires first)
+    RALPH_MAX_RUN_TOKENS="${RALPH_MAX_RUN_TOKENS:-0}"          # abort once aggregate estimated prompt tokens reach this
+    RALPH_MAX_RUN_SECONDS="${RALPH_MAX_RUN_SECONDS:-0}"        # abort once total run wall-clock reaches this
+    RALPH_REQUIRE_VERIFY_ON_COMPLETE="${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}"  # reject a COMPLETE promise while build/artifact verification is failing
+    export RALPH_MAX_LAZY_STREAK RALPH_MAX_RUN_TOKENS RALPH_MAX_RUN_SECONDS RALPH_REQUIRE_VERIFY_ON_COMPLETE
     SANDBOX_MODE="${SANDBOX_MODE:-false}"
     VERBOSE="${VERBOSE:-false}"
     PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
