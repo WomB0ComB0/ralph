@@ -12,6 +12,7 @@ credentials.json
 service-account*.json
 
 # --- Ralph runtime state & artifacts ---
+.claude/
 .ralph/
 ralph.log
 metrics.json
@@ -26,6 +27,9 @@ Dockerfile.ralph
 db.sqlite
 *.sqlite
 *.sqlite3
+
+benchmark_report.md
+benchmark_report-*.md
 
 # --- Dependency / build noise ---
 node_modules/
