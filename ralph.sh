@@ -35,6 +35,9 @@ source "$SCRIPT_DIR/lib/lint.sh"
 # shellcheck source=lib/triage.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/triage.sh"
+# shellcheck source=lib/synapse.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/synapse.sh"
 
 # NOTE: dependency checking is deferred to main() — it runs only on the iterating path
 # (after --tool/config are parsed) so `--help`, `--version`, `--test`, and the read-only

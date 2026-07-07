@@ -1394,6 +1394,17 @@ main() {
         handle_triage_command "$@"
         exit $?
     fi
+    # Synapse (agent-backplane) client + per-agent live-test CLIs. Defined in lib/synapse.sh.
+    if [[ "${1:-}" == "agents" ]]; then
+        shift
+        handle_agents_command "$@"
+        exit $?
+    fi
+    if [[ "${1:-}" == "synapse" ]]; then
+        shift
+        handle_synapse_command "$@"
+        exit $?
+    fi
 
     parse_arguments "$@"
 

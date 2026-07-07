@@ -41,6 +41,7 @@ run fallback "$DIR/test_fallback.sh"
 run triage   "$DIR/test_triage.sh"
 run memory   "$DIR/test_memory.sh"
 run guards   "$DIR/test_loop_guards.sh"
+run agents   "$DIR/test_agents.sh"
 run native   "$DIR/run_internal_tests.sh"
 
 echo
