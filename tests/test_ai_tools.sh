@@ -140,6 +140,21 @@ tb=$(_timeout_bin)
 [[ "$tb" == "timeout" || "$tb" == "gtimeout" || -z "$tb" ]] && ok "_timeout_bin returns a valid value ([$tb])" || bad "unexpected _timeout_bin: $tb"
 { [[ -z "$tb" ]] || command -v "$tb" >/dev/null; } && ok "_timeout_bin names an installed binary (or none)" || bad "_timeout_bin named a missing binary: $tb"
 
+
+echo "== run_ai_tool watchdog: internal timeout kills a hung CLI even without coreutils timeout =="
+wdir=$(mktemp -d); stub="$wdir/bin"; mkdir -p "$stub"
+printf '#!/bin/bash\n(sleep 30) & wait\n' > "$stub/opencode"; chmod +x "$stub/opencode"
+lf="$wdir/log"; of="$wdir/out"; : > "$lf"; : > "$of"
+PATH="$stub:$PATH" RALPH_TOOL_TIMEOUT=1 PROJECT_DIR="$wdir" iteration=1 MAX_ITERATIONS=1
+_timeout_bin() { echo ""; }
+start_watchdog=$SECONDS
+run_ai_tool opencode "" "prompt" "$lf" "$of"; watchdog_rc=$?
+watchdog_elapsed=$((SECONDS - start_watchdog))
+eq "hung tool returns timeout rc" 124 "$watchdog_rc"
+[[ "$watchdog_elapsed" -lt 8 ]] && ok "watchdog returned promptly (${watchdog_elapsed}s)" || bad "watchdog took too long (${watchdog_elapsed}s)"
+grep -q "exceeded RALPH_TOOL_TIMEOUT=1s" "$lf" && ok "timeout warning logged" || bad "timeout warning missing"
+rm -rf "$wdir"
+
 echo "== per-tool env is subshell-scoped (must NOT leak to the parent) =="
 unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"

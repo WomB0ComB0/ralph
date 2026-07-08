@@ -762,6 +762,17 @@ _timeout_bin() {
     else echo ""; fi
 }
 
+_kill_process_tree() {
+    local sig="$1" pid="$2" child
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    if command_exists pgrep; then
+        while IFS= read -r child; do
+            [[ -n "$child" ]] && _kill_process_tree "$sig" "$child"
+        done < <(pgrep -P "$pid" 2>/dev/null || true)
+    fi
+    kill "-$sig" "$pid" 2>/dev/null || true
+}
+
 _build_ai_cmd() {
     local tool="$1" model="$2" resume="${3:-0}"
     _AI_CMD=(); _AI_STDIN=0
@@ -905,7 +916,7 @@ run_ai_tool() {
         if [[ -n "$_to" ]]; then
             tmo=("$_to" --kill-after=15 "$_dur")
         elif [[ -z "${_RALPH_TIMEOUT_WARNED:-}" ]]; then
-            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but neither 'timeout' nor 'gtimeout' is installed; AI tool calls have no wall-clock backstop (install coreutils)"
+            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but neither 'timeout' nor 'gtimeout' is installed; using Ralph internal watchdog only"
             _RALPH_TIMEOUT_WARNED=1
         fi
     fi
@@ -927,11 +938,22 @@ run_ai_tool() {
     pid=$!
 
     # Animated spinner while tool runs
-    local i=0
+    local i=0 timed_out=0 started_at=$SECONDS
     start_progress_timer
     update_status "Thinking" "$(basename "${PROJECT_DIR:-.}")"
 
     while kill -0 $pid 2>/dev/null; do
+        if [[ "$_dur" -gt 0 && $((SECONDS - started_at)) -ge "$_dur" ]]; then
+            timed_out=1
+            log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process tree"
+            printf 'AI tool exceeded RALPH_TOOL_TIMEOUT=%ss; terminating process tree\n' "$_dur" >>"$log_file"
+            _kill_process_tree TERM "$pid"
+            sleep 1
+            if kill -0 "$pid" 2>/dev/null; then
+                _kill_process_tree KILL "$pid"
+            fi
+            break
+        fi
         render_status_bar "$iteration" "$MAX_ITERATIONS" "$i"
         i=$(( (i+1) % 10 ))
         sleep 0.1
@@ -940,6 +962,7 @@ run_ai_tool() {
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
+    [[ "$timed_out" -eq 1 ]] && exit_code=124
 
     # Clear line and show final success/fail
     printf "\r\033[K"
