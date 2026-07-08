@@ -603,6 +603,7 @@ EOF
 #   $7  - Recent changes
 #   $8  - Resource context
 #   $9  - User provided context
+#   $10 - Quality rubric context
 # Returns: Complete system prompt
 #######################################
 generate_system_prompt() {
@@ -616,7 +617,8 @@ generate_system_prompt() {
     local recent_changes="$7"
     local resource_context="$8"
     local user_provided_context="$9"
-    local project_instructions="${10:-}"
+    local quality_context="${10:-No quality rubric loaded.}"
+    local project_instructions="${11:-}"
 
     local role_instructions
     role_instructions=$(get_role_instructions "${RALPH_ROLE:-engineer}")
@@ -634,25 +636,27 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 1. **Reflect:** Analyze the <recent_changes> and <global_context>. If the previous iteration failed or made no progress, identify the root cause.
 2. **Plan:** Identify the next unblocked task from Beads (\`bd ready\`).
 3. **Reason:** Determine the most efficient tool-path to complete the task.
-4. **Anticipate:** Identify potential side effects or breaking changes to the architecture.
+4. **Judge:** Compare the current output against QUALITY.md and decide whether to improve, defer, or stop.
+5. **Anticipate:** Identify potential side effects or breaking changes to the architecture.
 </cognitive_process>
 
 <capabilities>
 1. **Full-Stack Engineering:** Expert in modern software delivery and best practices.
 2. **Architectural Visualization:** Use Mermaid syntax in '${DIAGRAM_FILE:-ralph_architecture.md}' to model system state, data flow, and dependencies.
 3. **Requirement Engineering:** Maintain '${PRD_FILE:-prd.json}' (JSON) to define goals, user stories, and success metrics.
-4. **Time-Travel Task Memory (Beads + Dolt):** Use 'bd' CLI for reliable, dependency-aware task tracking with full version history.
+4. **Quality Judging:** Maintain '${QUALITY_FILE:-QUALITY.md}' as the reviewer/stopper rubric. Use it to decide whether another iteration is valuable or whether the work is professionally complete within scope.
+5. **Time-Travel Task Memory (Beads + Dolt):** Use 'bd' CLI for reliable, dependency-aware task tracking with full version history.
    - Create task: \`bd create "Title" -d "Description" [--deps "id1,id2"]\`
    - List ready tasks: \`bd ready\`
    - **Time-Travel:** You can view previous task states if needed using \`bd vc log\`.
-5. **Intelligent Model Routing:** Your requests are automatically routed to specialized models based on your current role:
+6. **Intelligent Model Routing:** Your requests are automatically routed to specialized models based on your current role:
    - **Planner/Thinker:** Routed to high-reasoning models (Gemini 2.0 Pro/Thinking).
    - **Engineer/Tester:** Routed to high-speed implementation models (Gemini 2.0 Flash).
-6. **Self-Healing Tooling:** If a required test runner or dependency (e.g., pytest, npm, cargo) is missing, you can attempt to autonomously install it using \`ralph setup\`.
-7. **Swarm Orchestration:** You can act as a Team Leader or Specialist.
+7. **Self-Healing Tooling:** If a required test runner or dependency (e.g., pytest, npm, cargo) is missing, you can attempt to autonomously install it using \`ralph setup\`.
+8. **Swarm Orchestration:** You can act as a Team Leader or Specialist.
    - Spawn sub-agents: \`ralph swarm spawn --role "RoleName" --task "Task description"\`
    - Send messages: \`ralph swarm msg --to <agent_id> --content "Message"\`
-8. **Long-Term Memory:** To persist a durable, cross-project lesson (an engineering pattern, architectural decision, or "lesson learned"), emit a line \`<memory>the lesson in one sentence</memory>\` in your response. Ralph captures these into long-term memory (surfaced as \`<genetic_memory>\` in future runs). Use sparingly — only genuinely reusable lessons, not per-task notes.
+9. **Long-Term Memory:** To persist a durable, cross-project lesson (an engineering pattern, architectural decision, or "lesson learned"), emit a line \`<memory>the lesson in one sentence</memory>\` in your response. Ralph captures these into long-term memory (surfaced as \`<genetic_memory>\` in future runs). Use sparingly — only genuinely reusable lessons, not per-task notes.
 </capabilities>
 
 <workflow>
@@ -660,7 +664,8 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 2. **Align:** Ensure code changes align with Architecture ('$DIAGRAM_FILE') and Requirements ('$PRD_FILE').
 3. **Execute:** Perform the next unblocked task from 'bd ready'. Close it with 'bd close' when done.
 4. **Verify:** Write and run tests for every implementation. Never assume code works.
-5. **Sync:** Reflect changes back into documentation files in '$ARTIFACT_DIR' as the system evolves.
+5. **Judge:** Update '$QUALITY_FILE' with the current review, blocking issues, in-scope improvements, deferred follow-ups, and \`Quality Gate: continue|pass\`.
+6. **Sync:** Reflect changes back into documentation files in '$ARTIFACT_DIR' as the system evolves.
 </workflow>
 
 <constraints>
@@ -668,7 +673,9 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 - **Verification Mandatory:** Do not close a Beads task until you have executed a test that passes.
 - **Valid Artifacts:** Ensure '$PRD_FILE' is valid JSON and '$DIAGRAM_FILE' is valid Mermaid.
 - **No Loops:** If you are stuck in a cycle (repeatedly failing), STOP and ask for user intervention or try a radically different approach.
-- **Termination:** Output <promise>COMPLETE</promise> only when ALL Beads tasks are CLOSED and docs are synced.
+- **Quality Gate:** Keep \`Quality Gate: continue\` in '$QUALITY_FILE' while there are blocking issues or high-value in-scope improvements. Set \`Quality Gate: pass\` only when the stop policy in QUALITY.md is satisfied.
+- **Scope Control:** Do not chase infinite polish. If an improvement is speculative, enterprise-only, or outside the requested tier, document it as follow-up instead of extending the task.
+- **Termination:** Output <promise>COMPLETE</promise> only when ALL Beads tasks are CLOSED, docs are synced, verification passes, and '$QUALITY_FILE' says \`Quality Gate: pass\`.
 </constraints>
 
 <high_integrity_checklist>
@@ -676,6 +683,7 @@ Before finalizing your response, verify:
 - [ ] Have I updated the Mermaid diagram to reflect architectural changes?
 - [ ] Have I closed the relevant Beads task if the work is verified?
 - [ ] Have I created follow-up tasks in Beads for discovered work?
+- [ ] Have I updated QUALITY.md with a concrete reviewer judgment and stop decision?
 - [ ] Is the code idiomatic and properly tested?
 </high_integrity_checklist>
 
@@ -691,6 +699,10 @@ $prd_context
 <architecture_diagrams>
 $diagram_context
 </architecture_diagrams>
+
+<quality_rubric>
+$quality_context
+</quality_rubric>
 
 <execution_plan>
 $plan_context
@@ -715,7 +727,8 @@ $reflection_instruction
 1. Use the <cognitive_process> to analyze the current state.
 2. Execute the next task from Beads.
 3. Update artifacts and verify with tests.
-4. Review the <high_integrity_checklist>.
+4. Update QUALITY.md with the current judgment: blockers, in-scope improvements, follow-ups, and Quality Gate status.
+5. Review the <high_integrity_checklist>.
 </instructions>
 </system_prompt>
 EOF
@@ -1017,6 +1030,71 @@ run_ai_with_fallback() {
     return "${rc:-1}"
 }
 
+
+#######################################
+# Durable quality rubric / stopping policy
+#######################################
+default_quality_rubric() {
+    cat <<EOF
+# Ralph Quality Rubric
+
+Purpose: make the agent judge and improve its own work without expanding beyond the original product scope.
+
+Requested Tier: ${RALPH_QUALITY_TIER:-professional}
+Product Scope: the current user request, PRD, Beads tasks, and project instructions. Do not add enterprise features unless the user explicitly requested that tier.
+Quality Gate: continue
+Stop Reason: initial rubric created; no review has passed yet.
+
+## Rubric
+| Dimension | Pass Standard |
+| --- | --- |
+| Correctness | The requested behavior works end-to-end and edge cases introduced by the change are handled. |
+| Verification | Relevant tests, builds, linters, or live smoke checks were run and pass. |
+| Maintainability | The implementation follows local patterns, has clear boundaries, and avoids unnecessary abstraction. |
+| UX / Operator Experience | User-facing flows are understandable, responsive, and expose useful states/errors. |
+| Security / Privacy | Secrets, proprietary data, auth, tenancy, and unsafe side effects are handled deliberately. |
+| Performance / Reliability | The solution is bounded, has clear failure behavior, and avoids avoidable resource waste. |
+| Docs / Handoff | Run, test, and operational notes are current enough for the next session. |
+| Scope Control | Remaining ideas are classified as in-scope blockers, follow-up issues, or out-of-scope polish. |
+
+## Iteration Review
+- Last reviewed iteration: 0
+- Blocking issues: unknown
+- High-value in-scope improvements: unknown
+- Deferred or out-of-scope follow-ups: unknown
+
+## Stop Policy
+Set \`Quality Gate: pass\` only when all of these are true:
+- The original goal and all tracked Beads work are complete.
+- Verification passed for the changed behavior.
+- No blocking or high-severity reviewer findings remain.
+- Remaining improvements are documented follow-ups or out of scope.
+- Another iteration is unlikely to add meaningful in-scope value without increasing complexity or scope.
+EOF
+}
+
+ensure_quality_file() {
+    local file="${QUALITY_FILE:-${ARTIFACT_DIR:-.ralph/artifacts}/QUALITY.md}"
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    [[ -f "$file" ]] && return 0
+    default_quality_rubric > "$file"
+}
+
+load_quality_context() {
+    ensure_quality_file 2>/dev/null || true
+    if [[ -f "${QUALITY_FILE:-}" ]]; then
+        cat "$QUALITY_FILE"
+    else
+        echo "No QUALITY.md found. Create one with a rubric and Quality Gate status before completing."
+    fi
+}
+
+quality_gate_allows_complete() {
+    [[ "${RALPH_REQUIRE_QUALITY_ON_COMPLETE:-1}" == "1" ]] || return 0
+    [[ -f "${QUALITY_FILE:-}" ]] || return 1
+    grep -Eiq '^[[:space:]]*Quality Gate:[[:space:]]*pass([[:space:]]|$)' "$QUALITY_FILE"
+}
+
 #######################################
 # Load context with active windowing
 # Limits context size while preserving important information
@@ -1184,6 +1262,10 @@ execute_iteration() {
         fi
     fi
 
+    # Create the quality rubric before hashing so the framework artifact itself is
+    # not mistaken for agent progress in this iteration.
+    ensure_quality_file || true
+
     # Capture project state before execution
     local project_hash_before
     project_hash_before=$(compute_project_hash)
@@ -1218,6 +1300,9 @@ execute_iteration() {
     else
         diagram_context="No architecture diagrams found. Create one for complex systems or multi-component features."
     fi
+
+    local quality_context
+    quality_context=$(load_quality_context)
 
     # Same resolved instructions file (already located above as $agents_path).
     if [[ -n "${agents_path:-}" && -f "$agents_path" ]]; then
@@ -1446,12 +1531,22 @@ execute_iteration() {
             # build/artifact checks are failing, so the loop cannot declare success
             # over a broken tree. The failing details were queued in NEXT_INSTRUCTION
             # above; reinforce that completion is blocked until they pass.
-            log_warning "Agent signaled completion, but verification is failing — completion REJECTED until it passes."
+            log_warning "Agent signaled completion, but verification is failing - completion REJECTED until it passes."
             export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED because build/artifact verification is still failing. Fix the errors below, confirm they pass, and only then complete:
 ${artifact_errors}${runtime_errors}"
             record_signal completion_blocked "completion promise rejected while verification is failing" "verify-gate-block" "fix the failing build/artifact checks, then re-emit completion" "verify_gate" "high" >/dev/null 2>&1 || true
-        elif verify_beads_complete; then
-            log_success "Agent signaled completion and all Beads tasks are closed"
+        elif ! verify_beads_complete; then
+            log_warning "Agent signaled completion but incomplete tasks remain in Beads"
+            local ready_tasks
+            ready_tasks=$(_bd ready --pretty)
+            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
+$ready_tasks"
+        elif ! quality_gate_allows_complete; then
+            log_warning "Agent signaled completion, but QUALITY.md does not mark Quality Gate: pass - completion REJECTED."
+            export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED by the quality gate. Update ${QUALITY_FILE:-QUALITY.md} with a reviewer judgment. Keep Quality Gate: continue if meaningful in-scope improvements or blockers remain; set Quality Gate: pass only if the stop policy is satisfied. Then re-run verification and complete."
+            record_signal quality_gate_blocked "completion promise rejected by quality gate" "quality-gate-not-pass" "update QUALITY.md with the reviewer judgment and either continue improving or mark Quality Gate: pass" "quality_gate" "medium" >/dev/null 2>&1 || true
+        else
+            log_success "Agent signaled completion, all Beads tasks are closed, and quality gate passed"
 
             # Store lesson learned (basic heuristic: extract summary or use project name)
             local project_name
@@ -1459,12 +1554,6 @@ ${artifact_errors}${runtime_errors}"
             store_lesson "Project '$project_name' completed successfully with $iteration iterations."
 
             return 0
-        else
-            log_warning "Agent signaled completion but incomplete tasks remain in Beads"
-            local ready_tasks
-            ready_tasks=$(_bd ready --pretty)
-            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
-$ready_tasks"
         fi
     fi
 

@@ -593,7 +593,9 @@ load_config() {
     RALPH_MAX_RUN_TOKENS="${RALPH_MAX_RUN_TOKENS:-0}"          # abort once aggregate estimated prompt tokens reach this
     RALPH_MAX_RUN_SECONDS="${RALPH_MAX_RUN_SECONDS:-0}"        # abort once total run wall-clock reaches this
     RALPH_REQUIRE_VERIFY_ON_COMPLETE="${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}"  # reject a COMPLETE promise while build/artifact verification is failing
-    export RALPH_MAX_LAZY_STREAK RALPH_MAX_RUN_TOKENS RALPH_MAX_RUN_SECONDS RALPH_REQUIRE_VERIFY_ON_COMPLETE
+    RALPH_REQUIRE_QUALITY_ON_COMPLETE="${RALPH_REQUIRE_QUALITY_ON_COMPLETE:-1}"  # reject COMPLETE until QUALITY.md marks the in-scope quality gate pass
+    RALPH_QUALITY_TIER="${RALPH_QUALITY_TIER:-professional}"      # prototype | professional | production-ready | enterprise-grade
+    export RALPH_MAX_LAZY_STREAK RALPH_MAX_RUN_TOKENS RALPH_MAX_RUN_SECONDS RALPH_REQUIRE_VERIFY_ON_COMPLETE RALPH_REQUIRE_QUALITY_ON_COMPLETE RALPH_QUALITY_TIER
     SANDBOX_MODE="${SANDBOX_MODE:-false}"
     VERBOSE="${VERBOSE:-false}"
     PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
@@ -620,6 +622,7 @@ load_config() {
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
+    QUALITY_FILE="${QUALITY_FILE:-$ARTIFACT_DIR/QUALITY.md}"
     # Optional EXPLICIT override of the agent-instructions file. Empty by default so
     # resolve_agents_file() can pick each tool's native convention (CLAUDE.md / AGENTS.md / …).
     AGENTS_FILE="${AGENTS_FILE:-}"
