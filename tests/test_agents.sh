@@ -6,6 +6,8 @@ export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
 # shellcheck disable=SC1090
+source "$R/lib/engine.sh"    # _build_ai_cmd / _apply_tool_env / _timeout_bin for the agent CLI probe
+# shellcheck disable=SC1090
 source "$R/lib/signals.sh"
 # shellcheck disable=SC1090
 source "$R/lib/synapse.sh"
@@ -40,6 +42,16 @@ curl() {
     return 0
 }
 sleep() { :; }   # make retry backoff instant
+
+# Stub the agent CLIs as shell functions so command_exists sees them AND the exec path calls the stub
+# (default echoes PONG). AGENT_PROBE_TIMEOUT=0 drops the `timeout` wrapper so a *function* stub is reachable.
+claude()   { echo "PONG"; }
+codex()    { echo "PONG"; }
+opencode() { echo "PONG"; }
+export AGENT_PROBE_TIMEOUT=0
+
+# Keep any recorded signals in a throwaway dir — never litter the repo's .ralph/ when run standalone.
+export SIGNAL_DIR="$(mktemp -d)/signals" SIGNAL_ARCHIVE_DIR="$SIGNAL_DIR/.archive" RUN_ID="test-agents-1"
 
 export SYNAPSE_URL="http://synapse.test:8080" SYNAPSE_TENANT="ralph-dev" SYNAPSE_RETRIES=2
 
@@ -91,6 +103,27 @@ else
     ok "SKIP signal assertion (jq unavailable)"
 fi
 rm -rf "$_td"
+
+echo "== agent_cli_probe (the CLI itself) =="
+st=$(agent_cli_probe claude installed); rc=$?
+eq "installed present -> rc 0" 0 "$rc"; eq "status installed" "installed" "$st"
+st=$(agent_cli_probe __nope_tool__ installed); rc=$?
+eq "missing CLI -> rc 20" 20 "$rc"; eq "status not-installed" "not-installed" "$st"
+_probe_status=$(mktemp)
+agent_cli_probe claude live > "$_probe_status"; rc=$?; st=$(cat "$_probe_status"); rm -f "$_probe_status"
+eq "live probe (stub echoes PONG) -> rc 0" 0 "$rc"; eq "live status ok" "ok" "$st"
+cmd_join=$(printf " %s " "${_AI_CMD[@]}")
+[[ "$cmd_join" == *" claude "* && "$cmd_join" == *" -p "* && "$cmd_join" == *" --dangerously-skip-permissions "* ]] && ok "claude live probe uses Ralph headless Claude command" || bad "claude live probe command mismatch: $cmd_join"
+st=$( claude() { echo ""; };  agent_cli_probe claude live ); eq "live empty output -> empty-output" "empty-output" "$st"
+st=$( claude() { return 3; }; agent_cli_probe claude live ); eq "live non-zero exit -> exit:3" "exit:3" "$st"
+
+echo "== agent_live_test (CLI then Synapse; CLI failure short-circuits) =="
+: > "$SYN_CALL_LOG"
+agent_live_test __nope_tool__ installed >/dev/null 2>&1; eq "missing CLI -> rc 1" 1 "$?"
+eq "CLI fail short-circuits (Synapse NOT called)" 0 "$(_calls)"
+out=$(agent_live_test claude live 2>&1); rc=$?
+eq "cli ok + synapse ok -> rc 0" 0 "$rc"
+[[ "$out" == *"[PASS] cli:claude"* && "$out" == *"[PASS] live-test claude OK"* ]] && ok "runs BOTH cli + synapse legs" || bad "missing a leg: $out"
 
 echo "== handle_agents_command test (multiple agents, space-split) =="
 ( export SYNAPSE_AGENTS="claude codex"

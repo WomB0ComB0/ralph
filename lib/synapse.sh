@@ -16,6 +16,11 @@
 #   SYNAPSE_RETRIES    default 2                    retries on retriable status (5xx / 429 / network)
 #   SYNAPSE_AGENTS     default "claude codex opencode"   agents `ralph agents test` probes
 #   SYNAPSE_ENABLED    default 0                    gate for the optional in-loop grounding hook
+#   AGENT_PROBE_LIVE   default 0                    1 = `ralph agents test` runs a REAL generation per
+#                                                   agent (proves the CLI is authed + model reachable;
+#                                                   costs tokens). Or pass `--live`. Default checks only
+#                                                   that the CLI binary is installed (free).
+#   AGENT_PROBE_TIMEOUT default 60   AGENT_PROBE_PROMPT (a one-word ping)   AGENT_PROBE_MODEL (cheap model)
 #
 # Auth model: default deployment is trusted-headers (no token) — safe ONLY behind a trusted hop.
 # The request-body tenant_id MUST equal X-Tenant-Id or Synapse returns 403.
@@ -169,6 +174,54 @@ synapse_live_test() {
     return 0
 }
 
+# --- agent CLI probe (the AGENT itself, not just its Synapse principal) -----------------------------
+# Probe the agent's own CLI. Reuses ralph's _build_ai_cmd/_apply_tool_env so the probe invokes the tool
+# EXACTLY as ralph's loop does. mode:
+#   installed  (default, free) — the binary is present on PATH
+#   live       (opt-in, costs tokens) — a tiny real generation; proves the CLI is authed + the model is
+#              reachable + it returns output, within AGENT_PROBE_TIMEOUT.
+# Echoes a short status token; returns 0 on pass, non-zero (20-25) with the reason otherwise.
+#   AGENT_PROBE_LIVE=1  make 'live' the default   AGENT_PROBE_TIMEOUT (60s)   AGENT_PROBE_PROMPT   AGENT_PROBE_MODEL
+agent_cli_probe() {
+    local tool="$1" mode="${2:-installed}"
+    if [[ "$tool" == "ollama" || "$tool" == "ollama-agent" ]]; then
+        command_exists curl && command_exists jq && command_exists python3 || { echo "not-installed"; return 20; }
+    else
+        command_exists "$tool" || { echo "not-installed"; return 20; }
+    fi
+    [[ "$mode" != "live" ]] && { echo "installed"; return 0; }
+    declare -F _build_ai_cmd >/dev/null 2>&1 || { echo "no-cmd-builder(engine.sh unsourced)"; return 25; }
+    _build_ai_cmd "$tool" "${AGENT_PROBE_MODEL:-}" 0 || { echo "not-a-ralph-tool"; return 21; }
+    local prompt="${AGENT_PROBE_PROMPT:-Reply with exactly one word: PONG}"
+    local dur="${AGENT_PROBE_TIMEOUT:-60}" to tmo=()
+    to=$(_timeout_bin 2>/dev/null || true); [[ -n "$to" && "$dur" -gt 0 ]] && tmo=("$to" --kill-after=10 "$dur")
+    local out rc
+    if [[ "${_AI_STDIN:-0}" == "1" ]]; then
+        out=$( _apply_tool_env "$tool" 2>/dev/null; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>/dev/null ); rc=$?
+    else
+        out=$( _apply_tool_env "$tool" 2>/dev/null; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>/dev/null ); rc=$?
+    fi
+    [[ $rc -eq 124 ]] && { echo "timeout(${dur}s)"; return 22; }
+    [[ $rc -ne 0 ]]  && { echo "exit:$rc"; return 23; }
+    [[ -n "${out//[[:space:]]/}" ]] || { echo "empty-output"; return 24; }
+    echo "ok"; return 0
+}
+
+# Full per-agent live test: the AGENT CLI itself, THEN the Synapse backplane for its principal.
+# A CLI failure short-circuits (records a signal, skips the Synapse leg). Args: [agent] [mode]
+agent_live_test() {
+    local agent="${1:-claude}" mode="${2:-installed}" st t0 t1 ms crc
+    t0=$(_syn_ms); st=$(agent_cli_probe "$agent" "$mode"); crc=$?; t1=$(_syn_ms); ms=$((t1 - t0))
+    if [[ $crc -eq 0 ]]; then
+        printf '  [PASS] cli:%-12s %-10s %sms\n' "$agent" "$st" "$ms"
+    else
+        printf '  [FAIL] cli:%-12s %-10s %sms\n' "$agent" "$st" "$ms"
+        _syn_lt_fail "$agent" "cli:${st}"
+        return 1
+    fi
+    synapse_live_test "$agent"
+}
+
 # --- subcommand handlers (dispatched from lib/engine.sh main()) -------------------------------------
 
 # ralph agents test [agent...] | list
@@ -176,23 +229,30 @@ handle_agents_command() {
     local sub="${1:-test}"; shift 2>/dev/null || true
     case "$sub" in
         test)
+            local mode="installed"
+            [[ "${AGENT_PROBE_LIVE:-0}" == "1" ]] && mode="live"
+            case "${1:-}" in
+                --live)               mode="live";      shift ;;
+                --cheap|--installed)  mode="installed"; shift ;;
+            esac
             local agents=("$@")
             [[ ${#agents[@]} -eq 0 ]] && IFS=$' ,\t\n' read -r -a agents <<<"${SYNAPSE_AGENTS:-claude codex opencode}"
             local fails=0 a
             for a in "${agents[@]}"; do
-                synapse_live_test "$a" || fails=$((fails + 1))
+                printf '=== %s (cli:%s + synapse) ===\n' "$a" "$mode"
+                agent_live_test "$a" "$mode" || fails=$((fails + 1))
                 echo
             done
             if [[ $fails -eq 0 ]]; then
-                log_success "all ${#agents[@]} agent live-test(s) passed"; return 0
+                log_success "all ${#agents[@]} agent live-test(s) passed [$mode]"; return 0
             fi
-            log_error "${fails}/${#agents[@]} agent live-test(s) FAILED"; return 1
+            log_error "${fails}/${#agents[@]} agent live-test(s) FAILED [$mode]"; return 1
             ;;
         list)
             local agents; IFS=$' ,\t\n' read -r -a agents <<<"${SYNAPSE_AGENTS:-claude codex opencode}"
             printf '%s\n' "${agents[@]}"
             ;;
-        *) echo "Usage: ralph agents {test [agent...] | list}"; return 1 ;;
+        *) echo "Usage: ralph agents {test [--live|--cheap] [agent...] | list}"; return 1 ;;
     esac
 }
 

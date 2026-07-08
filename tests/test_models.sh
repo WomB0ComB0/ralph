@@ -45,6 +45,15 @@ got=$(PATH="$STUB:$PATH" resolve_model_for_tool agy planner)
 [[ "$got" == "Claude Opus 4.6 (Thinking)" ]] && ok "agy planner resolves newest from 'agy models'" || bad "agy resolve got [$got]"
 rm -rf "$STUB"
 
+echo "== resolve_model_for_tool ollama: live-lists via local Ollama tags (stubbed) =="
+OLLAMA_LIST=$'qwen3:0.6b\t522000000
+qwen3:1.7b\t1400000000
+deepseek-coder:6.7b\t3900000000'
+eq "ollama engineer picks strongest coding/local model" "deepseek-coder:6.7b" "$(_pick_ollama_model engineer "$OLLAMA_LIST")"
+eq "ollama tester picks the smaller practical model" "qwen3:0.6b" "$(_pick_ollama_model tester "$OLLAMA_LIST")"
+( export RALPH_OLLAMA_MAX_BYTES=1000000000; eq "ollama max-bytes cap respected" "qwen3:0.6b" "$(_pick_ollama_model engineer "$OLLAMA_LIST")" )
+( export RALPH_LOCAL_MODEL="qwen3:1.7b"; eq "RALPH_LOCAL_MODEL pins ollama resolver" "qwen3:1.7b" "$(resolve_model_for_tool ollama-agent engineer)" )
+
 echo "== param-count tokens (NNb) must not masquerade as a version =="
 PARAM='claude-sonnet-4-5
 qwen-72b-coder-2.5'

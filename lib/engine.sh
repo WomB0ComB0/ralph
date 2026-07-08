@@ -239,12 +239,64 @@ _pick_latest_model() {
         END{ if(best!="") print best }'
 }
 
+
+_ollama_base_url() {
+    local base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+    base="${base%/}"; base="${base%/v1}"
+    printf '%s\n' "$base"
+}
+
+ollama_model_list() {
+    local base; base=$(_ollama_base_url)
+    curl -fsS "$base/api/tags" 2>/dev/null | jq -r '.models[]? | "\(.name)\t\(.size // 0)"' 2>/dev/null || true
+}
+
+# Pick an Ollama model from "name<TAB>size_bytes" lines. Dynamic, local, and pure.
+# RALPH_OLLAMA_MAX_BYTES can cap selection for constrained laptops.
+_pick_ollama_model() {
+    local role="$1" list="$2" max_bytes="${RALPH_OLLAMA_MAX_BYTES:-0}"
+    [[ -n "$list" ]] || return 0
+    [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=0
+    printf '%s\n' "$list" | awk -v role="$role" -v max="$max_bytes" '
+        BEGIN{ best=""; bestscore=-999999 }
+        /^[[:space:]]*$/ { next }
+        {
+          name=$1; size=0
+          if (NF>=2 && $2 ~ /^[0-9]+$/) size=$2+0
+          if (max > 0 && size > max) next
+          lname=tolower(name)
+          score=0
+          if (lname ~ /(coder|code|deepseek|qwen|starcoder|devstral)/) score += 5000
+          if (lname ~ /(llama|gemma|mistral|phi)/) score += 2500
+          if (lname ~ /(instruct|chat)/) score += 800
+          if (role ~ /planner|thinker/ && lname ~ /(reason|thinking|pro|qwen3)/) score += 1500
+          if (role ~ /tester/ && lname ~ /(mini|small|0\.5b|0\.6b|1b|1\.5b)/) score += 2000
+          if (role !~ /tester/) score += int(size / 10000000)
+          else score -= int(size / 10000000)
+          clean=lname; gsub(/[0-9]+[bB]/, "", clean)
+          if (match(clean, /[0-9]+(\.[0-9]+)?/)) score += int(substr(clean, RSTART, RLENGTH) * 100)
+          if (best == "" || score > bestscore) { best=name; bestscore=score }
+        }
+        END{ if(best!="") print best }'
+}
+
+resolve_ollama_model_for_role() {
+    local role="${1:-engineer}" list picked
+    if [[ -n "${RALPH_LOCAL_MODEL:-}" ]]; then printf '%s\n' "$RALPH_LOCAL_MODEL"; return 0; fi
+    list=$(ollama_model_list)
+    picked=$(_pick_ollama_model "$role" "$list")
+    [[ -n "$picked" ]] && { printf '%s\n' "$picked"; return 0; }
+    printf '%s\n' "${RALPH_OLLAMA_DEFAULT_MODEL:-qwen3:0.6b}"
+}
+
 #######################################
 # Resolve a model for the active tool + role, preferring each tool's OWN live source
 # over any pinned string (gemini CLI is deprecated; agy/Antigravity is Google's CLI).
 #   agy       -> `agy models` then newest-for-role (empty => agy auto-selects latest)
 #   claude/amp-> tier alias (opus|sonnet) which resolves to the latest server-side
 #   opencode  -> existing dynamic opencode-models router
+#   ollama    -> local Ollama chat model from /api/tags
+#   ollama-agent -> local Ollama coding agent model from /api/tags
 # Arguments: $1 tool (default $TOOL), $2 role (default engineer)
 #######################################
 resolve_model_for_tool() {
@@ -259,6 +311,9 @@ resolve_model_for_tool() {
             ;;
         amp|codex)
             echo ""   # no usable --model in our invocation -> they self-select (don't fabricate one)
+            ;;
+        ollama|ollama-agent)
+            resolve_ollama_model_for_role "$role"
             ;;
         opencode|*)
             get_model_for_role "$role"
@@ -427,6 +482,23 @@ validate_model_availability() {
                 log_warning "Model not found in opencode: $model"
                 return 1
             fi
+            ;;
+        ollama|ollama-agent)
+            [[ -n "$model" ]] || model="$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")"
+            if ! command_exists curl || ! command_exists jq; then
+                log_error "ollama tool requires curl and jq"
+                return 1
+            fi
+            local base tags
+            base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+            base="${base%/}"; base="${base%/v1}"
+            tags=$(curl -fsS "$base/api/tags" 2>/dev/null | jq -r '.models[]?.name' 2>/dev/null || true)
+            if echo "$tags" | grep -qxF "$model"; then
+                log_debug "Ollama model validated: $model"
+                return 0
+            fi
+            log_warning "Ollama model not found locally: $model"
+            return 1
             ;;
 
         amp|claude)
@@ -667,6 +739,8 @@ EOF
 #   claude   -p/--print (REQUIRED for headless — without it claude 2.x goes interactive),
 #            --permission-mode bypassPermissions, --model
 #   opencode  opencode run --model <provider/model>
+#   ollama    curl local Ollama /api/chat via jq-encoded stdin prompt
+#   ollama-agent python local coding-agent loop with guarded file/command tools
 #   agy      --print --dangerously-skip-permissions  (Google Antigravity CLI; no --model flag)
 # Arguments: $1 tool, $2 model
 # Returns: 0 and sets _AI_CMD/_AI_STDIN; 1 for an unknown tool.
@@ -712,6 +786,33 @@ _build_ai_cmd() {
             _AI_CMD=(opencode run)
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> let opencode self-select
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
+        # Self-benchmarking: Move Ollama API request payload construction to a separate helper function to improve testability and reduce bash inline complexity.
+        ollama)
+            local _omodel="${model:-$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")}"
+            _AI_CMD=(env RALPH_OLLAMA_MODEL="$_omodel" bash -c '
+                set -euo pipefail
+                prompt=$(cat)
+                base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+                base="${base%/}"; base="${base%/v1}"
+                think="${RALPH_OLLAMA_THINK:-false}"
+                case "$think" in true|false) ;; *) think=false ;; esac
+                num="${RALPH_OLLAMA_NUM_PREDICT:-1024}"
+                [[ "$num" =~ ^[0-9]+$ ]] || num=1024
+                payload=$(jq -n \
+                    --arg model "$RALPH_OLLAMA_MODEL" \
+                    --arg prompt "$prompt" \
+                    --argjson think "$think" \
+                    --argjson num "$num" \
+                    "{model:\$model,messages:[{role:\"user\",content:\$prompt}],stream:false,think:\$think,options:{num_predict:\$num,temperature:0}}")
+                curl -fsS "$base/api/chat" -H "Content-Type: application/json" -d "$payload" |
+                    jq -r ".message.content // .response // empty"
+            ')
+            _AI_STDIN=1 ;;
+        ollama-agent)
+            local _omodel="${model:-$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")}" _agent_dir
+            _agent_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || return 1
+            _AI_CMD=(python3 "$_agent_dir/ollama_agent.py" --model "$_omodel")
+            _AI_STDIN=1 ;;
         agy)
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print

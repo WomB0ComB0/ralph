@@ -91,6 +91,16 @@ _build_ai_cmd amp "m"
 eq "amp uses stdin" 1 "$_AI_STDIN"
 [[ "${_AI_CMD[*]}" == *"--dangerously-allow-all"* ]] && ok "amp allow-all" || bad "amp flags: ${_AI_CMD[*]}"
 
+echo "== ollama: stdin-piped local API + ollama-agent executor =="
+export RALPH_LOCAL_MODEL="qwen3:0.6b"
+_build_ai_cmd ollama ""; eq "ollama rc" 0 "$?"
+eq "ollama uses stdin" 1 "$_AI_STDIN"
+[[ "${_AI_CMD[*]}" == *"RALPH_OLLAMA_MODEL=qwen3:0.6b"* && "${_AI_CMD[*]}" == *"/api/chat"* ]] && ok "ollama uses selected local model via API" || bad "ollama cmd: ${_AI_CMD[*]}"
+_build_ai_cmd ollama-agent ""; eq "ollama-agent rc" 0 "$?"
+eq "ollama-agent uses stdin" 1 "$_AI_STDIN"
+[[ "${_AI_CMD[*]}" == *"python3"* && "${_AI_CMD[*]}" == *"ollama_agent.py"* && "${_AI_CMD[*]}" == *"--model qwen3:0.6b"* ]] && ok "ollama-agent invokes guarded Python executor" || bad "ollama-agent cmd: ${_AI_CMD[*]}"
+unset RALPH_LOCAL_MODEL
+
 echo "== unknown tool rejected =="
 _build_ai_cmd bogus "m"; eq "unknown tool rc=1" 1 "$?"
 
@@ -107,7 +117,7 @@ _build_ai_cmd codex "gpt-5-codex"; [[ "${_AI_CMD[*]}" == *"--model gpt-5-codex"*
 eq "resolve_model_for_tool codex -> empty (self-select)" "" "$(resolve_model_for_tool codex engineer)"
 
 echo "== _ralph_is_valid_tool accepts all wired tools, rejects bogus =="
-for t in opencode claude amp agy codex; do _ralph_is_valid_tool "$t" && ok "valid: $t" || bad "rejected valid tool: $t"; done
+for t in opencode claude amp agy codex ollama ollama-agent; do _ralph_is_valid_tool "$t" && ok "valid: $t" || bad "rejected valid tool: $t"; done
 _ralph_is_valid_tool gemini && bad "gemini (deprecated CLI) accepted" || ok "gemini rejected (deprecated)"
 _ralph_is_valid_tool bogus && bad "bogus accepted" || ok "bogus rejected"
 
