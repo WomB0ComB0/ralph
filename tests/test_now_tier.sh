@@ -8,6 +8,8 @@ RALPH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source under test. Disable the EXIT trap noise by running in this shell.
 # shellcheck disable=SC1090
 source "$RALPH_ROOT/lib/utils.sh"
+# shellcheck disable=SC1090
+source "$RALPH_ROOT/lib/tools.sh"
 
 PASS=0
 FAIL=0
@@ -106,6 +108,40 @@ assert_rc "uppercase OPENAI_API_KEY -> rc 0 (found)" 0 "$rc"
 printf 'LOG_LEVEL=debug\nPORT=8080\nHOST=localhost\n' > "$TMP/benign.txt"
 scan_for_secrets "$TMP/benign.txt" >/dev/null 2>&1; rc=$?
 assert_rc "benign config -> rc 1 (clean)" 1 "$rc"
+
+
+# ---------------------------------------------------------------------------
+note "== run_in_sandbox docker arguments =="
+
+SANDBOX_PROJECT="$TMP/project"
+mkdir -p "$SANDBOX_PROJECT"
+DOCKER_CAPTURE="$TMP/docker-args.txt"
+
+docker() {
+    if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
+        return 0
+    fi
+    printf '%s\n' "$@" > "$DOCKER_CAPTURE"
+    return 0
+}
+
+export PROJECT_DIR="$SANDBOX_PROJECT"
+unset RALPH_SANDBOX_NETWORK RALPH_SANDBOX_ALLOW_ENV
+run_in_sandbox --sandbox --version >/dev/null 2>&1; rc=$?
+assert_rc "sandbox wrapper returns docker rc" 0 "$rc"
+grep -qxF '/home/ralph/.config:rw,noexec,nosuid,size=256m' "$DOCKER_CAPTURE" && ok "config tmpfs is writable" || bad "config tmpfs missing"
+grep -qxF '/home/ralph/.cache:rw,noexec,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "cache tmpfs is writable" || bad "cache tmpfs missing"
+grep -qxF '/home/ralph/.bun:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "bun install dir is executable tmpfs" || bad "bun tmpfs missing"
+grep -qxF '/home/ralph/.local:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "local install dir is executable tmpfs" || bad "local tmpfs missing"
+grep -qxF '/home/ralph/.npm-global:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "npm globals dir is executable tmpfs" || bad "npm-global tmpfs missing"
+grep -qxF '/home/ralph/go:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "go bin dir is executable tmpfs" || bad "go tmpfs missing"
+grep -qxF 'HOME=/home/ralph' "$DOCKER_CAPTURE" && ok "HOME passed into sandbox" || bad "HOME env missing"
+grep -qxF 'XDG_CONFIG_HOME=/home/ralph/.config' "$DOCKER_CAPTURE" && ok "XDG config env passed" || bad "XDG config env missing"
+grep -qxF 'BUN_INSTALL=/home/ralph/.bun' "$DOCKER_CAPTURE" && ok "BUN_INSTALL passed" || bad "BUN_INSTALL env missing"
+grep -q '^PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-global/bin:/home/ralph/go/bin:' "$DOCKER_CAPTURE" && ok "tool PATH passed" || bad "tool PATH missing"
+grep -qxF -- '--no-sandbox' "$DOCKER_CAPTURE" && ok "inner run disables recursive sandbox" || bad "inner --no-sandbox missing"
+if grep -qxF -- '--sandbox' "$DOCKER_CAPTURE"; then bad "inner command kept --sandbox"; else ok "inner command strips --sandbox"; fi
+unset -f docker
 
 # ---------------------------------------------------------------------------
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"

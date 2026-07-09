@@ -995,8 +995,23 @@ RUN mkdir -p /etc/apt/keyrings && \
 
 # Create non-root user for security
 RUN useradd -m -s /bin/bash ralph && \
-    mkdir -p /app && \
-    chown -R ralph:ralph /app
+    mkdir -p /app \
+        /home/ralph/.config \
+        /home/ralph/.cache \
+        /home/ralph/.local \
+        /home/ralph/.bun \
+        /home/ralph/.npm \
+        /home/ralph/.npm-global \
+        /home/ralph/go && \
+    chown -R ralph:ralph /app /home/ralph
+
+ENV HOME=/home/ralph
+ENV XDG_CONFIG_HOME=/home/ralph/.config
+ENV XDG_CACHE_HOME=/home/ralph/.cache
+ENV XDG_DATA_HOME=/home/ralph/.local/share
+ENV BUN_INSTALL=/home/ralph/.bun
+ENV npm_config_prefix=/home/ralph/.npm-global
+ENV PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-global/bin:/home/ralph/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Switch to non-root user
 USER ralph
@@ -1004,7 +1019,7 @@ WORKDIR /app
 
 # Install global npm packages as non-root user
 RUN npm config set prefix ~/.npm-global && \
-    echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+    echo 'export PATH=~/.bun/bin:~/.local/bin:~/.npm-global/bin:~/go/bin:$PATH' >> ~/.bashrc
 
 # Default command
 CMD ["/bin/bash"]
@@ -1054,7 +1069,14 @@ run_in_sandbox() {
         "--tty"
         "--read-only"                   # Read-only root FS; the /app volume below stays writable
         "--tmpfs" "/tmp:rw,noexec,nosuid,size=1g"  # Writable tmp with restrictions
-        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,size=500m"  # npm cache
+        "--tmpfs" "/home/ralph/.config:rw,noexec,nosuid,size=256m"  # XDG config for AI CLIs
+        "--tmpfs" "/home/ralph/.cache:rw,noexec,nosuid,size=1g"     # Tool caches
+        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,size=500m"     # npm cache
+        # User-level tool installs must be executable: bun, npm globals, bd/go, etc.
+        "--tmpfs" "/home/ralph/.bun:rw,nosuid,size=1g"
+        "--tmpfs" "/home/ralph/.local:rw,nosuid,size=1g"
+        "--tmpfs" "/home/ralph/.npm-global:rw,nosuid,size=1g"
+        "--tmpfs" "/home/ralph/go:rw,nosuid,size=1g"
         # Mount the project READ-WRITE so the agent can actually edit code. The
         # remaining hardening (read-only rootfs, cap-drop, non-root, resource caps)
         # still contains it. This is the whole point of the sandbox.
@@ -1068,6 +1090,13 @@ run_in_sandbox() {
         "--user" "ralph"                # Run as non-root user
         "--cap-drop=ALL"                # Drop all capabilities for security
         "-e" "RALPH_IN_SANDBOX=true"    # Tell the inner Ralph it is already contained
+        "-e" "HOME=/home/ralph"
+        "-e" "XDG_CONFIG_HOME=/home/ralph/.config"
+        "-e" "XDG_CACHE_HOME=/home/ralph/.cache"
+        "-e" "XDG_DATA_HOME=/home/ralph/.local/share"
+        "-e" "BUN_INSTALL=/home/ralph/.bun"
+        "-e" "npm_config_prefix=/home/ralph/.npm-global"
+        "-e" "PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-global/bin:/home/ralph/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         "--memory=${DOCKER_DEFAULT_MEMORY}"
         "--cpus=${DOCKER_DEFAULT_CPUS}"
         "--pids-limit=${DOCKER_PIDS_LIMIT}"
