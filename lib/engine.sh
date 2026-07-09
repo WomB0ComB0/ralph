@@ -1226,6 +1226,24 @@ run_budget_exceeded() {
     return 1
 }
 
+# backlog_exit_allowed VERIFY_OK QUEUED_CORRECTION
+# Return 0 only when a task-backlog early exit is allowed to stand in for an
+# explicit COMPLETE promise. This keeps the Beads drain path from bypassing the
+# same verification and quality gates enforced on agent-declared completion.
+# Self-benchmarking: next small improvement is to emit structured block reasons
+# here so `review_run` can report the exact gate without parsing human logs.
+backlog_exit_allowed() {
+    local verify_ok="${1:-false}"
+    local queued_correction="${2-}"
+
+    if [[ "${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}" == "1" && "$verify_ok" != "true" ]]; then
+        return 1
+    fi
+    [[ -z "$queued_correction" ]] || return 1
+    quality_gate_allows_complete || return 1
+    return 0
+}
+
 execute_iteration() {
     local iteration=$1
     local temp_output gitdiff_exclude_args
@@ -1443,6 +1461,7 @@ execute_iteration() {
             _signal_auto_resolve_family runtime_failure || true
         fi
     fi
+    LAST_VERIFY_OK="$verify_ok"; export LAST_VERIFY_OK
 
     # Analyze project changes
     local project_hash_after
@@ -1750,6 +1769,7 @@ main() {
     export SIGNAL_CLEAN_STREAK=0
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
+    export LAST_VERIFY_OK=false
     # Aggregate run budget accounting (per invocation; a --resume run starts a
     # fresh token/time budget). Consumed by the FinOps ceiling check below.
     export RUN_TOKENS_TOTAL=0
@@ -1829,7 +1849,11 @@ main() {
         # Stop early once the backlog is provably drained for TWO consecutive
         # iterations (work done, nothing open). The streak avoids exiting on a
         # transient empty queue between task phases. Only after a normal iteration.
+        local _backlog_drained=false
         if [[ $iter_rc -eq 1 ]] && backlog_drained; then
+            _backlog_drained=true
+        fi
+        if [[ "$_backlog_drained" == "true" ]] && backlog_exit_allowed "${LAST_VERIFY_OK:-false}" "${NEXT_INSTRUCTION:-}"; then
             DRAIN_STREAK=$(( DRAIN_STREAK + 1 ))
             if [[ $DRAIN_STREAK -ge 2 ]]; then
                 log_success "Task backlog drained for 2 iterations — all tracked work is complete."
@@ -1837,6 +1861,9 @@ main() {
                 exit 0
             fi
             log_info "Backlog appears drained (streak ${DRAIN_STREAK}/2); confirming on next iteration."
+        elif [[ "$_backlog_drained" == "true" ]]; then
+            DRAIN_STREAK=0
+            log_warning "Backlog is drained, but completion gates are still blocking; continuing until verification and quality pass."
         else
             DRAIN_STREAK=0
         fi

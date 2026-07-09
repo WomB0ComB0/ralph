@@ -2,6 +2,7 @@
 # TDD harness for the loop-reliability guards (lib/engine.sh):
 #   stall_limit_reached  — no-progress ceiling (stall abort)
 #   run_budget_exceeded  — aggregate token / wall-clock FinOps ceiling
+#   backlog_exit_allowed  — backlog-drain cannot bypass completion gates
 # Pure functions, so this suite is hermetic (no sandbox state needed).
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export VERBOSE=false
@@ -17,6 +18,8 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL: %s\n' "$1"; }
 # yes DESC CMD... -> expect CMD to succeed (return 0); no DESC CMD... -> expect failure.
 yes() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
 no()  { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; else ok "$d"; fi; }
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 echo "== stall_limit_reached STREAK CEILING =="
 no  "ceiling 0 disables the stall abort (never trips)"      stall_limit_reached 99 0
@@ -39,6 +42,27 @@ no  "non-numeric inputs are safe (no trip)"                 run_budget_exceeded 
 r=$(run_budget_exceeded 100 100 0 0);   case "$r" in *token*) ok "reason names the token ceiling";; *) bad "reason names the token ceiling (got [$r])";; esac
 r=$(run_budget_exceeded 0 0 60 60);     case "$r" in *time*)  ok "reason names the time ceiling";;  *) bad "reason names the time ceiling (got [$r])";; esac
 r=$(run_budget_exceeded 100 100 999 1); case "$r" in *token*) ok "token ceiling checked before time";; *) bad "token ceiling checked before time (got [$r])";; esac
+
+
+echo "== backlog_exit_allowed VERIFY_OK QUEUED_CORRECTION =="
+export RALPH_REQUIRE_VERIFY_ON_COMPLETE=1
+export RALPH_REQUIRE_QUALITY_ON_COMPLETE=0
+yes "clean verification and no correction allow backlog exit"        backlog_exit_allowed true ""
+no  "failed verification blocks backlog exit"                        backlog_exit_allowed false ""
+no  "queued correction blocks backlog exit"                          backlog_exit_allowed true "fix runtime first"
+export RALPH_REQUIRE_VERIFY_ON_COMPLETE=0
+yes "disabled verify gate allows failed verification only when clean" backlog_exit_allowed false ""
+no  "queued correction still blocks when verify gate disabled"        backlog_exit_allowed false "fix runtime first"
+
+export RALPH_REQUIRE_VERIFY_ON_COMPLETE=1
+export RALPH_REQUIRE_QUALITY_ON_COMPLETE=1
+export QUALITY_FILE="$TMP/QUALITY.md"
+printf 'Quality Gate: continue
+' > "$QUALITY_FILE"
+no  "quality gate continue blocks backlog exit"                      backlog_exit_allowed true ""
+printf 'Quality Gate: pass
+' > "$QUALITY_FILE"
+yes "quality gate pass allows clean backlog exit"                    backlog_exit_allowed true ""
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
