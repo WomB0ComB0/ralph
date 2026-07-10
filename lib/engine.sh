@@ -2183,8 +2183,172 @@ validate_execution_plan() {
 
 
 #######################################
+# Runtime verification helpers
+#######################################
+_runtime_add_command() {
+    local cmd="$1"
+    [[ -n "$cmd" ]] || return 0
+    case "$cmd" in
+        "No build command detected"|"No test command detected"|echo\ "No build command detected"*|echo\ "No test command detected"*) return 0 ;;
+    esac
+    if [[ "${_RALPH_RUNTIME_SEEN:-}" == *$'\n'"$cmd"$'\n'* ]]; then
+        return 0
+    fi
+    _RALPH_RUNTIME_SEEN+="$cmd"$'\n'
+    printf '%s\n' "$cmd"
+}
+
+runtime_package_manager() {
+    local project_dir="${1:-.}"
+    if [[ -f "$project_dir/bun.lock" || -f "$project_dir/bun.lockb" ]]; then
+        echo bun
+    elif [[ -f "$project_dir/pnpm-lock.yaml" ]]; then
+        echo pnpm
+    elif [[ -f "$project_dir/yarn.lock" ]]; then
+        echo yarn
+    else
+        echo npm
+    fi
+}
+
+collect_runtime_commands() {
+    local project_dir="${1:-.}" pm script value
+    _RALPH_RUNTIME_SEEN=$'\n'
+
+    if command_exists jq && [[ -f "$project_dir/ralph.json" ]]; then
+        while IFS= read -r value; do
+            _runtime_add_command "$value"
+        done < <(jq -r '.commands // {} | to_entries[] | . as $entry | select(["verify","test","build","smoke","lint","check"] | index($entry.key)) | select($entry.value | type == "string") | $entry.value' "$project_dir/ralph.json" 2>/dev/null || true)
+    fi
+
+    if command_exists jq && [[ -f "$project_dir/package.json" ]]; then
+        pm=$(runtime_package_manager "$project_dir")
+        for script in test build lint smoke check; do
+            value=$(jq -r --arg script "$script" '.scripts[$script] // empty' "$project_dir/package.json" 2>/dev/null || true)
+            [[ -n "$value" ]] || continue
+            case "$value" in *"no test specified"*) continue ;; esac
+            if [[ "$script" == "test" ]]; then
+                _runtime_add_command "$pm test"
+            else
+                _runtime_add_command "$pm run $script"
+            fi
+        done
+    fi
+
+    unset _RALPH_RUNTIME_SEEN
+}
+
+runtime_command_allowed() {
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+    [[ "$cmd" != *$'\n'* && "$cmd" != *$'\r'* ]] || return 1
+    [[ "$cmd" != *";"* && "$cmd" != *"&"* && "$cmd" != *"|"* && "$cmd" != *"<"* && "$cmd" != *">"* ]] || return 1
+    [[ "$cmd" != *'`'* && "$cmd" != *'$('* && "$cmd" != *'${'* ]] || return 1
+
+    [[ "$cmd" =~ ^(npm|pnpm|bun|yarn)[[:space:]]+(test|run[[:space:]]+[A-Za-z0-9:_-]+)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^cargo[[:space:]]+(test|build|check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^go[[:space:]]+(test|build|vet)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^(pytest|ruff[[:space:]]+check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^python3?[[:space:]]+-m[[:space:]]+pytest([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^make[[:space:]]+(test|check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    return 1
+}
+
+run_runtime_command() {
+    local project_dir="$1" cmd="$2" timeout_s="${RALPH_VERIFY_TIMEOUT:-120}"
+    if command_exists timeout; then
+        (cd "$project_dir" && timeout "$timeout_s" bash -lc "$cmd") >/dev/null 2>&1
+    else
+        (cd "$project_dir" && bash -lc "$cmd") >/dev/null 2>&1
+    fi
+}
+
+_health_port_listening() {
+    local port="$1"
+    command_exists ss || return 1
+    ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { found=1 } END { exit !found }'
+}
+
+_health_port_pids() {
+    local port="$1"
+    command_exists ss || return 1
+    ss -H -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { print }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+_path_within_project() {
+    local child="$1" root="$2" child_real root_real
+    child_real=$(cd "$child" 2>/dev/null && pwd -P) || return 1
+    root_real=$(cd "$root" 2>/dev/null && pwd -P) || return 1
+    [[ "$child_real" == "$root_real" || "$child_real" == "$root_real"/* ]]
+}
+
+_health_port_owned_by_project() {
+    local port="$1" project_dir="$2" pid cwd found_pid=false
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        found_pid=true
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+        [[ -n "$cwd" ]] || continue
+        if _path_within_project "$cwd" "$project_dir"; then
+            return 0
+        fi
+    done < <(_health_port_pids "$port")
+    [[ "$found_pid" == "false" ]] && return 1
+    return 1
+}
+
+verify_health_ports() {
+    local project_dir="${1:-.}" errors="" port ep url code body
+    local ports=()
+    [[ -n "${RALPH_HEALTH_PORTS:-}" ]] || return 0
+    IFS=$' \t\n,' read -r -a ports <<< "${RALPH_HEALTH_PORTS:-}" || true
+    for port in ${ports[@]+"${ports[@]}"}; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        _health_port_listening "$port" || continue
+
+        if [[ "${RALPH_HEALTH_ALLOW_EXTERNAL:-0}" != "1" ]] && ! _health_port_owned_by_project "$port" "$project_dir"; then
+            errors+=$'\n'"- Health port $port is listening, but no owning process is rooted in $project_dir. Refusing to treat it as this project's service."
+            continue
+        fi
+
+        log_success "Project service detected on port $port"
+        if command_exists curl; then
+            local passed=false
+            for ep in "/health" "/api/hello" "/api/v1/status" "/"; do
+                url="http://localhost:$port$ep"
+                if [[ -n "${RALPH_HEALTH_EXPECT:-}" ]]; then
+                    body=$(curl -fsS "$url" 2>/dev/null || true)
+                    if [[ "$body" == *"$RALPH_HEALTH_EXPECT"* ]]; then
+                        passed=true
+                    fi
+                else
+                    code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
+                    [[ "$code" == "200" ]] && passed=true
+                fi
+                if [[ "$passed" == "true" ]]; then
+                    log_success "Health check passed: $url"
+                    if [[ "$port" == "8080" ]]; then
+                        local bench_result
+                        bench_result=$(run_mini_bench "$url" 5)
+                        [[ "$bench_result" == *"<performance_alert>"* ]] && errors+=$'\n'"$bench_result"
+                    fi
+                    if [[ "$port" == "3000" ]]; then
+                        local visual_report
+                        visual_report=$(verify_ui_visual "$url")
+                        [[ -n "$visual_report" ]] && errors+=$'\n'"$visual_report"
+                    fi
+                    break
+                fi
+            done
+            [[ "$passed" == "true" ]] || errors+=$'\n'"- Health checks failed for project-owned port $port."
+        fi
+    done
+    printf '%s' "$errors"
+}
+
+#######################################
 # Perform runtime verification of services
-# Identifies services and runs liveness probes
+# Identifies services and runs declared checks plus explicit liveness probes
 # Returns: Error string if verification fails
 #######################################
 verify_runtime() {
@@ -2204,11 +2368,11 @@ verify_runtime() {
     # 2. Identify and verify Node.js services
     if [[ -f "$project_dir/package.json" ]]; then
         log_info "Verifying Node.js project..."
+        if command_exists jq && ! jq empty "$project_dir/package.json" >/dev/null 2>&1; then
+            errors+=$'\n'"- Invalid package.json format."
+        fi
         if [[ ! -d "$project_dir/node_modules" ]]; then
-            log_warning "node_modules missing, attempt to check package.json validity..."
-            if ! jq empty "$project_dir/package.json" >/dev/null 2>&1; then
-                errors+=$'\n'"- Invalid package.json format."
-            fi
+            log_warning "node_modules missing; package install may be required before full verification."
         fi
     fi
 
@@ -2238,49 +2402,26 @@ verify_runtime() {
         fi
     fi
 
-    # 5. Liveness Probe (Port scanning & Health checks)
-    # Checks common dev ports
-    local ports=()
-    IFS=$' \t\n,' read -r -a ports <<< "${RALPH_HEALTH_PORTS:-8080 3000 5000 8000 8443 4000 5173 3001 8888}" || true
-    for port in ${ports[@]+"${ports[@]}"}; do
-        [[ "$port" =~ ^[0-9]+$ ]] || continue   # ignore junk tokens from RALPH_HEALTH_PORTS
-        if command_exists ss; then
-            if ss -tuln | grep -q ":$port "; then
-                log_success "Service detected on port $port"
-
-                # Dynamic Health Check
-                if command_exists curl; then
-                    # Try common health endpoints across all identified ports
-                    for ep in "/health" "/api/hello" "/api/v1/status" "/"; do
-                        local url="http://localhost:$port$ep"
-                        local code
-                        code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
-                        if [[ "$code" == "200" ]]; then
-                            log_success "Health check passed: $url"
-
-                            # Trigger Benchmarking if port is 8080 (Primary API)
-                            if [[ "$port" == "8080" ]]; then
-                                local bench_result
-                                bench_result=$(run_mini_bench "$url" 5)
-                                if [[ "$bench_result" == *"<performance_alert>"* ]]; then
-                                    errors+=$'\n'"$bench_result"
-                                fi
-                            fi
-                            # Trigger Visual Audit if port is 3000 (Frontend)
-                            if [[ "$port" == "3000" ]]; then
-                                local visual_report
-                                visual_report=$(verify_ui_visual "$url")
-                                if [[ -n "$visual_report" ]]; then
-                                    errors+=$'\n'"$visual_report"
-                                fi
-                            fi
-                            break
-                        fi
-                    done
-                fi
+    # 5. Run declared project verification commands when present.
+    if [[ "${RALPH_VERIFY_DECLARED_COMMANDS:-1}" == "1" ]]; then
+        local cmd
+        while IFS= read -r cmd; do
+            [[ -n "$cmd" ]] || continue
+            if ! runtime_command_allowed "$cmd"; then
+                errors+=$'\n'"- Declared verification command rejected as unsafe: $cmd"
+                continue
             fi
-        fi
-    done
+            log_info "Running declared verification command: $cmd"
+            if ! run_runtime_command "$project_dir" "$cmd"; then
+                errors+=$'\n'"- Declared verification command failed: $cmd"
+            fi
+        done < <(collect_runtime_commands "$project_dir")
+    fi
+
+    # 6. Explicit liveness probes. Ports are opt-in to avoid matching unrelated local services.
+    local health_errors
+    health_errors=$(verify_health_ports "$project_dir")
+    [[ -n "$health_errors" ]] && errors+="$health_errors"
 
     if [[ -n "$errors" ]]; then
         echo "<runtime_error>$errors</runtime_error>"

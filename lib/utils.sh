@@ -1178,7 +1178,13 @@ ${_RALPH_COLOR_YELLOW}Gitdiff Exclude:${_RALPH_COLOR_NC}
 
 ${_RALPH_COLOR_YELLOW}List Overrides (better defaults + override):${_RALPH_COLOR_NC}
     RALPH_HASH_EXCLUDES     Extra dir names to skip when hashing (also .ralph/excludes file)
-    RALPH_HEALTH_PORTS      Ports to probe for running services (default broadened)
+    RALPH_HEALTH_PORTS      Explicit ports to probe; unset disables port probes
+    RALPH_HEALTH_EXPECT     Optional response substring required for health probes
+    RALPH_HEALTH_ALLOW_EXTERNAL
+                            Allow health probes for ports not owned by this project
+    RALPH_VERIFY_DECLARED_COMMANDS
+                            Run safe declared checks from ralph.json/package.json (default: 1)
+    RALPH_VERIFY_TIMEOUT    Timeout in seconds for each declared check (default: 120)
     RALPH_MODEL_FAMILIES    Preferred model-family regex for routing (default: gemini|glm|claude)
     RALPH_SANDBOX_ALLOW_ENV Extra env vars to pass through into the sandbox
 

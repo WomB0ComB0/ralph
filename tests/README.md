@@ -17,6 +17,7 @@ working tree.
 | `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args, secret scan, flock singleton (34 cases) |
 | `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping (20) |
 | `test_loop_guards.sh` | Pure loop guard predicates: stall ceilings, run budget ceilings, and backlog-drain completion gate enforcement (23) |
+| `test_runtime_verification.sh` | Runtime verification: safe declared command discovery/execution and project-owned health-port checks (15) |
 | `test_lists.sh` | Configurable excludes + list defaults: `hash_exclude_names`, health-port / model-family / sandbox-env overrides, `gitdiff-exclude`, project-hash cache invalidates on uncommitted changes (14) |
 | `test_signals.sh` | Signal + LOG.md compounding: `theme_key` normalization/dedup, lifecycle (open/ack/resolved, regressed-reopen), bounded recall, prune, co-occurrence (`related`) links (39) |
 | `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** (32) |
@@ -37,3 +38,10 @@ sets up a temp sandbox, and prints `TOTAL: N passed, M failed`. Follow TDD: add 
 failing assertion first, watch it fail, then implement. New library behavior should
 land with a matching case here (or in the native `run_internal_tests` in
 `lib/tools.sh` when it needs the full runtime).
+
+
+## Optional Docker smoke
+
+`tests/sandbox_provisioning_smoke.sh` exercises the Docker sandbox image with a
+stubbed selected AI tool. It requires Docker, builds `ralph-sandbox:latest` if
+missing, and does not call a real model provider.
