@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ralph Wiggum - Long-running AI agent loop
-# Usage: ./ralph.sh [--tool opencode|claude|amp|agy|codex] [--max-iterations N] [--model MODEL] [--no-archive]
+# Usage: ./ralph.sh [--tool opencode|claude|amp|agy|codex|jules] [--max-iterations N] [--model MODEL] [--no-archive]
 
 set -euo pipefail
 
@@ -35,6 +35,9 @@ source "$SCRIPT_DIR/lib/lint.sh"
 # shellcheck source=lib/triage.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/triage.sh"
+# shellcheck source=lib/jules.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/jules.sh"
 # shellcheck source=lib/synapse.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/synapse.sh"

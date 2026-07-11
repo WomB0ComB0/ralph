@@ -6,7 +6,7 @@ Use Ralph when you want an agent to keep working from a persistent plan instead 
 
 ## What Ralph Does
 
-- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, and GitHub Copilot.
+- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, and GitHub Copilot.
 - Grounds each iteration in project instructions, Beads task state, run artifacts, git context, and optional extra context files.
 - Detects lazy/no-op iterations and repeated loop signatures, then injects corrective prompts.
 - Stores recurring problems as signals and promotes proven fixes into guarded skills.
@@ -85,6 +85,7 @@ Ralph revolves around a few durable files and stores:
 ./ralph.sh                         # default tool
 ./ralph.sh --tool opencode         # choose a tool
 ./ralph.sh --tool codex            # OpenAI Codex via `codex exec`
+./ralph.sh --tool jules            # Jules remote executor; requires JULES_API_KEY and a connected source
 ./ralph.sh --model "provider/id"   # pin a model
 ./ralph.sh --max-iterations 20     # change loop limit
 ./ralph.sh --resume                # resume from checkpoint
@@ -106,6 +107,7 @@ Supported AI tools:
 | `amp` | Anthropic MCP workflow. |
 | `agy` | Google Antigravity CLI. |
 | `codex` | OpenAI Codex CLI, executed in sandboxed mode. |
+| `jules` | Asynchronous Jules REST executor. PR mode creates/records a remote PR; patch mode applies returned diffs locally. |
 | `copilot` | Available through the Copilot subcommands below. |
 
 ### Copilot
@@ -206,7 +208,7 @@ Common environment variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, or `codex`. |
+| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, or `jules`. |
 | `RALPH_ROLE` | Routing role: `planner`, `engineer`, `tester`, or `thinker`. |
 | `AGENTS_FILE` | Explicit instruction file override. |
 | `SELECTED_MODEL` | Specific model to pin. |
@@ -239,6 +241,12 @@ Common environment variables:
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
+| `JULES_API_KEY` | Jules REST API key, required for `TOOL=jules`; keep it in the environment or a secret store. |
+| `RALPH_JULES_SOURCE` | Jules source resource such as `sources/github-owner-repo`; if unset, Ralph tries to match the GitHub `origin` against connected Jules sources. |
+| `RALPH_JULES_MODE` | Jules completion mode: `pr` (default, records remote PR output) or `patch` (applies returned `changeSet.gitPatch` locally). |
+| `RALPH_JULES_STARTING_BRANCH` | Branch Jules should start from; defaults to the current Git branch, then `main`. |
+| `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
+| `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
 
 ## Dependencies

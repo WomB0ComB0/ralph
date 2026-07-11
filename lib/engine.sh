@@ -309,7 +309,7 @@ resolve_model_for_tool() {
         claude)
             case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
             ;;
-        amp|codex)
+        amp|codex|jules)
             echo ""   # no usable --model in our invocation -> they self-select (don't fabricate one)
             ;;
         ollama|ollama-agent)
@@ -904,6 +904,21 @@ run_ai_tool() {
 
     local pid i exit_code
 
+    if [[ "$tool" == "jules" ]]; then
+        if ! declare -F run_jules_remote >/dev/null 2>&1; then
+            log_error "tool=jules requested, but lib/jules.sh is not loaded"
+            return 1
+        fi
+        exit_code=0
+        run_jules_remote "$tool" "$model" "$prompt" "$log_file" "$output_file" || exit_code=$?
+        if [[ $exit_code -eq 0 ]]; then
+            log_success "Iteration $iteration: Jules Remote Response Received"
+            return 0
+        fi
+        log_error "Iteration $iteration: Jules Remote Failed (Exit $exit_code)"
+        return "$exit_code"
+    fi
+
     # Opt-in session continuity: resume the tool's prior conversation once a session has
     # been established (after the first SUCCESSFUL call this run). Default off.
     local resume=0
@@ -1288,6 +1303,10 @@ execute_iteration() {
     local project_hash_before
     project_hash_before=$(compute_project_hash)
     log_debug "Project hash before: $project_hash_before"
+    _RALPH_REMOTE_PROGRESS=0
+    _RALPH_REMOTE_STATE=""
+    _RALPH_REMOTE_SESSION=""
+    export _RALPH_REMOTE_PROGRESS _RALPH_REMOTE_STATE _RALPH_REMOTE_SESSION
 
     # Generate current log signature for loop detection
     local current_log_signature
@@ -1449,6 +1468,9 @@ execute_iteration() {
         verify_ok=false
         export NEXT_INSTRUCTION="${artifact_errors}${runtime_errors}"
         log_warning "Validation or runtime errors detected, will correct in next iteration"
+        if [[ "${TOOL:-}" == "jules" && "${_RALPH_REMOTE_STATE:-}" == "COMPLETED" ]] && declare -F jules_send_verification_feedback >/dev/null 2>&1; then
+            jules_send_verification_feedback "${artifact_errors}${runtime_errors}" "$LOG_FILE" || true
+        fi
         SIGNAL_CLEAN_STREAK=0
         # Record recurring failures as deduped signals (frequency climbs on repeat).
         [[ -n "$artifact_errors" ]] && record_signal validation_failure "artifact validation failed" "$artifact_errors" "fix the flagged artifacts before continuing" "validation" >/dev/null 2>&1 || true
@@ -1468,12 +1490,18 @@ execute_iteration() {
     project_hash_after=$(compute_project_hash)
     log_debug "Project hash after: $project_hash_after"
 
-    if [[ "$project_hash_before" == "$project_hash_after" ]]; then
+    local remote_progress="${_RALPH_REMOTE_PROGRESS:-0}"
+    if [[ "$project_hash_before" == "$project_hash_after" && "$remote_progress" != "1" ]]; then
         LAZY_STREAK=$(( ${LAZY_STREAK:-0} + 1 ))
         log_warning "No files modified this iteration (streak: $LAZY_STREAK)"
         if [[ ${LAZY_STREAK:-0} -ge ${LAZY_THRESHOLD:-2} ]]; then
             record_signal lazy_streak "no files modified for $LAZY_STREAK consecutive iterations" "no-files-modified" "make a concrete code change or output the completion promise" "lazy_detection" >/dev/null 2>&1 || true
         fi
+    elif [[ "$remote_progress" == "1" ]]; then
+        log_success "Remote provider progressed (${_RALPH_REMOTE_SESSION:-unknown}: ${_RALPH_REMOTE_STATE:-unknown})"
+        LAZY_STREAK=0
+        _signal_auto_resolve_family lazy_streak >/dev/null 2>&1 || true
+        _signal_auto_resolve_family loop_detected >/dev/null 2>&1 || true
     else
         log_success "Files modified - agent is making progress"
         LAZY_STREAK=0
@@ -1496,6 +1524,7 @@ execute_iteration() {
     # iteration's build/artifact verification pass? (booleans, emitted as JSON.)
     local changed_json=false verify_json="${verify_ok:-true}"
     [[ "$project_hash_before" != "$project_hash_after" ]] && changed_json=true
+    [[ "${_RALPH_REMOTE_PROGRESS:-0}" == "1" ]] && changed_json=true
     metrics_payload=""
     if command_exists jq; then
         metrics_payload=$(jq -nc \

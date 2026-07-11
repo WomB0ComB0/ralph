@@ -1103,7 +1103,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--init${_RALPH_COLOR_NC}                  Smart project initialization
     ${_RALPH_COLOR_GREEN}--setup${_RALPH_COLOR_NC}                 Install all required dependencies
     ${_RALPH_COLOR_GREEN}--test${_RALPH_COLOR_NC}                  Run internal test suite
-    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), codex, ollama, or ollama-agent (default: opencode)
+    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), codex, ollama, ollama-agent, or jules (default: opencode)
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
@@ -1187,6 +1187,14 @@ ${_RALPH_COLOR_YELLOW}List Overrides (better defaults + override):${_RALPH_COLOR
     RALPH_VERIFY_TIMEOUT    Timeout in seconds for each declared check (default: 120)
     RALPH_MODEL_FAMILIES    Preferred model-family regex for routing (default: gemini|glm|claude)
     RALPH_SANDBOX_ALLOW_ENV Extra env vars to pass through into the sandbox
+
+${_RALPH_COLOR_YELLOW}Jules Remote Executor:${_RALPH_COLOR_NC}
+    JULES_API_KEY           API key for Jules REST requests
+    RALPH_JULES_SOURCE      Connected Jules source resource (sources/)
+    RALPH_JULES_MODE        pr (default) or patch
+    RALPH_JULES_POLL_INTERVAL
+                            Poll cadence in seconds (default: 15)
+    RALPH_JULES_TIMEOUT     Max wait seconds per Ralph iteration (default: 7200)
 
 EOF
     exit 0
@@ -1362,7 +1370,7 @@ parse_arguments() {
 # Returns: 0 if valid, exits on invalid config
 #######################################
 _ralph_is_valid_tool() {
-    case "$1" in opencode|claude|amp|agy|codex|ollama|ollama-agent) return 0 ;; *) return 1 ;; esac
+    case "$1" in opencode|claude|amp|agy|codex|ollama|ollama-agent|jules) return 0 ;; *) return 1 ;; esac
 }
 
 validate_config() {
@@ -1370,7 +1378,7 @@ validate_config() {
 
     # Validate tool selection (single source of truth: _ralph_is_valid_tool)
     if ! _ralph_is_valid_tool "$TOOL"; then
-        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex, ollama, ollama-agent"
+        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex, ollama, ollama-agent, jules"
         errors=$((errors + 1))
     fi
     
