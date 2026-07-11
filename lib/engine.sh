@@ -775,6 +775,65 @@ _timeout_bin() {
     else echo ""; fi
 }
 
+_opencode_json_text_filter() {
+    cat <<'JQ'
+def chunks:
+  if type == "string" then .
+  elif type == "array" then .[] | chunks
+  elif type == "object" then
+    (.text? | chunks),
+    (.content? | chunks),
+    (.message? | chunks),
+    (.delta? | chunks),
+    (.part? | chunks)
+  else empty end;
+(fromjson? // empty) as $event
+| select(((($event.role? // $event.message.role? // "") | tostring) != "user"))
+| ($event.message? | chunks),
+  ($event.assistant? | chunks),
+  ($event.content? | chunks),
+  ($event.text? | chunks),
+  ($event.delta? | chunks),
+  ($event.part? | chunks)
+JQ
+}
+
+opencode_provider_state_file() {
+    printf '%s\n' "${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/providers/opencode.json"
+}
+
+normalize_opencode_json_output() {
+    local output_file="$1" log_file="${2:-/dev/null}" raw_file text_file state_file updated_at
+    [[ "${RALPH_OPENCODE_JSON:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    [[ -s "$output_file" ]] || return 0
+
+    raw_file="${output_file}.opencode.jsonl"
+    text_file="${output_file}.text"
+    cp "$output_file" "$raw_file" 2>/dev/null || return 0
+
+    if jq -Rr "$(_opencode_json_text_filter)" "$raw_file" > "$text_file" 2>/dev/null && [[ -s "$text_file" ]]; then
+        cat "$text_file" > "$output_file"
+    fi
+
+    state_file=$(opencode_provider_state_file)
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    jq -Rsc \
+        --arg run_id "${RUN_ID:-manual}" \
+        --arg updated_at "$updated_at" \
+        '[split("\n")[] | select(length > 0) | fromjson?] as $events
+         | {provider:"opencode",
+            run_id:$run_id,
+            updated_at:$updated_at,
+            event_count:($events | length),
+            sessions:([$events[] | (.sessionID? // .sessionId? // .session_id? // .session?.id?) | select(. != null)] | unique),
+            terminal_events:([$events[] | (.type? // .event? // .status?) | select(. != null) | tostring | select(test("complete|completed|finish|finished|done|failed|error"; "i"))])}' \
+        "$raw_file" > "$state_file.tmp" 2>/dev/null && mv "$state_file.tmp" "$state_file" 2>/dev/null || true
+
+    printf 'opencode JSON events captured: %s\n' "$raw_file" >> "$log_file" 2>/dev/null || true
+}
+
 _kill_process_tree() {
     local sig="$1" pid="$2" child
     [[ "$pid" =~ ^[0-9]+$ ]] || return 0
@@ -808,6 +867,7 @@ _build_ai_cmd() {
             ;;
         opencode)
             _AI_CMD=(opencode run)
+            [[ "${RALPH_OPENCODE_JSON:-1}" == "1" ]] && _AI_CMD+=(--format json)
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> let opencode self-select
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
         # Self-benchmarking: Move Ollama API request payload construction to a separate helper function to improve testability and reduce bash inline complexity.
@@ -991,6 +1051,10 @@ run_ai_tool() {
     exit_code=0
     wait "$pid" || exit_code=$?
     [[ "$timed_out" -eq 1 ]] && exit_code=124
+
+    if [[ "$tool" == "opencode" ]] && declare -F normalize_opencode_json_output >/dev/null 2>&1; then
+        normalize_opencode_json_output "$output_file" "$log_file"
+    fi
 
     # Clear line and show final success/fail
     printf "\r\033[K"
@@ -2214,6 +2278,70 @@ validate_execution_plan() {
 #######################################
 # Runtime verification helpers
 #######################################
+verification_evidence_file() {
+    printf '%s\n' "${RALPH_VERIFICATION_FILE:-${ARTIFACT_DIR:-${PROJECT_DIR:-.}/.ralph/artifacts}/verification.json}"
+}
+
+init_verification_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local file updated_at
+    file=$(verification_evidence_file)
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    jq -n \
+        --arg schema_version "1" \
+        --arg project_dir "${PROJECT_DIR:-.}" \
+        --arg run_id "${RUN_ID:-manual}" \
+        --argjson iteration "${iteration:-0}" \
+        --arg started_at "$updated_at" \
+        '{schema_version:($schema_version|tonumber), project_dir:$project_dir, run_id:$run_id, iteration:$iteration, started_at:$started_at, updated_at:$started_at, commands:[], summary:{total:0, failed:0, timed_out:0}}' \
+        > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
+runtime_timeout_diagnostic() {
+    local cmd="$1" timeout_s="$2"
+    local msg="timed out after ${timeout_s}s"
+    case "$cmd" in
+        npm\ test|pnpm\ test|yarn\ test|bun\ test|*node\ --test*)
+            msg+="; if assertions passed before timeout, check for an open server/listener/timer and close it in test teardown"
+            ;;
+    esac
+    printf '%s\n' "$msg"
+}
+
+append_verification_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local cmd="$1" rc="$2" timed_out="$3" timeout_s="$4" elapsed_s="$5" stdout_file="$6" stderr_file="$7" diagnostic="${8:-}"
+    local file stdout_tail stderr_tail updated_at timed_out_json
+    file=$(verification_evidence_file)
+    [[ -f "$file" ]] || init_verification_evidence
+    [[ -f "$file" ]] || return 0
+    stdout_tail=$(tail -n 40 "$stdout_file" 2>/dev/null || true)
+    stderr_tail=$(tail -n 40 "$stderr_file" 2>/dev/null || true)
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    [[ "$timed_out" == "true" ]] && timed_out_json=true || timed_out_json=false
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+    [[ "$timeout_s" =~ ^[0-9]+$ ]] || timeout_s=0
+    [[ "$elapsed_s" =~ ^[0-9]+$ ]] || elapsed_s=0
+
+    jq \
+        --arg command "$cmd" \
+        --argjson exit_code "$rc" \
+        --argjson timed_out "$timed_out_json" \
+        --argjson timeout_seconds "$timeout_s" \
+        --argjson elapsed_seconds "$elapsed_s" \
+        --arg stdout_tail "$stdout_tail" \
+        --arg stderr_tail "$stderr_tail" \
+        --arg diagnostic "$diagnostic" \
+        --arg updated_at "$updated_at" \
+        '.commands += [{command:$command, exit_code:$exit_code, timed_out:$timed_out, timeout_seconds:$timeout_seconds, elapsed_seconds:$elapsed_seconds, diagnostic:$diagnostic, stdout_tail:$stdout_tail, stderr_tail:$stderr_tail}]
+         | .updated_at = $updated_at
+         | .summary = {total:(.commands|length), failed:([.commands[] | select(.exit_code != 0)] | length), timed_out:([.commands[] | select(.timed_out == true)] | length)}' \
+        "$file" > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
 _runtime_add_command() {
     local cmd="$1"
     [[ -n "$cmd" ]] || return 0
@@ -2285,11 +2413,33 @@ runtime_command_allowed() {
 
 run_runtime_command() {
     local project_dir="$1" cmd="$2" timeout_s="${RALPH_VERIFY_TIMEOUT:-120}"
-    if command_exists timeout; then
-        (cd "$project_dir" && timeout "$timeout_s" bash -lc "$cmd") >/dev/null 2>&1
+    local stdout_file stderr_file start_s end_s elapsed_s rc=0 timed_out=false diagnostic=""
+    [[ "$timeout_s" =~ ^[0-9]+$ ]] || timeout_s=120
+    stdout_file=$(mktemp "${TMPDIR:-/tmp}/ralph-verify-out.XXXXXX") || stdout_file="/tmp/ralph-verify-out.$$"
+    stderr_file=$(mktemp "${TMPDIR:-/tmp}/ralph-verify-err.XXXXXX") || stderr_file="/tmp/ralph-verify-err.$$"
+    start_s=$(date +%s)
+
+    if command_exists timeout && [[ "$timeout_s" -gt 0 ]]; then
+        (cd "$project_dir" && timeout "$timeout_s" bash -lc "$cmd") >"$stdout_file" 2>"$stderr_file" || rc=$?
     else
-        (cd "$project_dir" && bash -lc "$cmd") >/dev/null 2>&1
+        (cd "$project_dir" && bash -lc "$cmd") >"$stdout_file" 2>"$stderr_file" || rc=$?
     fi
+
+    end_s=$(date +%s)
+    elapsed_s=$(( end_s - start_s ))
+    if [[ "$rc" == "124" || "$rc" == "137" ]]; then
+        timed_out=true
+        diagnostic=$(runtime_timeout_diagnostic "$cmd" "$timeout_s")
+    fi
+
+    _RALPH_RUNTIME_LAST_RC="$rc"
+    _RALPH_RUNTIME_LAST_TIMED_OUT="$timed_out"
+    _RALPH_RUNTIME_LAST_DIAGNOSTIC="$diagnostic"
+    export _RALPH_RUNTIME_LAST_RC _RALPH_RUNTIME_LAST_TIMED_OUT _RALPH_RUNTIME_LAST_DIAGNOSTIC
+
+    append_verification_evidence "$cmd" "$rc" "$timed_out" "$timeout_s" "$elapsed_s" "$stdout_file" "$stderr_file" "$diagnostic"
+    rm -f "$stdout_file" "$stderr_file" 2>/dev/null || true
+    return "$rc"
 }
 
 _health_port_listening() {
@@ -2384,6 +2534,7 @@ verify_runtime() {
     local errors=""
     local project_dir="${PROJECT_DIR:-.}"
 
+    init_verification_evidence
     log_debug "Starting runtime verification..."
 
     # 1. Identify and verify Rust services
@@ -2442,7 +2593,12 @@ verify_runtime() {
             fi
             log_info "Running declared verification command: $cmd"
             if ! run_runtime_command "$project_dir" "$cmd"; then
-                errors+=$'\n'"- Declared verification command failed: $cmd"
+                local detail="${_RALPH_RUNTIME_LAST_DIAGNOSTIC:-}"
+                if [[ -n "$detail" ]]; then
+                    errors+=$'\n'"- Declared verification command failed: $cmd ($detail)."
+                else
+                    errors+=$'\n'"- Declared verification command failed: $cmd"
+                fi
             fi
         done < <(collect_runtime_commands "$project_dir")
     fi

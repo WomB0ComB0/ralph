@@ -63,6 +63,8 @@ SH
 chmod +x "$TMP/bin/npm"
 export NPM_LOG="$TMP/npm.log"
 export PROJECT_DIR="$TMP/proj"
+export ARTIFACT_DIR="$TMP/artifacts"
+export RALPH_VERIFICATION_FILE="$ARTIFACT_DIR/verification.json"
 export RALPH_VERIFY_DECLARED_COMMANDS=1
 unset RALPH_HEALTH_PORTS
 : > "$NPM_LOG"
@@ -82,6 +84,30 @@ chmod +x "$TMP/bin/npm"
 : > "$NPM_LOG"
 err=$(verify_runtime)
 [[ "$err" == *"Declared verification command failed: npm run build"* ]] && ok "failing declared command blocks runtime" || bad "missing declared command failure: $err"
+
+if command -v timeout >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    echo "== verify_runtime records timeout evidence and diagnosis =="
+    cat > "$TMP/bin/npm" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$NPM_LOG"
+if [[ "$*" == "test" ]]; then
+  echo "tests passed"
+  sleep 2
+fi
+exit 0
+SH
+    chmod +x "$TMP/bin/npm"
+    export RALPH_VERIFY_TIMEOUT=1
+    : > "$NPM_LOG"
+    err=$(verify_runtime)
+    [[ "$err" == *"Declared verification command failed: npm test"* && "$err" == *"timed out after 1s"* && "$err" == *"open server/listener/timer"* ]] \
+      && ok "timeout failure includes Node open-handle diagnosis" || bad "missing timeout diagnosis: $err"
+    jq -e '.commands | any(.command=="npm test" and .timed_out==true and .exit_code==124)' "$RALPH_VERIFICATION_FILE" >/dev/null \
+      && ok "verification evidence records timed-out command" || bad "verification evidence missing timeout record"
+    unset RALPH_VERIFY_TIMEOUT
+else
+    ok "timeout or jq unavailable; skipped timeout evidence fixture"
+fi
 
 echo "== verify_health_ports rejects unrelated services =="
 ss() {

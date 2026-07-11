@@ -72,6 +72,8 @@ Ralph revolves around a few durable files and stores:
 | `ralph_architecture.md` | Architecture notes and Mermaid diagrams. |
 | `.ralph_checkpoint` | Resume point for interrupted runs. |
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
+| `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
+| `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
 | `.ralph/artifacts/signals/` | Deduplicated recurring problems. |
 | `.ralph/artifacts/skills/` | Candidate and approved project-local fixes. |
 | `~/.config/ralph/skills/` | Optional cross-project skills. |
@@ -217,6 +219,7 @@ Common environment variables:
 | `VERBOSE` | Enable debug logs. |
 | `RALPH_UNATTENDED` | Same behavior as `--unattended`. |
 | `RALPH_TOOL_TIMEOUT` | Per-iteration timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
+| `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
 | `RALPH_RESUME_SESSION` | Reuse supported tool sessions within a run. |
@@ -233,6 +236,8 @@ Common environment variables:
 | `RALPH_QUALITY_TIER` | Requested quality tier for `QUALITY.md`, default `professional` (`prototype`, `professional`, `production-ready`, or `enterprise-grade`). |
 | `RALPH_VERIFY_DECLARED_COMMANDS` | Run safe declared checks from `ralph.json` or package scripts during completion verification, default `1`. |
 | `RALPH_VERIFY_TIMEOUT` | Per-command timeout for declared verification checks, default `120` seconds. |
+| `RALPH_VERIFICATION_FILE` | Override the verification evidence path, default `.ralph/artifacts/verification.json`. |
+| `RALPH_WRITE_VERIFICATION_EVIDENCE` | Set to `0` to disable writing verification evidence. |
 | `RALPH_HEALTH_PORTS` | Explicit comma- or space-separated ports to probe; unset disables liveness probes so unrelated local services are ignored. |
 | `RALPH_HEALTH_EXPECT` | Optional response substring required for a health probe to pass. |
 | `RALPH_HEALTH_ALLOW_EXTERNAL` | Set to `1` to allow health probes against ports whose owning process is not rooted in the project. |

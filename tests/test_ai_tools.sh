@@ -69,8 +69,29 @@ unset RALPH_RESUME_SESSION _RALPH_SESSION_ESTABLISHED
 
 echo "== opencode: run --model, prompt-as-arg =="
 _build_ai_cmd opencode "prov/mod"
-[[ "${_AI_CMD[*]}" == "opencode run --model prov/mod" ]] && ok "opencode run --model" || bad "opencode cmd: ${_AI_CMD[*]}"
+[[ "${_AI_CMD[*]}" == "opencode run --format json --model prov/mod" ]] && ok "opencode run uses JSON events + --model" || bad "opencode cmd: ${_AI_CMD[*]}"
 eq "opencode not stdin" 0 "$_AI_STDIN"
+export RALPH_OPENCODE_JSON=0
+_build_ai_cmd opencode "prov/mod"
+[[ "${_AI_CMD[*]}" == "opencode run --model prov/mod" ]] && ok "opencode JSON mode can be disabled" || bad "opencode JSON opt-out failed: ${_AI_CMD[*]}"
+unset RALPH_OPENCODE_JSON
+
+echo "== opencode JSON output normalizes to plain agent text + provider evidence =="
+if command -v jq >/dev/null 2>&1; then
+    oj=$(mktemp -d); export RUN_DIR="$oj/run"
+    mkdir -p "$RUN_DIR"
+    printf '%s\n' \
+      '{"type":"message.updated","sessionID":"sess_123","message":{"role":"assistant","content":[{"type":"text","text":"Implemented feature.\n<promise>COMPLETE</promise>"}]}}' \
+      '{"type":"session.finished","sessionID":"sess_123","status":"completed"}' > "$oj/out"
+    normalize_opencode_json_output "$oj/out" "$oj/log"
+    grep -q '<promise>COMPLETE</promise>' "$oj/out" && ok "normalized opencode JSON preserves completion text" || bad "completion text missing after normalization: $(cat "$oj/out")"
+    jq -e '.provider=="opencode" and .event_count==2 and (.sessions[0]=="sess_123")' "$RUN_DIR/providers/opencode.json" >/dev/null \
+      && ok "opencode provider evidence persisted" || bad "opencode provider evidence missing/invalid"
+    unset RUN_DIR
+    rm -rf "$oj"
+else
+    ok "jq unavailable; skipped opencode JSON normalization fixture"
+fi
 
 echo "== agy: --model wired (agy DOES accept it), --print must stay LAST =="
 _build_ai_cmd agy "Gemini 3.5 Flash (Low)"; eq "agy rc" 0 "$?"
