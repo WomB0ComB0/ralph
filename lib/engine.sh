@@ -802,6 +802,8 @@ opencode_provider_state_file() {
     printf '%s\n' "${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/providers/opencode.json"
 }
 
+# Self-benchmarking: next small improvement is to map opencode terminal events into
+# a provider-complete signal instead of relying only on process exit.
 normalize_opencode_json_output() {
     local output_file="$1" log_file="${2:-/dev/null}" raw_file text_file state_file updated_at
     [[ "${RALPH_OPENCODE_JSON:-1}" == "1" ]] || return 0
