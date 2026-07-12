@@ -281,6 +281,9 @@ jules_wait_for_completion() {
         jules_write_state "$state_file" "$session_json" "$prompt_hash" "$source" "$branch" "$mode"
         jules_remote_progress "$state" "$session_name"
         printf 'Jules session %s state=%s\n' "$session_name" "$state" >>"$log_file"
+        if declare -F run_manifest_heartbeat >/dev/null 2>&1; then
+            run_manifest_heartbeat "remote_${state,,}" "${_RALPH_CURRENT_ITERATION:-0}" 0 || true
+        fi
 
         case "$state" in
             COMPLETED)

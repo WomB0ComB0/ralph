@@ -17,6 +17,9 @@ SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 # shellcheck source=lib/utils.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/utils.sh"
+# shellcheck source=lib/run_manifest.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/run_manifest.sh"
 # shellcheck source=lib/engine.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/engine.sh"

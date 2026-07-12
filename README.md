@@ -72,6 +72,7 @@ Ralph revolves around a few durable files and stores:
 | `ralph_architecture.md` | Architecture notes and Mermaid diagrams. |
 | `.ralph_checkpoint` | Resume point for interrupted runs. |
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
+| `.ralph/runs/<run-id>/run.json` | Atomic lifecycle manifest with heartbeat, progress, limits, resume lineage, and terminal outcome. |
 | `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
 | `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
 | `.ralph/artifacts/live-smoke.json` | Opt-in live app smoke evidence: command, port, probes, diagnostics, and server log tail. |
@@ -79,6 +80,26 @@ Ralph revolves around a few durable files and stores:
 | `.ralph/artifacts/skills/` | Candidate and approved project-local fixes. |
 | `~/.config/ralph/skills/` | Optional cross-project skills. |
 | `~/.config/ralph/memory/` | Cross-project genetic memory. |
+
+## Run Lifecycle Evidence
+
+Every iterating run writes `.ralph/runs/<run-id>/run.json`. It is an allowlisted operational record: Ralph does not copy environment variables, prompts, provider responses, or secret values into this file.
+
+```bash
+jq '{run_id, status, reason, phase, heartbeat_at, current_iteration, progress}' .ralph/runs/latest/run.json
+```
+
+| Status | Meaning |
+|--------|---------|
+| `initializing` | Run directory and manifest exist; bootstrap is still in progress. |
+| `running` | The loop or a local/remote provider is active. |
+| `completed` | The completion gates passed or the tracked backlog drained. |
+| `paused` | An intentional `--once` scheduler handoff. |
+| `incomplete` | The iteration ceiling was reached before completion. |
+| `failed` | A model, provider, stall, budget, or unexpected process failure stopped the run. |
+| `interrupted` | HUP, INT, TERM, or a stale active manifest from an unclean exit. |
+
+Writes use same-directory temporary files and atomic renames. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected` and records the recovering run ID.
 
 ## Common Commands
 
@@ -222,6 +243,7 @@ Common environment variables:
 | `RALPH_TOOL_TIMEOUT` | Per-iteration hard timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
 | `RALPH_TOOL_IDLE_TIMEOUT` | Progress-aware quiescence timeout in seconds, default `180`; after project changes and declared verification discovery, a quiet provider is stopped and Ralph moves to validation. |
 | `RALPH_TOOL_IDLE_MIN_RUNTIME` / `RALPH_TOOL_IDLE_PROBE_INTERVAL` | Minimum runtime before quiescence can stop a provider, and the probe interval, defaults `30` and `2` seconds. |
+| `RALPH_RUN_HEARTBEAT_INTERVAL` | Minimum seconds between same-phase run-manifest heartbeats, default `15`; phase changes and iteration boundaries write immediately. |
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
@@ -307,6 +329,7 @@ See [`scripts/README.md`](scripts/README.md) for details.
 |-- ralph.sh                  # entry point
 |-- lib/
 |   |-- engine.sh             # core loop and validation
+|   |-- run_manifest.sh       # atomic run lifecycle evidence
 |   |-- lint.sh               # knowledge-store curator checks
 |   |-- signals.sh            # recurring-problem capture
 |   |-- skills.sh             # guarded skill capture and recall

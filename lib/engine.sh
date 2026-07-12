@@ -1092,6 +1092,7 @@ run_ai_tool() {
     update_status "Thinking" "$(basename "${PROJECT_DIR:-.}")"
 
     while kill -0 $pid 2>/dev/null; do
+        _run_manifest_heartbeat_safe provider_execution "${_RALPH_CURRENT_ITERATION:-$iteration}" 0
         if [[ "$_dur" -gt 0 && $((SECONDS - started_at)) -ge "$_dur" ]]; then
             timed_out=1
             log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process tree"
@@ -1583,6 +1584,7 @@ execute_iteration() {
     # a transient/API failure is NOT mistaken for "no work left to do". On full exhaustion we
     # return a distinct code (2) and emit a durable failure event. (Default chain = 1 model.)
     local ai_attempts="${AI_RETRY_ATTEMPTS:-3}"
+    _run_manifest_heartbeat_safe provider_execution "$iteration" 1
     if ! run_ai_with_fallback "$TOOL" "${RALPH_ROLE:-engineer}" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
         # Report the model actually used (the chain may have degraded past the primary).
         local used_model="${_RALPH_ACTIVE_MODEL:-$SELECTED_MODEL}"
@@ -1595,9 +1597,11 @@ execute_iteration() {
         emit_event "iteration_failed" "$fail_payload"
         store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $used_model)."
         record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $used_model did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
+        _run_manifest_heartbeat_safe provider_failed "$iteration" 1
         return 2
     fi
 
+    _run_manifest_heartbeat_safe verification "$iteration" 1
     end_ts=$(get_high_res_time)
     iteration_latency=$(echo "$end_ts - $start_ts" | bc 2>/dev/null || echo "0")
 
@@ -1732,6 +1736,7 @@ execute_iteration() {
         "[prompt](${RUN_DIR:-.}/steps/iter-$iteration/prompt.txt) · [output](${RUN_DIR:-.}/steps/iter-$iteration/output.txt)" \
         "" \
         "changed=$_changed · lazy_streak=${LAZY_STREAK:-0} · tokens=$est_tokens" || true
+    _run_manifest_heartbeat_safe iteration_complete "$iteration" 1
 
     # Check for completion signal
     if echo "$output" | grep -qF "<promise>COMPLETE</promise>"; then
@@ -1772,6 +1777,18 @@ $ready_tasks"
 #######################################
 # Main execution entry point
 #######################################
+_run_manifest_heartbeat_safe() {
+    if declare -F run_manifest_heartbeat >/dev/null 2>&1; then
+        run_manifest_heartbeat "$@" || true
+    fi
+}
+
+_set_run_outcome_safe() {
+    if declare -F set_run_outcome >/dev/null 2>&1; then
+        set_run_outcome "$@" || true
+    fi
+}
+
 main() {
     # Check for swarm command
     if [[ "${1:-}" == "swarm" ]]; then
@@ -1922,6 +1939,9 @@ main() {
     # prune old runs to bound disk growth.
     mkdir -p "$RUN_DIR/steps" 2>/dev/null || true
     chmod 700 "$RUN_DIR" 2>/dev/null || true   # step traces may contain prompt secrets
+    if declare -F init_run_manifest >/dev/null 2>&1; then
+        init_run_manifest || log_warning "Continuing without durable run manifest evidence"
+    fi
     ln -sfn "$RUN_DIR" "$_RALPH_DIR/runs/latest" 2>/dev/null || true
     prune_old_runs "$_RALPH_DIR/runs" "${RALPH_RUN_RETENTION:-20}"
 
@@ -1951,6 +1971,7 @@ main() {
     # Determine model to use
     determine_model || {
         log_error "Failed to determine model"
+        _set_run_outcome_safe failed model_selection_failed
         exit 1
     }
 
@@ -1976,6 +1997,7 @@ main() {
 
         if [[ "$last_checkpoint" =~ ^[0-9]+$ ]] && [[ $last_checkpoint -gt 0 ]]; then
             log_info "Resuming from checkpoint: Iteration $last_checkpoint"
+            _RALPH_RESUME_CHECKPOINT="$last_checkpoint"
             start_iter=$((last_checkpoint + 1))
 
             # Restore loop-control state so a resumed run keeps its lazy streak,
@@ -1990,8 +2012,13 @@ main() {
         fi
     fi
 
+    _run_manifest_heartbeat_safe ready "$((start_iter - 1))" 1
+
     # Main iteration loop
     for i in $(seq "$start_iter" "$MAX_ITERATIONS"); do
+
+        _RALPH_CURRENT_ITERATION="$i"
+        _run_manifest_heartbeat_safe iteration_prepare "$i" 1
 
         # Interactive mode: pause for user input
         if [[ "${INTERACTIVE_MODE:-false}" == "true" ]]; then
@@ -2019,6 +2046,7 @@ main() {
             log_success "╚══════════════════════════════════════╝"
             log_success "Completed at iteration $i of $MAX_ITERATIONS"
             review_run
+            _set_run_outcome_safe completed completion_signal
             exit 0
         elif [[ $iter_rc -eq 2 ]]; then
             CONSECUTIVE_FAILURES=$(( CONSECUTIVE_FAILURES + 1 ))
@@ -2026,6 +2054,7 @@ main() {
             if [[ $CONSECUTIVE_FAILURES -ge ${MAX_CONSECUTIVE_FAILURES:-3} ]]; then
                 log_error "Aborting: ${CONSECUTIVE_FAILURES} consecutive tool failures. Check connectivity, auth, or model availability."
                 send_notification "Ralph stopped" "Aborted after ${CONSECUTIVE_FAILURES} consecutive tool failures" "critical"
+                _set_run_outcome_safe failed provider_failure_circuit_breaker
                 exit 1
             fi
             log_warning "Backing off before re-attempting the loop..."
@@ -2048,6 +2077,7 @@ main() {
             if [[ $DRAIN_STREAK -ge 2 ]]; then
                 log_success "Task backlog drained for 2 iterations — all tracked work is complete."
                 review_run
+                _set_run_outcome_safe completed backlog_drained
                 exit 0
             fi
             log_info "Backlog appears drained (streak ${DRAIN_STREAK}/2); confirming on next iteration."
@@ -2066,6 +2096,7 @@ main() {
             record_signal stall_abort "run aborted after ${LAZY_STREAK} no-progress iterations" "stall-ceiling" "break the task down or intervene; the agent stopped changing state" "stall_abort" "high" >/dev/null 2>&1 || true
             send_notification "Ralph stopped" "Stalled: no progress for ${LAZY_STREAK} iterations" "critical"
             review_run
+            _set_run_outcome_safe failed stall_limit
             exit 1
         fi
 
@@ -2078,6 +2109,7 @@ main() {
             record_signal budget_abort "run aborted: ${_budget_reason}" "run-budget" "raise RALPH_MAX_RUN_TOKENS / RALPH_MAX_RUN_SECONDS, or split the work" "budget_abort" "high" >/dev/null 2>&1 || true
             send_notification "Ralph stopped" "Run budget exceeded: ${_budget_reason}" "critical"
             review_run
+            _set_run_outcome_safe failed budget_exceeded
             exit 1
         fi
 
@@ -2088,9 +2120,11 @@ main() {
                 # The in-process circuit breaker cannot accumulate across cron ticks,
                 # so alert here on a hard failure instead of exiting silently non-zero.
                 send_notification "Ralph (--once) failed" "Iteration $i tool failure; check logs" "critical"
+                _set_run_outcome_safe failed provider_failure
                 exit 1
             fi
             review_run
+            _set_run_outcome_safe paused single_iteration
             exit 0
         fi
     done
@@ -2106,6 +2140,7 @@ main() {
     log_info "Use --resume to continue from checkpoint"
 
     review_run
+    _set_run_outcome_safe incomplete max_iterations
     exit 1
 }
 

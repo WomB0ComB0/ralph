@@ -260,6 +260,12 @@ resolve_gitdiff_exclude() {
 #######################################
 cleanup_ralph() {
     local exit_code=$?
+
+    # Finalize only real iterating runs. Read-only subcommands and test harnesses
+    # never activate the manifest, so sourcing this library remains side-effect free.
+    if declare -F finalize_run_manifest >/dev/null 2>&1; then
+        finalize_run_manifest "$exit_code" >/dev/null 2>&1 || true
+    fi
     
     # Clean from registry (more reliable)
     if [[ -f "$_RALPH_TEMP_REGISTRY" ]]; then
@@ -277,7 +283,28 @@ cleanup_ralph() {
     exit "$exit_code"
 }
 
-trap cleanup_ralph EXIT INT TERM
+handle_ralph_signal() {
+    local signal_name="${1:-TERM}" exit_code=143
+    case "$signal_name" in
+        HUP)  exit_code=129 ;;
+        INT)  exit_code=130 ;;
+        TERM) exit_code=143 ;;
+    esac
+
+    if declare -F set_run_outcome >/dev/null 2>&1; then
+        set_run_outcome interrupted "signal_${signal_name,,}" || true
+    fi
+
+    # EXIT owns cleanup and manifest finalization. Removing this signal trap first
+    # prevents recursive delivery while shutdown writes the final evidence.
+    trap - "$signal_name"
+    exit "$exit_code"
+}
+
+trap cleanup_ralph EXIT
+trap 'handle_ralph_signal HUP' HUP
+trap 'handle_ralph_signal INT' INT
+trap 'handle_ralph_signal TERM' TERM
 
 #######################################
 # Create a temporary file and track it for cleanup
