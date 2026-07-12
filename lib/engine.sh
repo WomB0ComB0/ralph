@@ -767,6 +767,51 @@ _ai_timeout_secs() {
     echo "$d"
 }
 
+_ai_idle_timeout_secs() {
+    local d="${RALPH_TOOL_IDLE_TIMEOUT:-180}"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=180
+    echo "$d"
+}
+
+_ai_idle_min_runtime_secs() {
+    local d="${RALPH_TOOL_IDLE_MIN_RUNTIME:-30}"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=30
+    echo "$d"
+}
+
+_ai_idle_probe_interval_secs() {
+    local d="${RALPH_TOOL_IDLE_PROBE_INTERVAL:-2}"
+    [[ "$d" =~ ^[0-9]+$ && "$d" -gt 0 ]] || d=2
+    echo "$d"
+}
+
+_file_size_bytes() {
+    local file="$1"
+    [[ -f "$file" ]] || { echo 0; return 0; }
+    wc -c < "$file" 2>/dev/null | tr -d '[:space:]' || echo 0
+}
+
+_ai_quiescence_verify_available() {
+    [[ "${RALPH_TOOL_IDLE_REQUIRE_VERIFY:-1}" == "1" ]] || return 0
+    local cmd
+    while IFS= read -r cmd; do
+        [[ -n "$cmd" ]] || continue
+        runtime_command_allowed "$cmd" && return 0
+    done < <(collect_runtime_commands "${PROJECT_DIR:-.}" 2>/dev/null || true)
+    return 1
+}
+
+_project_progress_fingerprint() {
+    if declare -F compute_project_hash >/dev/null 2>&1; then
+        compute_project_hash 2>/dev/null && return 0
+    fi
+    local project_dir="${PROJECT_DIR:-.}"
+    find "$project_dir" \
+        -path '*/.git' -prune -o \
+        -path '*/.ralph' -prune -o \
+        -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum_wrapper | awk '{print $1}'
+}
+
 # Name of the available GNU timeout binary (macOS+Homebrew coreutils ships it as gtimeout).
 # Echoes "timeout" | "gtimeout" | "" (none).
 _timeout_bin() {
@@ -1011,6 +1056,16 @@ run_ai_tool() {
         fi
     fi
 
+    local idle_timeout idle_min_runtime idle_probe_interval idle_last_probe=0 idle_last_activity=$SECONDS
+    local idle_last_out_size idle_last_log_size idle_last_hash idle_cur_out_size idle_cur_log_size idle_cur_hash
+    local idle_project_changed=0 idle_armed=0 idle_stopped=0
+    idle_timeout=$(_ai_idle_timeout_secs)
+    idle_min_runtime=$(_ai_idle_min_runtime_secs)
+    idle_probe_interval=$(_ai_idle_probe_interval_secs)
+    if [[ "$idle_timeout" -gt 0 ]]; then
+        idle_last_hash=$(_project_progress_fingerprint 2>/dev/null || echo unknown)
+    fi
+
     # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
     # leak into the parent shell or later iterations. stderr (tool diagnostics) goes to the
     # log only; stdout (the actual answer) goes to BOTH log and output_file, so the captured
@@ -1029,6 +1084,10 @@ run_ai_tool() {
 
     # Animated spinner while tool runs
     local i=0 timed_out=0 started_at=$SECONDS
+    if [[ "$idle_timeout" -gt 0 ]]; then
+        idle_last_out_size=$(_file_size_bytes "$output_file")
+        idle_last_log_size=$(_file_size_bytes "$log_file")
+    fi
     start_progress_timer
     update_status "Thinking" "$(basename "${PROJECT_DIR:-.}")"
 
@@ -1044,6 +1103,41 @@ run_ai_tool() {
             fi
             break
         fi
+
+        if [[ "$idle_timeout" -gt 0 && $((SECONDS - idle_last_probe)) -ge "$idle_probe_interval" ]]; then
+            idle_last_probe=$SECONDS
+            idle_cur_out_size=$(_file_size_bytes "$output_file")
+            idle_cur_log_size=$(_file_size_bytes "$log_file")
+            idle_cur_hash=$(_project_progress_fingerprint 2>/dev/null || echo unknown)
+
+            log_debug "quiescence probe: out=$idle_cur_out_size log=$idle_cur_log_size changed=$idle_project_changed armed=$idle_armed idle_for=$((SECONDS - idle_last_activity))s"
+            if [[ "$idle_cur_out_size" != "$idle_last_out_size" || "$idle_cur_log_size" != "$idle_last_log_size" || "$idle_cur_hash" != "$idle_last_hash" ]]; then
+                idle_last_activity=$SECONDS
+                [[ "$idle_cur_hash" != "$idle_last_hash" ]] && idle_project_changed=1
+                idle_last_out_size="$idle_cur_out_size"
+                idle_last_log_size="$idle_cur_log_size"
+                idle_last_hash="$idle_cur_hash"
+            fi
+
+            if [[ "$idle_project_changed" == "1" && "$idle_armed" == "0" ]] && _ai_quiescence_verify_available; then
+                idle_armed=1
+                idle_last_activity=$SECONDS
+                log_info "AI quiescence watchdog armed after project progress and declared verification discovery"
+            fi
+
+            if [[ "$idle_armed" == "1" && $((SECONDS - started_at)) -ge "$idle_min_runtime" && $((SECONDS - idle_last_activity)) -ge "$idle_timeout" ]]; then
+                idle_stopped=1
+                log_warning "AI tool quiet after project progress for ${idle_timeout}s; terminating process tree and moving to verification"
+                printf 'AI tool quiet after project progress for %ss; terminating process tree and moving to verification\n' "$idle_timeout" >>"$log_file"
+                _kill_process_tree TERM "$pid"
+                sleep 1
+                if kill -0 "$pid" 2>/dev/null; then
+                    _kill_process_tree KILL "$pid"
+                fi
+                break
+            fi
+        fi
+
         render_status_bar "$iteration" "$MAX_ITERATIONS" "$i"
         i=$(( (i+1) % 10 ))
         sleep 0.1
@@ -1053,6 +1147,7 @@ run_ai_tool() {
     exit_code=0
     wait "$pid" || exit_code=$?
     [[ "$timed_out" -eq 1 ]] && exit_code=124
+    [[ "$idle_stopped" -eq 1 ]] && exit_code=0
 
     if [[ "$tool" == "opencode" ]] && declare -F normalize_opencode_json_output >/dev/null 2>&1; then
         normalize_opencode_json_output "$output_file" "$log_file"
@@ -2478,6 +2573,128 @@ _health_port_owned_by_project() {
     return 1
 }
 
+live_smoke_evidence_file() {
+    printf '%s\n' "${RALPH_LIVE_SMOKE_FILE:-${ARTIFACT_DIR:-${PROJECT_DIR:-.}/.ralph/artifacts}/live-smoke.json}"
+}
+
+runtime_server_command_allowed() {
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+    [[ "$cmd" != *$'\n'* && "$cmd" != *$'\r'* ]] || return 1
+    [[ "$cmd" != *";"* && "$cmd" != *"&"* && "$cmd" != *"|"* && "$cmd" != *"<"* && "$cmd" != *">"* ]] || return 1
+    [[ "$cmd" != *'`'* && "$cmd" != *'$('* && "$cmd" != *'${'* ]] || return 1
+    [[ "$cmd" =~ ^(npm|pnpm|bun|yarn)[[:space:]]+(start|run[[:space:]]+[A-Za-z0-9:_-]+)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    return 1
+}
+
+collect_live_smoke_command() {
+    local project_dir="${1:-.}" pm value
+    if [[ -n "${RALPH_LIVE_SMOKE_COMMAND:-}" ]]; then
+        runtime_server_command_allowed "$RALPH_LIVE_SMOKE_COMMAND" && printf '%s\n' "$RALPH_LIVE_SMOKE_COMMAND"
+        return $?
+    fi
+    command_exists jq || return 1
+    [[ -f "$project_dir/package.json" ]] || return 1
+    value=$(jq -r '.scripts.start // empty' "$project_dir/package.json" 2>/dev/null || true)
+    [[ -n "$value" ]] || return 1
+    pm=$(runtime_package_manager "$project_dir")
+    printf '%s\n' "$pm start"
+}
+
+write_live_smoke_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local status="$1" command="$2" port="$3" probes_json="$4" log_file="$5" diagnostic="${6:-}"
+    local file updated_at log_tail
+    file=$(live_smoke_evidence_file)
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    log_tail=$(tail -n 80 "$log_file" 2>/dev/null || true)
+    [[ "$port" =~ ^[0-9]+$ ]] || port=0
+    [[ -n "$probes_json" ]] || probes_json='[]'
+    jq -n \
+        --arg status "$status" \
+        --arg command "$command" \
+        --argjson port "$port" \
+        --arg updated_at "$updated_at" \
+        --arg diagnostic "$diagnostic" \
+        --arg log_tail "$log_tail" \
+        --argjson probes "$probes_json" \
+        '{schema_version:1, status:$status, command:$command, port:$port, updated_at:$updated_at, diagnostic:$diagnostic, probes:$probes, log_tail:$log_tail}' \
+        > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
+run_live_smoke() {
+    local project_dir="${1:-.}" errors=""
+    [[ "${RALPH_LIVE_SMOKE:-0}" == "1" ]] || return 0
+    command_exists curl || { printf '%s' $'\n- Live smoke failed: missing curl.'; return 0; }
+    command_exists jq || { printf '%s' $'\n- Live smoke failed: missing jq.'; return 0; }
+
+    local cmd port ready_timeout paths log_file probe_file pid started_at pass=false path url code probes_json status diagnostic
+    if ! cmd=$(collect_live_smoke_command "$project_dir"); then
+        printf '%s' $'\n- Live smoke failed: no safe start command found. Add package.json scripts.start or set RALPH_LIVE_SMOKE_COMMAND.'
+        return 0
+    fi
+    if ! runtime_server_command_allowed "$cmd"; then
+        printf '%s\n' "- Live smoke failed: server command rejected as unsafe: $cmd"
+        return 0
+    fi
+
+    port="${RALPH_LIVE_SMOKE_PORT:-18080}"
+    [[ "$port" =~ ^[0-9]+$ ]] || port=18080
+    ready_timeout="${RALPH_LIVE_SMOKE_READY_TIMEOUT:-20}"
+    [[ "$ready_timeout" =~ ^[0-9]+$ ]] || ready_timeout=20
+    paths="${RALPH_LIVE_SMOKE_PATHS:-/health /api/health /api/v1/status /}"
+    log_file="${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/live-smoke.log"
+    mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+    probe_file=$(mktemp "${TMPDIR:-/tmp}/ralph-live-smoke.XXXXXX") || probe_file="/tmp/ralph-live-smoke.$$"
+    : > "$probe_file"
+
+    (cd "$project_dir" && PORT="$port" HOST=127.0.0.1 bash -lc "$cmd") >"$log_file" 2>&1 &
+    pid=$!
+    started_at=$SECONDS
+
+    while kill -0 "$pid" 2>/dev/null && [[ $((SECONDS - started_at)) -lt "$ready_timeout" ]]; do
+        for path in $paths; do
+            [[ "$path" == /* ]] || path="/$path"
+            url="http://127.0.0.1:${port}${path}"
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+            [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+            local code_num ok_json=false
+            code_num=$((10#$code))
+            [[ "$code" =~ ^[23] ]] && ok_json=true
+            jq -n --arg path "$path" --arg url "$url" --argjson code "$code_num" --argjson ok "$ok_json" \
+                '{path:$path,url:$url,http_code:$code,ok:$ok}' >> "$probe_file" 2>/dev/null || true
+            if [[ "$ok_json" == "true" ]]; then
+                pass=true
+                break 2
+            fi
+        done
+        sleep 1
+    done
+
+    _kill_process_tree TERM "$pid"
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        _kill_process_tree KILL "$pid"
+    fi
+    wait "$pid" >/dev/null 2>&1 || true
+
+    probes_json=$(jq -s '.' "$probe_file" 2>/dev/null || echo '[]')
+    rm -f "$probe_file" 2>/dev/null || true
+    if [[ "$pass" == "true" ]]; then
+        status=pass
+        diagnostic=""
+        log_success "Live smoke passed on port $port"
+    else
+        status=fail
+        diagnostic="no configured live-smoke endpoint returned HTTP 2xx/3xx before ${ready_timeout}s"
+        errors+=$'\n'"- Live smoke failed: $diagnostic."
+    fi
+    write_live_smoke_evidence "$status" "$cmd" "$port" "$probes_json" "$log_file" "$diagnostic"
+    printf '%s' "$errors"
+}
+
 verify_health_ports() {
     local project_dir="${1:-.}" errors="" port ep url code body
     local ports=()
@@ -2605,7 +2822,13 @@ verify_runtime() {
         done < <(collect_runtime_commands "$project_dir")
     fi
 
-    # 6. Explicit liveness probes. Ports are opt-in to avoid matching unrelated local services.
+    # 6. Optional first-class live smoke: start the declared app, probe localhost,
+    # persist evidence, and tear the server down before normal health-port checks.
+    local live_smoke_errors
+    live_smoke_errors=$(run_live_smoke "$project_dir")
+    [[ -n "$live_smoke_errors" ]] && errors+="$live_smoke_errors"
+
+    # 7. Explicit liveness probes. Ports are opt-in to avoid matching unrelated local services.
     local health_errors
     health_errors=$(verify_health_ports "$project_dir")
     [[ -n "$health_errors" ]] && errors+="$health_errors"

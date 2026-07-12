@@ -74,6 +74,7 @@ Ralph revolves around a few durable files and stores:
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
 | `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
 | `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
+| `.ralph/artifacts/live-smoke.json` | Opt-in live app smoke evidence: command, port, probes, diagnostics, and server log tail. |
 | `.ralph/artifacts/signals/` | Deduplicated recurring problems. |
 | `.ralph/artifacts/skills/` | Candidate and approved project-local fixes. |
 | `~/.config/ralph/skills/` | Optional cross-project skills. |
@@ -218,7 +219,9 @@ Common environment variables:
 | `LOG_FILE` | Log path, default `ralph.log`. |
 | `VERBOSE` | Enable debug logs. |
 | `RALPH_UNATTENDED` | Same behavior as `--unattended`. |
-| `RALPH_TOOL_TIMEOUT` | Per-iteration timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
+| `RALPH_TOOL_TIMEOUT` | Per-iteration hard timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
+| `RALPH_TOOL_IDLE_TIMEOUT` | Progress-aware quiescence timeout in seconds, default `180`; after project changes and declared verification discovery, a quiet provider is stopped and Ralph moves to validation. |
+| `RALPH_TOOL_IDLE_MIN_RUNTIME` / `RALPH_TOOL_IDLE_PROBE_INTERVAL` | Minimum runtime before quiescence can stop a provider, and the probe interval, defaults `30` and `2` seconds. |
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
@@ -238,6 +241,8 @@ Common environment variables:
 | `RALPH_VERIFY_TIMEOUT` | Per-command timeout for declared verification checks, default `120` seconds. |
 | `RALPH_VERIFICATION_FILE` | Override the verification evidence path, default `.ralph/artifacts/verification.json`. |
 | `RALPH_WRITE_VERIFICATION_EVIDENCE` | Set to `0` to disable writing verification evidence. |
+| `RALPH_LIVE_SMOKE` | Set to `1` to start the declared app, probe localhost, persist `.ralph/artifacts/live-smoke.json`, and tear the server down during verification. |
+| `RALPH_LIVE_SMOKE_COMMAND` / `RALPH_LIVE_SMOKE_PORT` / `RALPH_LIVE_SMOKE_PATHS` | Optional live-smoke overrides; default command is `npm|pnpm|bun|yarn start`, default port `18080`, default paths `/health /api/health /api/v1/status /`. |
 | `RALPH_HEALTH_PORTS` | Explicit comma- or space-separated ports to probe; unset disables liveness probes so unrelated local services are ignored. |
 | `RALPH_HEALTH_EXPECT` | Optional response substring required for a health probe to pass. |
 | `RALPH_HEALTH_ALLOW_EXTERNAL` | Set to `1` to allow health probes against ports whose owning process is not rooted in the project. |

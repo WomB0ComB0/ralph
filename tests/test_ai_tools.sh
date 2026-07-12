@@ -176,6 +176,33 @@ eq "hung tool returns timeout rc" 124 "$watchdog_rc"
 grep -q "exceeded RALPH_TOOL_TIMEOUT=1s" "$lf" && ok "timeout warning logged" || bad "timeout warning missing"
 rm -rf "$wdir"
 
+echo "== run_ai_tool quiescence: quiet-after-change provider is gracefully stopped =="
+if command -v jq >/dev/null 2>&1; then
+    qdir=$(mktemp -d); qstub="$qdir/bin"; mkdir -p "$qstub" "$qdir/proj"
+    cat > "$qstub/opencode" <<'SH'
+#!/bin/bash
+printf 'implemented files, still parked\n'
+printf '%s\n' '{"scripts":{"test":"node --test"}}' > "$PROJECT_DIR/package.json"
+printf 'done\n' > "$PROJECT_DIR/result.txt"
+sleep 30
+SH
+    chmod +x "$qstub/opencode"
+    lf="$qdir/log"; of="$qdir/out"; : > "$lf"; : > "$of"
+    export PATH="$qstub:$PATH"
+    export RALPH_TOOL_TIMEOUT=20 RALPH_TOOL_IDLE_TIMEOUT=1 RALPH_TOOL_IDLE_MIN_RUNTIME=0 RALPH_TOOL_IDLE_PROBE_INTERVAL=1 PROJECT_DIR="$qdir/proj" RALPH_OPENCODE_JSON=0
+    iteration=1; MAX_ITERATIONS=1
+    start_quiet=$SECONDS
+    run_ai_tool opencode "" "prompt" "$lf" "$of"; quiet_rc=$?
+    quiet_elapsed=$((SECONDS - start_quiet))
+    eq "quiet-after-change stop returns success" 0 "$quiet_rc"
+    [[ "$quiet_elapsed" -lt 8 ]] && ok "quiescence returned promptly (${quiet_elapsed}s)" || bad "quiescence took too long (${quiet_elapsed}s)"
+    grep -q "quiet after project progress" "$lf" && ok "quiescence warning logged" || bad "quiescence warning missing"
+    unset RALPH_TOOL_TIMEOUT RALPH_TOOL_IDLE_TIMEOUT RALPH_TOOL_IDLE_MIN_RUNTIME RALPH_TOOL_IDLE_PROBE_INTERVAL RALPH_OPENCODE_JSON PROJECT_DIR
+    rm -rf "$qdir"
+else
+    ok "jq unavailable; skipped quiescence fixture"
+fi
+
 echo "== per-tool env is subshell-scoped (must NOT leak to the parent) =="
 unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"

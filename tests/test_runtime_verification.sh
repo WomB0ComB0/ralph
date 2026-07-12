@@ -23,6 +23,7 @@ PATH="$TMP/bin:$PATH"; export PATH
 cat > "$TMP/proj/package.json" <<'JSON'
 {
   "scripts": {
+    "start": "node server.js",
     "test": "node --test",
     "build": "node build.js",
     "lint": "eslint ."
@@ -107,6 +108,38 @@ SH
     unset RALPH_VERIFY_TIMEOUT
 else
     ok "timeout or jq unavailable; skipped timeout evidence fixture"
+fi
+
+if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    echo "== verify_runtime live smoke starts and tears down declared app =="
+    printf '%s\n' 'hello live smoke' > "$TMP/proj/index.html"
+    cat > "$TMP/bin/npm" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$NPM_LOG"
+case "$*" in
+  start) python3 -m http.server "${PORT:-18080}" --bind 127.0.0.1 ;;
+  test|"run build"|"run lint"|"run smoke -- --quick") exit 0 ;;
+  *) exit 9 ;;
+esac
+SH
+    chmod +x "$TMP/bin/npm"
+    export RALPH_LIVE_SMOKE=1
+    export RALPH_LIVE_SMOKE_PORT=18191
+    export RALPH_LIVE_SMOKE_READY_TIMEOUT=5
+    export RALPH_LIVE_SMOKE_PATHS="/"
+    export RALPH_LIVE_SMOKE_FILE="$ARTIFACT_DIR/live-smoke.json"
+    : > "$NPM_LOG"
+    err=$(verify_runtime)
+    eq "live smoke verification passes" "" "$err"
+    jq -e '.status=="pass" and .port==18191 and (.probes | any(.path=="/" and .ok==true))' "$RALPH_LIVE_SMOKE_FILE" >/dev/null       && ok "live smoke evidence records passing probe" || bad "live smoke evidence missing/invalid"
+    if curl -fsS "http://127.0.0.1:18191/" >/dev/null 2>&1; then
+        bad "live smoke server was left running"
+    else
+        ok "live smoke server is torn down"
+    fi
+    unset RALPH_LIVE_SMOKE RALPH_LIVE_SMOKE_PORT RALPH_LIVE_SMOKE_READY_TIMEOUT RALPH_LIVE_SMOKE_PATHS RALPH_LIVE_SMOKE_FILE
+else
+    ok "curl, python3, or jq unavailable; skipped live smoke fixture"
 fi
 
 echo "== verify_health_ports rejects unrelated services =="
