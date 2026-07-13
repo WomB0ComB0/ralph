@@ -937,14 +937,18 @@ setup_sandbox() {
         
         # Check if Dockerfile is newer than image
         local dockerfile_time image_time
-        dockerfile_time=$(stat -f %m "$dockerfile_path" 2>/dev/null || stat -c %Y "$dockerfile_path" 2>/dev/null)
+        dockerfile_time=$(stat -c %Y "$dockerfile_path" 2>/dev/null ||
+            stat -f %m "$dockerfile_path" 2>/dev/null || true)
         image_time=$(docker image inspect -f '{{.Created}}' "${image_name}:${image_tag}" | xargs -I {} date -d {} +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S" "$(docker image inspect -f '{{.Created}}' "${image_name}:${image_tag}" | cut -d. -f1)" +%s 2>/dev/null)
         
-        if [[ -n "$dockerfile_time" && -n "$image_time" && "$dockerfile_time" -gt "$image_time" ]]; then
+        if [[ "$dockerfile_time" =~ ^[0-9]+$ && "$image_time" =~ ^[0-9]+$ &&
+              "$dockerfile_time" -gt "$image_time" ]]; then
             log_info "Dockerfile has been modified, rebuilding image..."
-        else
+        elif [[ "$dockerfile_time" =~ ^[0-9]+$ && "$image_time" =~ ^[0-9]+$ ]]; then
             log_success "Sandbox image is up-to-date"
             return 0
+        else
+            log_warning "Unable to compare Dockerfile and image timestamps; rebuilding defensively."
         fi
     fi
 
@@ -981,6 +985,9 @@ RUN apt-get update && apt-get install -y \
     curl \
     wget \
     jq \
+    python3 \
+    bc \
+    sqlite3 \
     util-linux \
     ca-certificates \
     gnupg \

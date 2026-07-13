@@ -1010,6 +1010,7 @@ run_ai_tool() {
     log_debug "Prompt length: ${#prompt} characters"
 
     local pid i exit_code guardian_pid="" cleanup_recorded=0 cleanup_trigger=normal
+    local supervisor_path state_file ack_file
 
     if [[ "$tool" == "jules" ]]; then
         if ! declare -F run_jules_remote >/dev/null 2>&1; then
@@ -1044,17 +1045,7 @@ run_ai_tool() {
         log_error "Unknown tool: $tool"
         return 1
     fi
-    # Hard wall-clock backstop so a hung tool can't block the loop forever (exit 124 on
-    # timeout, which the retry/circuit-breaker then treats as a failed iteration).
-    local -a tmo=(); local _dur _to; _dur=$(_ai_timeout_secs); _to=$(_timeout_bin)
-    if [[ "$_dur" -gt 0 ]]; then
-        if [[ -n "$_to" ]]; then
-            tmo=("$_to" --kill-after=15 "$_dur")
-        elif [[ -z "${_RALPH_TIMEOUT_WARNED:-}" ]]; then
-            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but neither 'timeout' nor 'gtimeout' is installed; using Ralph internal watchdog only"
-            _RALPH_TIMEOUT_WARNED=1
-        fi
-    fi
+    local _dur; _dur=$(_ai_timeout_secs)
 
     local idle_timeout idle_min_runtime idle_probe_interval idle_last_probe=0 idle_last_activity=$SECONDS
     local idle_last_out_size idle_last_log_size idle_last_hash idle_cur_out_size idle_cur_log_size idle_cur_hash
@@ -1066,26 +1057,67 @@ run_ai_tool() {
         idle_last_hash=$(_project_progress_fingerprint 2>/dev/null || echo unknown)
     fi
 
-    # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
-    # leak into the parent shell or later iterations. stderr (tool diagnostics) goes to the
-    # log only; stdout (the actual answer) goes to BOTH log and output_file, so the captured
-    # result + per-step trace are clean for emptiness/observability.
-    # shellcheck disable=SC2094  # both redirections to $log_file are APPENDS (2>> and tee -a),
-    # not a read+overwrite — concurrent O_APPEND writes are atomic, so this is safe by design.
+    # The tracked PID is a supervisor outside a new child session/process group. It owns
+    # stdout/stderr capture, so no pipeline process can obscure provider ownership.
+    if ! declare -F prepare_supervised_process >/dev/null 2>&1 ||
+       ! supervisor_path=$(_ralph_process_supervisor_path) ||
+       ! prepare_supervised_process; then
+        log_error "Unable to prepare the isolated provider process boundary"
+        return 1
+    fi
+    state_file="$_RALPH_BOUNDARY_STATE_FILE"
+    ack_file="$_RALPH_BOUNDARY_ACK_FILE"
+
+    # Per-tool environment changes remain inside the launch subshell. Closing fd 9
+    # before exec prevents providers and the supervisor from retaining Ralph's lock.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        ( { exec 9>&-; } 2>/dev/null || true; _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        (
+            { exec 9>&-; } 2>/dev/null || true
+            _apply_tool_env "$tool"
+            exec python3 "$supervisor_path" \
+                --state-file "$state_file" \
+                --ack-file "$ack_file" \
+                --log-file "$log_file" \
+                --stdout-file "$output_file" \
+                -- "${_AI_CMD[@]}" <<<"$prompt"
+        ) &
     else
-        # Redirect stdin from /dev/null: these tools take the prompt as an argv, and some (e.g.
-        # opencode run) abort immediately on a non-interactive/inherited stdin. A clean EOF makes
-        # the autonomous invocation behave the same as an interactive one.
-        ( { exec 9>&-; } 2>/dev/null || true; _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        (
+            { exec 9>&-; } 2>/dev/null || true
+            _apply_tool_env "$tool"
+            exec python3 "$supervisor_path" \
+                --state-file "$state_file" \
+                --ack-file "$ack_file" \
+                --log-file "$log_file" \
+                --stdout-file "$output_file" \
+                -- "${_AI_CMD[@]}" "$prompt" </dev/null
+        ) &
     fi
     pid=$!
-    if declare -F register_child_process >/dev/null 2>&1; then
-        register_child_process "$pid" provider || true
+    if ! register_supervised_process "$pid" provider "$state_file" "$ack_file" 0; then
+        log_error "Provider process boundary failed identity validation"
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
     fi
-    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}" provider; then
-        guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    if ! start_child_guardian "$pid" "${BASHPID:-$$}" provider; then
+        log_error "Provider process boundary guardian failed to start"
+        terminate_owned_process "$pid" provider exit 0
+        wait "$pid" 2>/dev/null || true
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
+    fi
+    guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    if ! release_supervised_process "$pid" "$ack_file"; then
+        log_error "Provider process boundary failed to release"
+        terminate_owned_process "$pid" provider exit 0
+        wait "$pid" 2>/dev/null || true
+        stop_child_guardian "$guardian_pid"
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
     fi
 
     # Animated spinner while tool runs
@@ -1101,10 +1133,10 @@ run_ai_tool() {
         _run_manifest_heartbeat_safe provider_execution "${_RALPH_CURRENT_ITERATION:-$iteration}" 0
         if [[ "$_dur" -gt 0 && $((SECONDS - started_at)) -ge "$_dur" ]]; then
             timed_out=1
-            log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process tree"
-            printf 'AI tool exceeded RALPH_TOOL_TIMEOUT=%ss; terminating process tree\n' "$_dur" >>"$log_file"
+            log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process boundary"
+            printf 'AI tool exceeded RALPH_TOOL_TIMEOUT=%ss; terminating process boundary\n' "$_dur" >>"$log_file"
             if declare -F terminate_owned_process >/dev/null 2>&1; then
-                terminate_owned_process "$pid" provider timeout 1
+                terminate_owned_process "$pid" provider timeout
                 cleanup_recorded=1
             else
                 _kill_process_tree TERM "$pid"
@@ -1139,10 +1171,10 @@ run_ai_tool() {
 
             if [[ "$idle_armed" == "1" && $((SECONDS - started_at)) -ge "$idle_min_runtime" && $((SECONDS - idle_last_activity)) -ge "$idle_timeout" ]]; then
                 idle_stopped=1
-                log_warning "AI tool quiet after project progress for ${idle_timeout}s; terminating process tree and moving to verification"
-                printf 'AI tool quiet after project progress for %ss; terminating process tree and moving to verification\n' "$idle_timeout" >>"$log_file"
+                log_warning "AI tool quiet after project progress for ${idle_timeout}s; terminating process boundary and moving to verification"
+                printf 'AI tool quiet after project progress for %ss; terminating process boundary and moving to verification\n' "$idle_timeout" >>"$log_file"
                 if declare -F terminate_owned_process >/dev/null 2>&1; then
-                    terminate_owned_process "$pid" provider quiescence 1
+                    terminate_owned_process "$pid" provider quiescence
                     cleanup_recorded=1
                 else
                     _kill_process_tree TERM "$pid"
@@ -2696,6 +2728,7 @@ run_live_smoke() {
     command_exists jq || { printf '%s' $'\n- Live smoke failed: missing jq.'; return 0; }
 
     local cmd port ready_timeout paths log_file probe_file pid guardian_pid="" started_at pass=false path url code probes_json status diagnostic
+    local supervisor_path state_file ack_file
     if ! cmd=$(collect_live_smoke_command "$project_dir"); then
         printf '%s' $'\n- Live smoke failed: no safe start command found. Add package.json scripts.start or set RALPH_LIVE_SMOKE_COMMAND.'
         return 0
@@ -2715,13 +2748,51 @@ run_live_smoke() {
     probe_file=$(mktemp "${TMPDIR:-/tmp}/ralph-live-smoke.XXXXXX") || probe_file="/tmp/ralph-live-smoke.$$"
     : > "$probe_file"
 
-    ({ exec 9>&-; } 2>/dev/null || true; cd "$project_dir" && PORT="$port" HOST=127.0.0.1 bash -lc "$cmd") >"$log_file" 2>&1 &
-    pid=$!
-    if declare -F register_child_process >/dev/null 2>&1; then
-        register_child_process "$pid" live_smoke || true
+    if ! declare -F prepare_supervised_process >/dev/null 2>&1 ||
+       ! supervisor_path=$(_ralph_process_supervisor_path) ||
+       ! prepare_supervised_process; then
+        rm -f "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: unable to prepare the isolated server process boundary.'
+        return 0
     fi
-    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}" live_smoke; then
-        guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    state_file="$_RALPH_BOUNDARY_STATE_FILE"
+    ack_file="$_RALPH_BOUNDARY_ACK_FILE"
+    (
+        { exec 9>&-; } 2>/dev/null || true
+        cd "$project_dir" || exit 1
+        export PORT="$port" HOST=127.0.0.1
+        exec python3 "$supervisor_path" \
+            --state-file "$state_file" \
+            --ack-file "$ack_file" \
+            --log-file "$log_file" \
+            --merge-stderr \
+            -- bash -lc "$cmd" </dev/null
+    ) &
+    pid=$!
+    if ! register_supervised_process "$pid" live_smoke "$state_file" "$ack_file" 0; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary failed identity validation.'
+        return 0
+    fi
+    if ! start_child_guardian "$pid" "${BASHPID:-$$}" live_smoke; then
+        terminate_owned_process "$pid" live_smoke exit 0
+        wait "$pid" 2>/dev/null || true
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary guardian failed to start.'
+        return 0
+    fi
+    guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    if ! release_supervised_process "$pid" "$ack_file"; then
+        terminate_owned_process "$pid" live_smoke exit 0
+        wait "$pid" 2>/dev/null || true
+        stop_child_guardian "$guardian_pid"
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary failed to release.'
+        return 0
     fi
     started_at=$SECONDS
 
@@ -2745,7 +2816,7 @@ run_live_smoke() {
     done
 
     if declare -F terminate_owned_process >/dev/null 2>&1; then
-        terminate_owned_process "$pid" live_smoke verification 1
+        terminate_owned_process "$pid" live_smoke verification
     else
         _kill_process_tree TERM "$pid"
         sleep 1

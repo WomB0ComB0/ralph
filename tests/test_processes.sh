@@ -28,15 +28,34 @@ DESC_CHILD_PID=""
 OWNER_PID=""
 GUARD_CHILD_PID=""
 GUARDIAN_PID=""
+BOUNDARY_PID=""
 
 valid_pid() {
     local pid="${1:-}"
     [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 ))
 }
 
+launch_supervised_fixture() {
+    local log_file="$1" output_file="$2" supervisor_path state_file ack_file
+    shift 2
+    prepare_supervised_process || return 1
+    state_file="$_RALPH_BOUNDARY_STATE_FILE"
+    ack_file="$_RALPH_BOUNDARY_ACK_FILE"
+    supervisor_path=$(_ralph_process_supervisor_path) || return 1
+    python3 "$supervisor_path" \
+        --state-file "$state_file" \
+        --ack-file "$ack_file" \
+        --log-file "$log_file" \
+        --stdout-file "$output_file" \
+        -- "$@" &
+    BOUNDARY_PID=$!
+    register_supervised_process "$BOUNDARY_PID" provider "$state_file" "$ack_file"
+}
+
 cleanup() {
     local pid
-    for pid in "$TERM_PID" "$KILL_PID" "$DISCOVERY_PID" "$IDENTITY_PID" "$DESC_ROOT_PID" "$DESC_CHILD_PID" "$OWNER_PID" "$GUARD_CHILD_PID" "$GUARDIAN_PID"; do
+    terminate_registered_processes 1 >/dev/null 2>&1 || true
+    for pid in "$TERM_PID" "$KILL_PID" "$DISCOVERY_PID" "$IDENTITY_PID" "$DESC_ROOT_PID" "$DESC_CHILD_PID" "$OWNER_PID" "$GUARD_CHILD_PID" "$GUARDIAN_PID" "$BOUNDARY_PID"; do
         if valid_pid "$pid"; then
             _ralph_terminate_process_tree KILL "$pid"
         fi
@@ -80,6 +99,158 @@ fi
 kill -KILL "$DISCOVERY_PID" 2>/dev/null || true
 wait "$DISCOVERY_PID" 2>/dev/null || true
 DISCOVERY_PID=""
+
+echo "== supervised process boundary protocol =="
+export RUN_DIR="$TMP/supervisor-normal"
+mkdir -p "$RUN_DIR"
+prepare_supervised_process
+normal_state="$_RALPH_BOUNDARY_STATE_FILE"
+normal_ack="$_RALPH_BOUNDARY_ACK_FILE"
+normal_log="$RUN_DIR/provider.log"
+eq "boundary handshake directory" "$RUN_DIR/process-boundaries" "$(dirname "$normal_state")"
+normal_output="$RUN_DIR/provider.out"
+supervisor_path=$(_ralph_process_supervisor_path)
+python3 "$supervisor_path" \
+    --state-file "$normal_state" \
+    --ack-file "$normal_ack" \
+    --log-file "$normal_log" \
+    --stdout-file "$normal_output" \
+    -- bash -c 'printf "answer\n"; printf "diagnostic\n" >&2; exit 7' &
+BOUNDARY_PID=$!
+for _ in {1..250}; do
+    [[ -s "$normal_state" ]] && break
+    sleep 0.02
+done
+normal_state_pid=$(jq -r '.supervisor_pid // 0' "$normal_state" 2>/dev/null || echo 0)
+normal_group=$(jq -r '.group_id // 0' "$normal_state" 2>/dev/null || echo 0)
+jq -e '((keys | sort) == ["group_id","schema_version","supervisor_pid"]) and .schema_version==1' "$normal_state" >/dev/null 2>&1 \
+    && ok "boundary handshake uses an allowlisted schema" || bad "boundary handshake schema invalid"
+eq "boundary handshake permissions" 600 "$(stat -c '%a' "$normal_state" 2>/dev/null || echo missing)"
+eq "boundary handshake identifies supervisor" "$BOUNDARY_PID" "$normal_state_pid"
+if [[ "$(_ralph_process_parent_pid "$normal_group" 2>/dev/null || true)" == "$BOUNDARY_PID" &&
+      "$(_ralph_process_group_id "$normal_group" 2>/dev/null || true)" == "$normal_group" &&
+      "$(_ralph_process_session_id "$normal_group" 2>/dev/null || true)" == "$normal_group" ]]; then
+    ok "child starts as an isolated session and process-group leader"
+else
+    bad "child boundary identity is not isolated"
+fi
+if register_supervised_process "$BOUNDARY_PID" provider "$normal_state" "$normal_ack"; then
+    ok "validated boundary registration succeeds"
+else
+    bad "validated boundary registration failed"
+fi
+wait "$BOUNDARY_PID"
+normal_rc=$?
+eq "supervisor preserves provider exit code" 7 "$normal_rc"
+eq "supervisor captures stdout exactly" "answer" "$(cat "$normal_output" 2>/dev/null)"
+grep -q '^diagnostic$' "$normal_log" && ok "supervisor captures stderr in log only" || bad "supervisor stderr capture missing"
+grep -q 'diagnostic' "$normal_output" && bad "supervisor leaked stderr into provider output" || ok "provider output excludes stderr"
+[[ ! -e "$normal_state" && ! -e "$normal_ack" ]] && ok "ephemeral boundary handshake is removed" || bad "boundary handshake was retained"
+unregister_child_process "$BOUNDARY_PID"
+BOUNDARY_PID=""
+
+echo "== group identity mismatch is non-destructive =="
+export RUN_DIR="$TMP/supervisor-identity"
+mkdir -p "$RUN_DIR"
+if launch_supervised_fixture "$RUN_DIR/provider.log" "$RUN_DIR/provider.out" \
+    bash -c 'trap "" TERM; while :; do sleep 1; done'; then
+    identity_supervisor="$BOUNDARY_PID"
+    identity_group="${RALPH_CHILD_GROUP_IDS[$identity_supervisor]}"
+    identity_group_token="${RALPH_CHILD_GROUP_START_TOKENS[$identity_supervisor]}"
+    RALPH_CHILD_GROUP_START_TOKENS["$identity_supervisor"]="deliberately-stale-group-token"
+    terminate_owned_process "$identity_supervisor" provider signal 0
+    if _ralph_owned_group_is_running "$identity_group" "$identity_group_token"; then
+        ok "mismatched group-leader token prevents signaling"
+    else
+        bad "mismatched group-leader token signaled an owned boundary"
+    fi
+    eq "group mismatch cleanup outcome" already_exited "$_RALPH_LAST_CLEANUP_OUTCOME"
+    RALPH_CHILD_GROUP_START_TOKENS["$identity_supervisor"]="$identity_group_token"
+    terminate_owned_process "$identity_supervisor" provider signal 0
+    wait "$identity_supervisor" 2>/dev/null || true
+    _ralph_owned_group_is_running "$identity_group" "$identity_group_token" \
+        && bad "restored group cleanup left a process" || ok "restored group identity permits cleanup"
+    unregister_child_process "$identity_supervisor"
+else
+    bad "identity boundary fixture failed to launch"
+fi
+BOUNDARY_PID=""
+
+echo "== supervisor waits for in-group descendants =="
+export RUN_DIR="$TMP/supervisor-descendant"
+mkdir -p "$RUN_DIR"
+export SUPERVISED_DESCENDANT_PID_FILE="$RUN_DIR/descendant.pid"
+daemon_started=$(_ralph_epoch_ms)
+if launch_supervised_fixture "$RUN_DIR/provider.log" "$RUN_DIR/provider.out" \
+    bash -c 'sleep 1 & printf "%s\n" "$!" >"$SUPERVISED_DESCENDANT_PID_FILE"; exit 0'; then
+    daemon_supervisor="$BOUNDARY_PID"
+    daemon_group="${RALPH_CHILD_GROUP_IDS[$daemon_supervisor]}"
+    for _ in {1..100}; do
+        [[ -s "$SUPERVISED_DESCENDANT_PID_FILE" ]] && ! kill -0 "$daemon_group" 2>/dev/null && break
+        sleep 0.02
+    done
+    daemon_child=$(cat "$SUPERVISED_DESCENDANT_PID_FILE" 2>/dev/null || true)
+    daemon_child_token=$(_ralph_process_start_token "$daemon_child" 2>/dev/null || true)
+    if ! kill -0 "$daemon_group" 2>/dev/null &&
+       _ralph_process_is_running "$daemon_supervisor" "${RALPH_CHILD_START_TOKENS[$daemon_supervisor]}"; then
+        ok "supervisor stays alive after the direct child exits"
+    else
+        bad "supervisor reported completion before direct-child handoff"
+    fi
+    wait "$daemon_supervisor"
+    daemon_rc=$?
+    daemon_finished=$(_ralph_epoch_ms)
+    daemon_elapsed=$((daemon_finished - daemon_started))
+    eq "descendant run preserves direct-child success" 0 "$daemon_rc"
+    [[ "$daemon_elapsed" -ge 700 ]] && ok "completion waits for the in-group descendant" || bad "completion returned early (${daemon_elapsed}ms)"
+    _ralph_process_is_running "$daemon_child" "$daemon_child_token" \
+        && bad "natural descendant survived supervisor completion" || ok "natural descendant is reaped before completion"
+    unregister_child_process "$daemon_supervisor"
+else
+    bad "descendant boundary fixture failed to launch"
+fi
+BOUNDARY_PID=""
+
+echo "== late-fork shutdown race =="
+export RUN_DIR="$TMP/supervisor-late-fork"
+mkdir -p "$RUN_DIR"
+cat >"$TMP/provider-late-fork" <<'SH'
+#!/bin/bash
+trap '(
+    trap "" TERM
+    printf "%s\n" "$BASHPID" >"$LATE_FORK_PID_FILE"
+    while :; do sleep 1; done
+) &
+trap "" TERM' TERM
+printf "%s\n" "$$" >"$LATE_FORK_READY_FILE"
+while :; do sleep 1; done
+SH
+chmod +x "$TMP/provider-late-fork"
+export LATE_FORK_PID_FILE="$RUN_DIR/late.pid"
+export LATE_FORK_READY_FILE="$RUN_DIR/ready.pid"
+if launch_supervised_fixture "$RUN_DIR/provider.log" "$RUN_DIR/provider.out" "$TMP/provider-late-fork"; then
+    late_supervisor="$BOUNDARY_PID"
+    late_group="${RALPH_CHILD_GROUP_IDS[$late_supervisor]}"
+    late_group_token="${RALPH_CHILD_GROUP_START_TOKENS[$late_supervisor]}"
+    for _ in {1..100}; do [[ -s "$LATE_FORK_READY_FILE" ]] && break; sleep 0.02; done
+    terminate_owned_process "$late_supervisor" provider signal 1
+    wait "$late_supervisor" 2>/dev/null || true
+    late_pid=$(cat "$LATE_FORK_PID_FILE" 2>/dev/null || true)
+    valid_pid "$late_pid" && ok "provider forked a child after TERM began" || bad "late-fork fixture did not run"
+    late_state=$(_ralph_process_state "$late_pid" 2>/dev/null || true)
+    if kill -0 "$late_pid" 2>/dev/null && [[ "$late_state" != Z* && "$late_state" != X* ]]; then
+        bad "late-forked child escaped group cleanup"
+    else
+        ok "late-forked child is removed by group escalation"
+    fi
+    _ralph_owned_group_is_running "$late_group" "$late_group_token" \
+        && bad "late-fork process group survived cleanup" || ok "late-fork process group is empty"
+    eq "late-fork cleanup escalates" kill "$_RALPH_LAST_CLEANUP_OUTCOME"
+    unregister_child_process "$late_supervisor"
+else
+    bad "late-fork boundary fixture failed to launch"
+fi
+BOUNDARY_PID=""
 
 echo "== allowlisted bounded cleanup evidence =="
 export RUN_DIR="$TMP/run"

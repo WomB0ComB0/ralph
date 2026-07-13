@@ -13,9 +13,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! docker image inspect ralph-sandbox:latest >/dev/null 2>&1; then
-  ( cd "$R" && source lib/utils.sh && source lib/tools.sh && load_config >/dev/null && PROJECT_DIR="$R" setup_sandbox )
-fi
+( cd "$R" && source lib/utils.sh && source lib/tools.sh && load_config >/dev/null && PROJECT_DIR="$R" setup_sandbox )
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -72,4 +70,4 @@ docker run --rm \
   --cpus=2 \
   --pids-limit=100 \
   ralph-sandbox:latest \
-  bash -c 'set -euo pipefail; source lib/utils.sh; TOOL=opencode check_dependencies; test "$(opencode models)" = stub/local; mkdir -p "$XDG_CONFIG_HOME/opencode" "$XDG_CACHE_HOME/opencode"; touch "$XDG_CONFIG_HOME/opencode/write-ok" "$XDG_CACHE_HOME/opencode/write-ok"; echo "sandbox provisioning smoke passed"; trap - EXIT || true; exit 0'
+  bash -c 'set -euo pipefail; source lib/utils.sh; TOOL=opencode check_dependencies; test "$(opencode models)" = stub/local; mkdir -p "$XDG_CONFIG_HOME/opencode" "$XDG_CACHE_HOME/opencode"; touch "$XDG_CONFIG_HOME/opencode/write-ok" "$XDG_CACHE_HOME/opencode/write-ok"; boundary_dir=$(mktemp -d); python3 lib/process_supervisor.py --state-file "$boundary_dir/state" --log-file "$boundary_dir/log" --stdout-file "$boundary_dir/out" -- bash -c "printf supervised"; test "$(cat "$boundary_dir/out")" = supervised; echo "sandbox provisioning and process supervision smoke passed"; trap - EXIT || true; exit 0'

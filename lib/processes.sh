@@ -5,6 +5,8 @@
 declare -a RALPH_CHILD_PIDS=()
 declare -A RALPH_CHILD_KINDS=()
 declare -A RALPH_CHILD_START_TOKENS=()
+declare -A RALPH_CHILD_GROUP_IDS=()
+declare -A RALPH_CHILD_GROUP_START_TOKENS=()
 
 register_child_process() {
     local pid="${1:-}" kind="${2:-owned}" existing token=""
@@ -31,6 +33,155 @@ unregister_child_process() {
     done
     RALPH_CHILD_PIDS=("${kept[@]}")
     unset 'RALPH_CHILD_KINDS[$target]' 'RALPH_CHILD_START_TOKENS[$target]'
+    unset 'RALPH_CHILD_GROUP_IDS[$target]' 'RALPH_CHILD_GROUP_START_TOKENS[$target]'
+}
+
+_ralph_process_supervisor_path() {
+    local directory
+    directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || return 1
+    [[ -f "$directory/process_supervisor.py" ]] || return 1
+    printf '%s/process_supervisor.py\n' "$directory"
+}
+
+prepare_supervised_process() {
+    local base
+    base="${RUN_DIR:-${ARTIFACT_DIR:-${TMPDIR:-/tmp}/ralph-${UID:-user}}}/process-boundaries"
+    mkdir -p "$base" 2>/dev/null || return 1
+    chmod 700 "$base" 2>/dev/null || return 1
+    _RALPH_BOUNDARY_STATE_FILE=$(mktemp "$base/boundary.XXXXXX") || return 1
+    chmod 600 "$_RALPH_BOUNDARY_STATE_FILE" 2>/dev/null || {
+        rm -f "$_RALPH_BOUNDARY_STATE_FILE"
+        return 1
+    }
+    _RALPH_BOUNDARY_ACK_FILE="${_RALPH_BOUNDARY_STATE_FILE}.ack"
+    return 0
+}
+
+_ralph_process_stat_value() {
+    local pid="${1:-}" index="${2:-}" ps_field="${3:-}" stat rest
+    local -a fields=()
+    [[ "$pid" =~ ^[0-9]+$ && "$index" =~ ^[0-9]+$ ]] || return 1
+    if [[ -r "/proc/$pid/stat" ]]; then
+        stat=$(<"/proc/$pid/stat") || return 1
+        rest="${stat##*) }"
+        IFS=' ' read -r -a fields <<<"$rest"
+        [[ -n "${fields[$index]:-}" ]] || return 1
+        printf '%s\n' "${fields[$index]}"
+        return 0
+    fi
+    [[ -n "$ps_field" ]] || return 1
+    ps -o "$ps_field=" -p "$pid" 2>/dev/null | awk '{print $1}'
+}
+
+_ralph_process_parent_pid() {
+    _ralph_process_stat_value "${1:-}" 1 ppid
+}
+
+_ralph_process_group_id() {
+    _ralph_process_stat_value "${1:-}" 2 pgid
+}
+
+_ralph_process_session_id() {
+    _ralph_process_stat_value "${1:-}" 3 sid
+}
+
+_ralph_group_members() {
+    local group_id="${1:-}" stat_file stat rest pid
+    local -a fields=()
+    [[ "$group_id" =~ ^[0-9]+$ && "$group_id" -gt 1 ]] || return 0
+    if [[ -d /proc ]]; then
+        for stat_file in /proc/[0-9]*/stat; do
+            [[ -r "$stat_file" ]] || continue
+            stat=$(<"$stat_file") || continue
+            rest="${stat##*) }"
+            fields=()
+            IFS=' ' read -r -a fields <<<"$rest"
+            [[ "${fields[2]:-}" == "$group_id" ]] || continue
+            pid="${stat_file#/proc/}"
+            pid="${pid%/stat}"
+            printf '%s\t%s\t%s\n' "$pid" "${fields[3]:-}" "${fields[0]:-}"
+        done
+    elif command -v ps >/dev/null 2>&1; then
+        ps -eo pid=,pgid=,sid=,stat= 2>/dev/null |
+            awk -v group="$group_id" '$2 == group { print $1 "\t" $3 "\t" $4 }'
+    fi
+}
+
+_ralph_owned_group_is_running() {
+    local group_id="${1:-}" leader_token="${2:-}" member session state current_token
+    [[ "$group_id" =~ ^[0-9]+$ && "$group_id" -gt 1 && -n "$leader_token" ]] || return 1
+
+    # If the original group-leader PID has been reused, never signal the new group.
+    if kill -0 "$group_id" 2>/dev/null; then
+        current_token=$(_ralph_process_start_token "$group_id" 2>/dev/null || true)
+        [[ -n "$current_token" && "$current_token" == "$leader_token" ]] || return 1
+    fi
+
+    while IFS=$'\t' read -r member session state; do
+        [[ "$member" =~ ^[0-9]+$ && "$session" == "$group_id" ]] || continue
+        case "$state" in Z*|X*) continue ;; esac
+        return 0
+    done < <(_ralph_group_members "$group_id")
+    return 1
+}
+
+release_supervised_process() {
+    local pid="${1:-}" ack_file="${2:-}" registered_pid
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$ack_file" ]] || return 1
+    for registered_pid in "${RALPH_CHILD_PIDS[@]}"; do
+        if [[ "$registered_pid" == "$pid" &&
+              -n "${RALPH_CHILD_GROUP_IDS[$pid]:-}" &&
+              -n "${RALPH_CHILD_GROUP_START_TOKENS[$pid]:-}" ]] &&
+           _ralph_process_matches_token "$pid" "${RALPH_CHILD_START_TOKENS[$pid]:-}"; then
+            (umask 077; set -o noclobber; : >"$ack_file") 2>/dev/null
+            return $?
+        fi
+    done
+    return 1
+}
+
+register_supervised_process() {
+    local pid="${1:-}" kind="${2:-provider}" state_file="${3:-}" ack_file="${4:-}"
+    local release="${5:-1}"
+    local state_pid group_id supervisor_token leader_token parent_id process_group session_id owner_group mode
+    local attempts=250
+    [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$state_file" && -n "$ack_file" ]] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+
+    while [[ "$attempts" -gt 0 && ! -s "$state_file" ]]; do
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep 0.02
+        attempts=$((attempts - 1))
+    done
+    [[ -s "$state_file" ]] || return 1
+    mode=$(stat -c '%a' "$state_file" 2>/dev/null || stat -f '%Lp' "$state_file" 2>/dev/null || true)
+    [[ "$mode" == "600" ]] || return 1
+    IFS=$'\t' read -r state_pid group_id < <(
+        jq -er 'select(.schema_version == 1)
+                | [.supervisor_pid, .group_id]
+                | select(all(.[]; type == "number" and floor == . and . > 1))
+                | @tsv' "$state_file" 2>/dev/null
+    )
+    [[ "$state_pid" == "$pid" && "$group_id" =~ ^[0-9]+$ && "$group_id" -gt 1 ]] || return 1
+
+    supervisor_token=$(_ralph_process_start_token "$pid" 2>/dev/null || true)
+    leader_token=$(_ralph_process_start_token "$group_id" 2>/dev/null || true)
+    parent_id=$(_ralph_process_parent_pid "$group_id" 2>/dev/null || true)
+    process_group=$(_ralph_process_group_id "$group_id" 2>/dev/null || true)
+    session_id=$(_ralph_process_session_id "$group_id" 2>/dev/null || true)
+    owner_group=$(_ralph_process_group_id "${BASHPID:-$$}" 2>/dev/null || true)
+    [[ -n "$supervisor_token" && -n "$leader_token" ]] || return 1
+    [[ "$parent_id" == "$pid" && "$process_group" == "$group_id" && "$session_id" == "$group_id" ]] || return 1
+    [[ -z "$owner_group" || "$group_id" != "$owner_group" ]] || return 1
+
+    register_child_process "$pid" "$kind" || return 1
+    RALPH_CHILD_GROUP_IDS["$pid"]="$group_id"
+    RALPH_CHILD_GROUP_START_TOKENS["$pid"]="$leader_token"
+    if [[ "$release" == "1" ]] && ! release_supervised_process "$pid" "$ack_file"; then
+        unregister_child_process "$pid"
+        return 1
+    fi
+    return 0
 }
 
 _ralph_child_pids() {
@@ -325,15 +476,54 @@ _ralph_terminate_owned_tree() {
     return 0
 }
 
+_ralph_terminate_owned_group() {
+    local group_id="${1:-}" leader_token="${2:-}" grace="${3:-1}"
+    local start_ms finish_ms duration_ms ticks
+    _RALPH_LAST_CLEANUP_OUTCOME=already_exited
+    _RALPH_LAST_CLEANUP_DURATION_MS=0
+    [[ "$group_id" =~ ^[0-9]+$ && "$group_id" -gt 1 && -n "$leader_token" ]] || return 1
+    [[ "$grace" =~ ^[0-9]+$ ]] || grace=1
+    [[ "$grace" -le 30 ]] || grace=30
+
+    start_ms=$(_ralph_epoch_ms)
+    if _ralph_owned_group_is_running "$group_id" "$leader_token"; then
+        _RALPH_LAST_CLEANUP_OUTCOME=term
+        kill -TERM -- "-$group_id" 2>/dev/null || true
+        ticks=$((grace * 10))
+        while [[ "$ticks" -gt 0 ]] && _ralph_owned_group_is_running "$group_id" "$leader_token"; do
+            sleep 0.1
+            ticks=$((ticks - 1))
+        done
+
+        if _ralph_owned_group_is_running "$group_id" "$leader_token"; then
+            _RALPH_LAST_CLEANUP_OUTCOME=kill
+            kill -KILL -- "-$group_id" 2>/dev/null || true
+            ticks=10
+            while [[ "$ticks" -gt 0 ]] && _ralph_owned_group_is_running "$group_id" "$leader_token"; do
+                sleep 0.05
+                ticks=$((ticks - 1))
+            done
+        fi
+    fi
+
+    finish_ms=$(_ralph_epoch_ms)
+    duration_ms=$((finish_ms - start_ms))
+    [[ "$duration_ms" -ge 0 ]] || duration_ms=0
+    _RALPH_LAST_CLEANUP_DURATION_MS="$duration_ms"
+    return 0
+}
+
 terminate_owned_process() {
-    local pid="${1:-}" kind="${2:-provider}" trigger="${3:-exit}" grace="${4:-1}"
-    local token="" registered=0 registered_pid
+    local pid="${1:-}" kind="${2:-provider}" trigger="${3:-exit}" grace="${4:-${RALPH_CHILD_TERM_GRACE:-2}}"
+    local token="" group_id="" leader_token="" registered=0 registered_pid
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
 
     for registered_pid in "${RALPH_CHILD_PIDS[@]}"; do
         if [[ "$registered_pid" == "$pid" ]]; then
             registered=1
             token="${RALPH_CHILD_START_TOKENS[$pid]:-}"
+            group_id="${RALPH_CHILD_GROUP_IDS[$pid]:-}"
+            leader_token="${RALPH_CHILD_GROUP_START_TOKENS[$pid]:-}"
             break
         fi
     done
@@ -341,7 +531,11 @@ terminate_owned_process() {
         token=$(_ralph_process_start_token "$pid" 2>/dev/null || true)
     fi
 
-    _ralph_terminate_owned_tree "$pid" "$token" "$grace"
+    if [[ -n "$group_id" && -n "$leader_token" ]]; then
+        _ralph_terminate_owned_group "$group_id" "$leader_token" "$grace"
+    else
+        _ralph_terminate_owned_tree "$pid" "$token" "$grace"
+    fi
     _ralph_record_process_cleanup_event "$kind" "$trigger" \
         "${_RALPH_LAST_CLEANUP_OUTCOME:-already_exited}" \
         "${_RALPH_LAST_CLEANUP_DURATION_MS:-0}" || true
@@ -350,23 +544,39 @@ terminate_owned_process() {
 
 start_child_guardian() {
     local child_pid="${1:-}" owner_pid="${2:-${BASHPID:-$$}}" kind="${3:-provider}"
-    local owner_token child_token
+    local owner_token child_token group_id leader_token
     [[ "$child_pid" =~ ^[0-9]+$ && "$owner_pid" =~ ^[0-9]+$ ]] || return 1
     case "$kind" in provider|live_smoke) ;; *) kind=provider ;; esac
     owner_token=$(_ralph_process_start_token "$owner_pid") || return 1
     child_token=$(_ralph_process_start_token "$child_pid") || return 1
+    group_id="${RALPH_CHILD_GROUP_IDS[$child_pid]:-}"
+    leader_token="${RALPH_CHILD_GROUP_START_TOKENS[$child_pid]:-}"
     [[ -n "$owner_token" && -n "$child_token" ]] || return 1
 
     (
         trap - EXIT HUP INT TERM
         # Never let a guardian prolong the singleton lock after Ralph dies.
         { exec 9>&-; } 2>/dev/null || true
-        while _ralph_process_matches_token "$child_pid" "$child_token"; do
+        while true; do
             if ! _ralph_process_matches_token "$owner_pid" "$owner_token"; then
-                _ralph_terminate_owned_tree "$child_pid" "$child_token" 1
+                if [[ -n "$group_id" && -n "$leader_token" ]]; then
+                    _ralph_terminate_owned_group "$group_id" "$leader_token" 1
+                else
+                    _ralph_terminate_owned_tree "$child_pid" "$child_token" 1
+                fi
                 _ralph_record_process_cleanup_event "$kind" parent_death \
                     "${_RALPH_LAST_CLEANUP_OUTCOME:-already_exited}" \
                     "${_RALPH_LAST_CLEANUP_DURATION_MS:-0}" || true
+                exit 0
+            fi
+            if ! _ralph_process_matches_token "$child_pid" "$child_token"; then
+                if [[ -n "$group_id" && -n "$leader_token" ]] &&
+                   _ralph_owned_group_is_running "$group_id" "$leader_token"; then
+                    _ralph_terminate_owned_group "$group_id" "$leader_token" 1
+                    _ralph_record_process_cleanup_event "$kind" exit \
+                        "${_RALPH_LAST_CLEANUP_OUTCOME:-already_exited}" \
+                        "${_RALPH_LAST_CLEANUP_DURATION_MS:-0}" || true
+                fi
                 exit 0
             fi
             sleep 1
@@ -423,4 +633,6 @@ terminate_registered_processes() {
     RALPH_CHILD_PIDS=()
     RALPH_CHILD_KINDS=()
     RALPH_CHILD_START_TOKENS=()
+    RALPH_CHILD_GROUP_IDS=()
+    RALPH_CHILD_GROUP_START_TOKENS=()
 }

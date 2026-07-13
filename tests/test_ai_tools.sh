@@ -173,9 +173,17 @@ tb=$(_timeout_bin)
 
 echo "== run_ai_tool watchdog: internal timeout kills a hung CLI even without coreutils timeout =="
 wdir=$(mktemp -d); stub="$wdir/bin"; mkdir -p "$stub"
-printf '#!/bin/bash\n(sleep 30) & wait\n' > "$stub/opencode"; chmod +x "$stub/opencode"
+cat >"$stub/opencode" <<'SH'
+#!/bin/bash
+printf '%s\n' "$$" >"$WATCHDOG_PROVIDER_PID_FILE"
+sleep 30 &
+printf '%s\n' "$!" >"$WATCHDOG_CHILD_PID_FILE"
+wait
+SH
+chmod +x "$stub/opencode"
 lf="$wdir/log"; of="$wdir/out"; : > "$lf"; : > "$of"
 PATH="$stub:$PATH" RALPH_TOOL_TIMEOUT=1 PROJECT_DIR="$wdir" iteration=1 MAX_ITERATIONS=1
+export WATCHDOG_PROVIDER_PID_FILE="$wdir/provider.pid" WATCHDOG_CHILD_PID_FILE="$wdir/provider-child.pid"
 export RALPH_PROCESS_CLEANUP_FILE="$wdir/process-cleanup.json"
 _timeout_bin() { echo ""; }
 start_watchdog=$SECONDS
@@ -186,7 +194,15 @@ eq "hung tool returns timeout rc" 124 "$watchdog_rc"
 grep -q "exceeded RALPH_TOOL_TIMEOUT=1s" "$lf" && ok "timeout warning logged" || bad "timeout warning missing"
 jq -e '.events[-1] | .kind=="provider" and .trigger=="timeout"' "$RALPH_PROCESS_CLEANUP_FILE" >/dev/null \
     && ok "timeout cleanup evidence recorded" || bad "timeout cleanup evidence missing"
-unset RALPH_PROCESS_CLEANUP_FILE
+watchdog_provider_pid=$(cat "$WATCHDOG_PROVIDER_PID_FILE" 2>/dev/null || true)
+watchdog_child_pid=$(cat "$WATCHDOG_CHILD_PID_FILE" 2>/dev/null || true)
+if ! test_pid_alive "$watchdog_provider_pid" && ! test_pid_alive "$watchdog_child_pid"; then
+    ok "timeout leaves no provider boundary survivors"
+else
+    bad "timeout left a provider boundary survivor"
+fi
+kill_test_pids "$watchdog_provider_pid" "$watchdog_child_pid"
+unset RALPH_PROCESS_CLEANUP_FILE WATCHDOG_PROVIDER_PID_FILE WATCHDOG_CHILD_PID_FILE
 rm -rf "$wdir"
 
 echo "== signal cleanup: TERM reaps provider process tree before exit =="
@@ -224,6 +240,12 @@ for _ in {1..50}; do
 done
 provider_pid=$(cat "$sdir/provider.pid" 2>/dev/null || true)
 provider_child_pid=$(cat "$sdir/provider-child.pid" 2>/dev/null || true)
+provider_pgid=$(_ralph_process_group_id "$provider_pid" 2>/dev/null || true)
+provider_sid=$(_ralph_process_session_id "$provider_pid" 2>/dev/null || true)
+provider_child_pgid=$(_ralph_process_group_id "$provider_child_pid" 2>/dev/null || true)
+eq "provider is its process-group leader" "$provider_pid" "$provider_pgid"
+eq "provider is its session leader" "$provider_pid" "$provider_sid"
+eq "provider descendant stays in boundary" "$provider_pid" "$provider_child_pgid"
 if valid_test_pid "$provider_pid" && valid_test_pid "$provider_child_pid"; then
     ok "TERM fixture recorded provider process tree"
 else
@@ -289,6 +311,12 @@ for _ in {1..50}; do
 done
 killed_provider_pid=$(cat "$kdir/provider.pid" 2>/dev/null || true)
 killed_provider_child_pid=$(cat "$kdir/provider-child.pid" 2>/dev/null || true)
+killed_provider_pgid=$(_ralph_process_group_id "$killed_provider_pid" 2>/dev/null || true)
+killed_provider_sid=$(_ralph_process_session_id "$killed_provider_pid" 2>/dev/null || true)
+killed_child_pgid=$(_ralph_process_group_id "$killed_provider_child_pid" 2>/dev/null || true)
+eq "SIGKILL provider is process-group leader" "$killed_provider_pid" "$killed_provider_pgid"
+eq "SIGKILL provider is session leader" "$killed_provider_pid" "$killed_provider_sid"
+eq "SIGKILL descendant stays in boundary" "$killed_provider_pid" "$killed_child_pgid"
 if valid_test_pid "$killed_provider_pid" && valid_test_pid "$killed_provider_child_pid"; then
     ok "SIGKILL fixture recorded provider process tree"
 else
