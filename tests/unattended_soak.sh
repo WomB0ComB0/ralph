@@ -269,7 +269,8 @@ run_completion() {
 
 run_fault() {
     local cycle="$1" signal="$2" label="cycle-${cycle}-${signal,,}" before after
-    local fault_manifest fault_exit_code fault_status fault_reason provider_clean=true recovery_ok=true recovery_id="" reconciled=false
+    local fault_manifest fault_exit_code fault_status fault_reason provider_clean=true cleanup_evidence=false recovery_ok=true recovery_id="" reconciled=false
+    local cleanup_file expected_trigger
     before=$(checkpoint_value)
 
     if ! launch_run stall true "$label"; then
@@ -295,7 +296,22 @@ run_fault() {
         provider_clean=false
         add_failure "$label" "$signal cleanup: ${PROVIDER_CLEAN_DETAIL:-unknown process cleanup failure}"
     }
-
+    cleanup_file="$(dirname "$fault_manifest")/process-cleanup.json"
+    if [[ "$signal" == "TERM" ]]; then
+        expected_trigger=signal
+    else
+        expected_trigger=parent_death
+    fi
+    for _ in {1..50}; do
+        jq -e --arg trigger "$expected_trigger" \
+            '.events | any(.kind == "provider" and .trigger == $trigger)' "$cleanup_file" >/dev/null 2>&1 && break
+        sleep 0.1
+    done
+    if jq -e --arg trigger "$expected_trigger" '.events | any(.kind == "provider" and .trigger == $trigger)' "$cleanup_file" >/dev/null 2>&1; then
+        cleanup_evidence=true
+    else
+        add_failure "$label" "$signal cleanup evidence missing trigger=$expected_trigger"
+    fi
     fault_status=$(jq -r '.status // empty' "$fault_manifest")
     fault_reason=$(jq -r '.reason // empty' "$fault_manifest")
     if [[ "$signal" == "TERM" ]]; then
@@ -339,9 +355,10 @@ run_fault() {
         --argjson checkpoint_before "$before" \
         --argjson checkpoint_after "$after" \
         --argjson provider_clean "$provider_clean" \
+        --argjson cleanup_evidence "$cleanup_evidence" \
         --argjson recovery_ok "$recovery_ok" \
         --argjson reconciled "$reconciled" \
-        '{cycle:$cycle,signal:$signal,run_id:$run_id,status:$status,reason:$reason,exit_code:$exit_code,checkpoint_before:$checkpoint_before,checkpoint_after:$checkpoint_after,provider_clean:$provider_clean,recovery_ok:$recovery_ok,reconciled:$reconciled}' \
+        '{cycle:$cycle,signal:$signal,run_id:$run_id,status:$status,reason:$reason,exit_code:$exit_code,checkpoint_before:$checkpoint_before,checkpoint_after:$checkpoint_after,provider_clean:$provider_clean,cleanup_evidence:$cleanup_evidence,recovery_ok:$recovery_ok,reconciled:$reconciled}' \
         >>"$RESULTS_FILE"
 }
 

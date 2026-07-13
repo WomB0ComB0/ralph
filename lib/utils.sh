@@ -263,7 +263,7 @@ cleanup_ralph() {
 
     # A terminal manifest must mean Ralph no longer owns a live executor/server.
     if declare -F terminate_registered_processes >/dev/null 2>&1; then
-        terminate_registered_processes >/dev/null 2>&1 || true
+        terminate_registered_processes "$exit_code" >/dev/null 2>&1 || true
     fi
 
     # Finalize only real iterating runs. Read-only subcommands and test harnesses

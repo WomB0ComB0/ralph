@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run every Ralph test suite: the 6 unit harnesses + the native `ralph --test`.
+# Run every Ralph test suite, including the native `ralph --test`.
 # Each suite sources lib/*.sh directly and uses its own mktemp sandboxes, so this
 # is hermetic and safe to run anywhere. Exit 0 iff every suite passes.
 #
@@ -31,6 +31,7 @@ echo "Ralph test suites:"
 run now      "$DIR/test_now_tier.sh"
 run next     "$DIR/test_next_tier.sh"
 run manifest "$DIR/test_run_manifest.sh"
+run processes "$DIR/test_processes.sh"
 run lists    "$DIR/test_lists.sh"
 run signals  "$DIR/test_signals.sh"
 run skills   "$DIR/test_skills.sh"

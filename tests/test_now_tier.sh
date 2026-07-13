@@ -113,6 +113,10 @@ assert_rc "benign config -> rc 1 (clean)" 1 "$rc"
 # ---------------------------------------------------------------------------
 note "== run_in_sandbox docker arguments =="
 
+grep -q 'util-linux' "$RALPH_ROOT/Dockerfile.ralph" && ok "committed sandbox image provisions flock" || bad "committed sandbox image omits util-linux"
+create_default_dockerfile "$TMP/generated.Dockerfile"
+grep -q 'util-linux' "$TMP/generated.Dockerfile" && ok "generated sandbox image provisions flock" || bad "generated sandbox image omits util-linux"
+
 SANDBOX_PROJECT="$TMP/project"
 mkdir -p "$SANDBOX_PROJECT"
 DOCKER_CAPTURE="$TMP/docker-args.txt"

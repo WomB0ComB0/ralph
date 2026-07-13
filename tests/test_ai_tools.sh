@@ -176,6 +176,7 @@ wdir=$(mktemp -d); stub="$wdir/bin"; mkdir -p "$stub"
 printf '#!/bin/bash\n(sleep 30) & wait\n' > "$stub/opencode"; chmod +x "$stub/opencode"
 lf="$wdir/log"; of="$wdir/out"; : > "$lf"; : > "$of"
 PATH="$stub:$PATH" RALPH_TOOL_TIMEOUT=1 PROJECT_DIR="$wdir" iteration=1 MAX_ITERATIONS=1
+export RALPH_PROCESS_CLEANUP_FILE="$wdir/process-cleanup.json"
 _timeout_bin() { echo ""; }
 start_watchdog=$SECONDS
 run_ai_tool opencode "" "prompt" "$lf" "$of"; watchdog_rc=$?
@@ -183,6 +184,9 @@ watchdog_elapsed=$((SECONDS - start_watchdog))
 eq "hung tool returns timeout rc" 124 "$watchdog_rc"
 [[ "$watchdog_elapsed" -lt 8 ]] && ok "watchdog returned promptly (${watchdog_elapsed}s)" || bad "watchdog took too long (${watchdog_elapsed}s)"
 grep -q "exceeded RALPH_TOOL_TIMEOUT=1s" "$lf" && ok "timeout warning logged" || bad "timeout warning missing"
+jq -e '.events[-1] | .kind=="provider" and .trigger=="timeout"' "$RALPH_PROCESS_CLEANUP_FILE" >/dev/null \
+    && ok "timeout cleanup evidence recorded" || bad "timeout cleanup evidence missing"
+unset RALPH_PROCESS_CLEANUP_FILE
 rm -rf "$wdir"
 
 echo "== signal cleanup: TERM reaps provider process tree before exit =="
@@ -208,6 +212,7 @@ bash -c '
     export RALPH_TOOL_IDLE_TIMEOUT=0
     export RALPH_OPENCODE_JSON=0
     export PROJECT_DIR="$2/project"
+    export RALPH_PROCESS_CLEANUP_FILE="$2/process-cleanup.json"
     iteration=1
     MAX_ITERATIONS=1
     run_ai_tool opencode "" prompt "$2/log" "$2/out"
@@ -243,6 +248,8 @@ if test_pid_alive "$provider_child_pid"; then
 else
     ok "provider descendant reaped on Ralph TERM"
 fi
+jq -e '.events[-1] | .kind=="provider" and .trigger=="signal"' "$sdir/process-cleanup.json" >/dev/null \
+    && ok "TERM cleanup evidence recorded" || bad "TERM cleanup evidence missing"
 kill_test_pids "$provider_pid" "$provider_child_pid"
 rm -rf "$sdir"
 echo "== parent-death guardian: SIGKILL cannot orphan provider tree =="
@@ -268,6 +275,7 @@ bash -c '
     export RALPH_TOOL_IDLE_TIMEOUT=0
     export RALPH_OPENCODE_JSON=0
     export PROJECT_DIR="$2/project"
+    export RALPH_PROCESS_CLEANUP_FILE="$2/process-cleanup.json"
     iteration=1
     MAX_ITERATIONS=1
     exec 9>"$2/ralph.lock"
@@ -327,6 +335,12 @@ for owned_pid in "${killed_owned_pids[@]}"; do
     test_pid_alive "$owned_pid" && owned_alive=1
 done
 [[ "$owned_alive" -eq 0 ]] && ok "guardian exited after SIGKILL cleanup" || bad "owned process survived SIGKILL cleanup"
+for _ in {1..30}; do
+    jq -e '.events | any(.trigger=="parent_death")' "$kdir/process-cleanup.json" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+jq -e '.events[-1] | .kind=="provider" and .trigger=="parent_death"' "$kdir/process-cleanup.json" >/dev/null \
+    && ok "SIGKILL guardian evidence recorded" || bad "SIGKILL guardian evidence missing"
 kill_test_pids "$killed_provider_pid" "$killed_provider_child_pid" "${killed_owned_pids[@]}"
 rm -rf "$kdir"
 echo "== run_ai_tool quiescence: quiet-after-change provider is gracefully stopped =="
@@ -343,6 +357,7 @@ SH
     lf="$qdir/log"; of="$qdir/out"; : > "$lf"; : > "$of"
     export PATH="$qstub:$PATH"
     export RALPH_TOOL_TIMEOUT=20 RALPH_TOOL_IDLE_TIMEOUT=1 RALPH_TOOL_IDLE_MIN_RUNTIME=0 RALPH_TOOL_IDLE_PROBE_INTERVAL=1 PROJECT_DIR="$qdir/proj" RALPH_OPENCODE_JSON=0
+    export RALPH_PROCESS_CLEANUP_FILE="$qdir/process-cleanup.json"
     iteration=1; MAX_ITERATIONS=1
     start_quiet=$SECONDS
     run_ai_tool opencode "" "prompt" "$lf" "$of"; quiet_rc=$?
@@ -350,7 +365,9 @@ SH
     eq "quiet-after-change stop returns success" 0 "$quiet_rc"
     [[ "$quiet_elapsed" -lt 8 ]] && ok "quiescence returned promptly (${quiet_elapsed}s)" || bad "quiescence took too long (${quiet_elapsed}s)"
     grep -q "quiet after project progress" "$lf" && ok "quiescence warning logged" || bad "quiescence warning missing"
-    unset RALPH_TOOL_TIMEOUT RALPH_TOOL_IDLE_TIMEOUT RALPH_TOOL_IDLE_MIN_RUNTIME RALPH_TOOL_IDLE_PROBE_INTERVAL RALPH_OPENCODE_JSON PROJECT_DIR
+    jq -e '.events[-1] | .kind=="provider" and .trigger=="quiescence"' "$RALPH_PROCESS_CLEANUP_FILE" >/dev/null \
+        && ok "quiescence cleanup evidence recorded" || bad "quiescence cleanup evidence missing"
+    unset RALPH_TOOL_TIMEOUT RALPH_TOOL_IDLE_TIMEOUT RALPH_TOOL_IDLE_MIN_RUNTIME RALPH_TOOL_IDLE_PROBE_INTERVAL RALPH_OPENCODE_JSON RALPH_PROCESS_CLEANUP_FILE PROJECT_DIR
     rm -rf "$qdir"
 else
     ok "jq unavailable; skipped quiescence fixture"

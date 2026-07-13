@@ -139,6 +139,8 @@ SH
     else
         ok "live smoke server is torn down"
     fi
+    jq -e '.events[-1] | .kind=="live_smoke" and .trigger=="verification"' "$ARTIFACT_DIR/process-cleanup.json" >/dev/null \
+        && ok "live-smoke cleanup evidence recorded" || bad "live-smoke cleanup evidence missing"
     unset RALPH_LIVE_SMOKE RALPH_LIVE_SMOKE_PORT RALPH_LIVE_SMOKE_READY_TIMEOUT RALPH_LIVE_SMOKE_PATHS RALPH_LIVE_SMOKE_FILE
 else
     ok "curl, python3, or jq unavailable; skipped live smoke fixture"

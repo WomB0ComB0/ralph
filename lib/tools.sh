@@ -981,6 +981,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     wget \
     jq \
+    util-linux \
     ca-certificates \
     gnupg \
     && rm -rf /var/lib/apt/lists/*

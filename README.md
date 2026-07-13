@@ -12,8 +12,6 @@ Use Ralph when you want an agent to keep working from a persistent plan instead 
 - Stores recurring problems as signals and promotes proven fixes into guarded skills.
 - Supports resumable runs, retry/backoff, circuit breakers, bounded swarm workers, and GitHub triage helpers.
 
-<!-- Self-benchmarking note: the next small docs improvement would be adding a short real-world walkthrough from `./ralph.sh --init` to a completed Beads task. -->
-
 ## Quick Start
 
 ```bash
@@ -72,7 +70,8 @@ Ralph revolves around a few durable files and stores:
 | `ralph_architecture.md` | Architecture notes and Mermaid diagrams. |
 | `.ralph_checkpoint` | Resume point for interrupted runs. |
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
-| `.ralph/runs/<run-id>/run.json` | Atomic lifecycle manifest with heartbeat, progress, limits, resume lineage, and terminal outcome. |
+| `.ralph/runs/<run-id>/run.json` | Atomic lifecycle manifest with monotonic heartbeat sequence, progress, limits, resume lineage, and terminal outcome. |
+| `.ralph/runs/<run-id>/process-cleanup.json` | Bounded, sanitized, allowlisted provider/live-smoke cleanup latency and escalation evidence. |
 | `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
 | `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
 | `.ralph/artifacts/live-smoke.json` | Opt-in live app smoke evidence: command, port, probes, diagnostics, and server log tail. |
@@ -86,7 +85,7 @@ Ralph revolves around a few durable files and stores:
 Every iterating run writes `.ralph/runs/<run-id>/run.json`. It is an allowlisted operational record: Ralph does not copy environment variables, prompts, provider responses, or secret values into this file.
 
 ```bash
-jq '{run_id, status, reason, phase, heartbeat_at, current_iteration, progress}' .ralph/runs/latest/run.json
+jq '{run_id, status, reason, phase, heartbeat_at, heartbeat_sequence, current_iteration, progress}' .ralph/runs/latest/run.json
 ```
 
 | Status | Meaning |
@@ -99,7 +98,7 @@ jq '{run_id, status, reason, phase, heartbeat_at, current_iteration, progress}' 
 | `failed` | A model, provider, stall, budget, or unexpected process failure stopped the run. |
 | `interrupted` | HUP, INT, TERM, or a stale active manifest from an unclean exit. |
 
-Writes use same-directory temporary files and atomic renames. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected` and records the recovering run ID.
+Writes use same-directory temporary files and atomic renames. Heartbeat replacements are serialized, and `heartbeat_sequence` starts at `0` and increments exactly once for each persisted heartbeat. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected`, preserves its final heartbeat sequence, and records the recovering run ID.
 
 ### Reliability Soak
 
@@ -111,7 +110,7 @@ tests/unattended_soak.sh --cycles 2 --duration 120 --seed 42 \
 jq '{status, fault_runs, retention, failures}' /tmp/ralph-soak.json
 ```
 
-Each cycle injects both signals in seeded random order, resumes from the prior checkpoint, verifies provider-tree cleanup and stale-manifest reconciliation, and enforces run retention. The mode-`600` JSON report is allowlisted and excludes prompts, logs, environment values, commands, and temporary paths. `--duration` is a wall-clock ceiling checked between cycles; an active cycle always finishes.
+Each cycle injects both signals in seeded random order, resumes from the prior checkpoint, verifies provider-tree cleanup, cleanup evidence, and stale-manifest reconciliation, and enforces run retention. The mode-`600` JSON report is allowlisted and excludes prompts, logs, environment values, commands, and temporary paths. `--duration` is a wall-clock ceiling checked between cycles; an active cycle always finishes.
 
 ## Common Commands
 
@@ -259,6 +258,7 @@ Common environment variables:
 | `RALPH_RUN_HEARTBEAT_INTERVAL` | Minimum seconds between same-phase run-manifest heartbeats, default `15`; phase changes and iteration boundaries write immediately. |
 | `RALPH_LOCK_WAIT_SECONDS` | Seconds to wait for the per-project singleton lock, default `3`, maximum `60`; set `0` for nonblocking behavior. |
 | `RALPH_CHILD_TERM_GRACE` | Seconds to wait after terminating owned provider/server trees before escalating to KILL, default `2`, maximum `30`. |
+| `RALPH_PROCESS_CLEANUP_FILE` | Override the process-cleanup evidence path, default `.ralph/runs/<run-id>/process-cleanup.json`; the mode-`600` artifact retains at most 50 allowlisted events. |
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
@@ -306,6 +306,7 @@ Core dependencies:
 - `curl`
 - `bc`
 - `sqlite3`
+- `flock` (provided by `util-linux` on common Linux distributions)
 - Python 3
 - Bun or npm
 

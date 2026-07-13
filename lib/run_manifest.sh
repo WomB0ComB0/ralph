@@ -26,14 +26,35 @@ _run_manifest_bool() {
 _run_manifest_replace() {
     local file="$1"
     shift
-    local tmp
-    tmp=$(mktemp "$(dirname "$file")/.run.json.tmp.XXXXXX") || return 1
+    local tmp lock_file lock_fd lock_wait=3
+    lock_file="${file}.lock"
+    if command -v flock >/dev/null 2>&1; then
+        lock_wait="${RALPH_LOCK_WAIT_SECONDS:-3}"
+        [[ "$lock_wait" =~ ^[0-9]+$ ]] || lock_wait=3
+        [[ "$lock_wait" -le 60 ]] || lock_wait=60
+        if ! { exec {lock_fd}>"$lock_file"; } 2>/dev/null; then
+            return 1
+        fi
+        chmod 600 "$lock_file" 2>/dev/null || true
+        if ! flock -w "$lock_wait" "$lock_fd"; then
+            exec {lock_fd}>&-
+            return 1
+        fi
+    fi
+
+    tmp=$(mktemp "$(dirname "$file")/.run.json.tmp.XXXXXX") || {
+        [[ -n "${lock_fd:-}" ]] && exec {lock_fd}>&-
+        return 1
+    }
     if jq "$@" "$file" >"$tmp" 2>/dev/null; then
         chmod 600 "$tmp" 2>/dev/null || true
-        mv -f "$tmp" "$file"
-        return 0
+        if mv -f "$tmp" "$file"; then
+            [[ -n "${lock_fd:-}" ]] && exec {lock_fd}>&-
+            return 0
+        fi
     fi
     rm -f "$tmp"
+    [[ -n "${lock_fd:-}" ]] && exec {lock_fd}>&-
     return 1
 }
 
@@ -136,6 +157,7 @@ init_run_manifest() {
           started_at_epoch: $started_at_epoch,
           updated_at: $started_at,
           heartbeat_at: $started_at,
+          heartbeat_sequence: 0,
           finished_at: null,
           duration_seconds: null,
           exit_code: null,
@@ -194,8 +216,6 @@ init_run_manifest() {
     return 0
 }
 
-# Self-benchmarking: add a monotonic heartbeat sequence next so collectors can
-# detect missed writes without depending on wall-clock precision.
 run_manifest_heartbeat() {
     local phase="${1:-running}" iteration="${2:-${_RALPH_CURRENT_ITERATION:-0}}" force="${3:-0}"
     [[ "${_RALPH_RUN_ACTIVE:-0}" == "1" && "${_RALPH_RUN_FINALIZED:-0}" != "1" ]] || return 0
@@ -227,7 +247,8 @@ run_manifest_heartbeat() {
         --argjson lazy "$lazy" \
         --argjson verify_ok "$verify_ok" \
         --argjson resume_checkpoint "$resume_checkpoint" \
-        '.status = "running"
+        '.heartbeat_sequence = ((.heartbeat_sequence // 0) + 1)
+         | .status = "running"
          | .phase = $phase
          | .updated_at = $now
          | .heartbeat_at = $now

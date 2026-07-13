@@ -1009,7 +1009,7 @@ run_ai_tool() {
     log_info "Running ${_RALPH_COLOR_MAGENTA}${tool}${_RALPH_COLOR_NC} with model: ${_RALPH_COLOR_GREEN}${model}${_RALPH_COLOR_NC}"
     log_debug "Prompt length: ${#prompt} characters"
 
-    local pid i exit_code guardian_pid=""
+    local pid i exit_code guardian_pid="" cleanup_recorded=0 cleanup_trigger=normal
 
     if [[ "$tool" == "jules" ]]; then
         if ! declare -F run_jules_remote >/dev/null 2>&1; then
@@ -1082,9 +1082,9 @@ run_ai_tool() {
     fi
     pid=$!
     if declare -F register_child_process >/dev/null 2>&1; then
-        register_child_process "$pid" || true
+        register_child_process "$pid" provider || true
     fi
-    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}"; then
+    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}" provider; then
         guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
     fi
 
@@ -1103,10 +1103,15 @@ run_ai_tool() {
             timed_out=1
             log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process tree"
             printf 'AI tool exceeded RALPH_TOOL_TIMEOUT=%ss; terminating process tree\n' "$_dur" >>"$log_file"
-            _kill_process_tree TERM "$pid"
-            sleep 1
-            if kill -0 "$pid" 2>/dev/null; then
-                _kill_process_tree KILL "$pid"
+            if declare -F terminate_owned_process >/dev/null 2>&1; then
+                terminate_owned_process "$pid" provider timeout 1
+                cleanup_recorded=1
+            else
+                _kill_process_tree TERM "$pid"
+                sleep 1
+                if kill -0 "$pid" 2>/dev/null; then
+                    _kill_process_tree KILL "$pid"
+                fi
             fi
             break
         fi
@@ -1136,10 +1141,15 @@ run_ai_tool() {
                 idle_stopped=1
                 log_warning "AI tool quiet after project progress for ${idle_timeout}s; terminating process tree and moving to verification"
                 printf 'AI tool quiet after project progress for %ss; terminating process tree and moving to verification\n' "$idle_timeout" >>"$log_file"
-                _kill_process_tree TERM "$pid"
-                sleep 1
-                if kill -0 "$pid" 2>/dev/null; then
-                    _kill_process_tree KILL "$pid"
+                if declare -F terminate_owned_process >/dev/null 2>&1; then
+                    terminate_owned_process "$pid" provider quiescence 1
+                    cleanup_recorded=1
+                else
+                    _kill_process_tree TERM "$pid"
+                    sleep 1
+                    if kill -0 "$pid" 2>/dev/null; then
+                        _kill_process_tree KILL "$pid"
+                    fi
                 fi
                 break
             fi
@@ -1161,6 +1171,11 @@ run_ai_tool() {
     fi
     [[ "$timed_out" -eq 1 ]] && exit_code=124
     [[ "$idle_stopped" -eq 1 ]] && exit_code=0
+    if [[ "$cleanup_recorded" -eq 0 ]] && declare -F _ralph_record_process_cleanup_event >/dev/null 2>&1; then
+        cleanup_trigger=normal
+        [[ "$exit_code" -eq 124 ]] && cleanup_trigger=timeout
+        _ralph_record_process_cleanup_event provider "$cleanup_trigger" already_exited 0 || true
+    fi
 
     if [[ "$tool" == "opencode" ]] && declare -F normalize_opencode_json_output >/dev/null 2>&1; then
         normalize_opencode_json_output "$output_file" "$log_file"
@@ -2703,9 +2718,9 @@ run_live_smoke() {
     ({ exec 9>&-; } 2>/dev/null || true; cd "$project_dir" && PORT="$port" HOST=127.0.0.1 bash -lc "$cmd") >"$log_file" 2>&1 &
     pid=$!
     if declare -F register_child_process >/dev/null 2>&1; then
-        register_child_process "$pid" || true
+        register_child_process "$pid" live_smoke || true
     fi
-    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}"; then
+    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}" live_smoke; then
         guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
     fi
     started_at=$SECONDS
@@ -2729,10 +2744,14 @@ run_live_smoke() {
         sleep 1
     done
 
-    _kill_process_tree TERM "$pid"
-    sleep 1
-    if kill -0 "$pid" 2>/dev/null; then
-        _kill_process_tree KILL "$pid"
+    if declare -F terminate_owned_process >/dev/null 2>&1; then
+        terminate_owned_process "$pid" live_smoke verification 1
+    else
+        _kill_process_tree TERM "$pid"
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            _kill_process_tree KILL "$pid"
+        fi
     fi
     wait "$pid" >/dev/null 2>&1 || true
     if declare -F unregister_child_process >/dev/null 2>&1; then

@@ -45,6 +45,7 @@ manifest=$(run_manifest_file)
 jq empty "$manifest" 2>/dev/null && ok "initial manifest is valid JSON" || bad "initial manifest is invalid"
 eq "initial status" initializing "$(jq -r '.status' "$manifest")"
 eq "schema version" 1 "$(jq -r '.schema_version' "$manifest")"
+eq "initial heartbeat sequence" 0 "$(jq -r '.heartbeat_sequence' "$manifest")"
 eq "tool recorded" opencode "$(jq -r '.execution.tool' "$manifest")"
 eq "model recorded" local/test "$(jq -r '.execution.model' "$manifest")"
 eq "unattended mode recorded" true "$(jq -r '.execution.unattended' "$manifest")"
@@ -67,6 +68,10 @@ run_manifest_heartbeat provider_execution 5 1
 eq "heartbeat promotes status to running" running "$(jq -r '.status' "$manifest")"
 eq "heartbeat phase recorded" provider_execution "$(jq -r '.phase' "$manifest")"
 eq "heartbeat iteration recorded" 5 "$(jq -r '.current_iteration' "$manifest")"
+eq "first heartbeat advances sequence" 1 "$(jq -r '.heartbeat_sequence' "$manifest")"
+run_manifest_heartbeat provider_execution 6 1
+eq "repeated heartbeat advances sequence" 2 "$(jq -r '.heartbeat_sequence' "$manifest")"
+heartbeat_sequence_before_finalize=$(jq -r '.heartbeat_sequence' "$manifest")
 eq "active fallback model recorded" local/fallback "$(jq -r '.execution.model' "$manifest")"
 eq "token usage recorded" 321 "$(jq -r '.progress.tokens_total' "$manifest")"
 eq "verification state recorded" true "$(jq -r '.progress.last_verify_ok' "$manifest")"
@@ -76,6 +81,7 @@ eq "completion status recorded" completed "$(jq -r '.status' "$manifest")"
 eq "completion reason recorded" completion_signal "$(jq -r '.reason' "$manifest")"
 eq "completion exit code recorded" 0 "$(jq -r '.exit_code' "$manifest")"
 eq "completion is a clean exit" true "$(jq -r '.clean_exit' "$manifest")"
+eq "finalization preserves heartbeat sequence" "$heartbeat_sequence_before_finalize" "$(jq -r '.heartbeat_sequence' "$manifest")"
 [[ "$(jq -r '.finished_at' "$manifest")" != null ]] && ok "completion timestamp recorded" || bad "completion timestamp missing"
 before=$(sha256sum "$manifest" | awk '{print $1}')
 finalize_run_manifest 9
@@ -90,6 +96,7 @@ export RESUME_FLAG=false
 init_run_manifest
 stale_manifest=$(run_manifest_file)
 run_manifest_heartbeat provider_execution 3 1
+stale_sequence=$(jq -r '.heartbeat_sequence' "$stale_manifest")
 _RALPH_RUN_ACTIVE=0
 
 export RUN_ID=run-resume
@@ -101,6 +108,7 @@ eq "stale active run becomes interrupted" interrupted "$(jq -r '.status' "$stale
 eq "stale run has unclean reason" unclean_exit_detected "$(jq -r '.reason' "$stale_manifest")"
 eq "stale run is not a clean exit" false "$(jq -r '.clean_exit' "$stale_manifest")"
 eq "stale run names recovery run" run-resume "$(jq -r '.recovered_by_run_id' "$stale_manifest")"
+eq "stale reconciliation preserves sequence" "$stale_sequence" "$(jq -r '.heartbeat_sequence' "$stale_manifest")"
 eq "resume requested flag recorded" true "$(jq -r '.resume.requested' "$resume_manifest")"
 eq "resume predecessor recorded" run-stale "$(jq -r '.resume.previous_run_id' "$resume_manifest")"
 export _RALPH_RESUME_CHECKPOINT=7
@@ -109,6 +117,54 @@ eq "resume checkpoint recorded" 7 "$(jq -r '.resume.checkpoint_iteration' "$resu
 set_run_outcome paused single_iteration
 finalize_run_manifest 0
 eq "scheduler pause is distinct" paused "$(jq -r '.status' "$resume_manifest")"
+
+echo "== concurrent subprocess heartbeat serialization =="
+export RUN_ID=run-concurrent
+export RUN_DIR="$_RALPH_DIR/runs/$RUN_ID"
+export RESUME_FLAG=false
+init_run_manifest
+concurrent_manifest=$(run_manifest_file)
+heartbeat_pids=()
+for i in {1..8}; do
+    (run_manifest_heartbeat provider_execution "$i" 1) &
+    heartbeat_pids+=("$!")
+done
+for heartbeat_pid in "${heartbeat_pids[@]}"; do
+    wait "$heartbeat_pid" || true
+done
+eq "subprocess heartbeats increment exactly once" 8 "$(jq -r '.heartbeat_sequence' "$concurrent_manifest")"
+jq empty "$concurrent_manifest" 2>/dev/null && ok "concurrent heartbeat manifest remains valid JSON" || bad "concurrent heartbeat corrupted manifest"
+set_run_outcome completed concurrent_test
+finalize_run_manifest 0
+
+echo "== invalid lock wait falls back safely =="
+export RUN_ID=run-lock-default
+export RUN_DIR="$_RALPH_DIR/runs/$RUN_ID"
+init_run_manifest
+lock_default_manifest=$(run_manifest_file)
+lock_ready="$TMP/manifest-lock-ready"
+(
+    exec 8>"${lock_default_manifest}.lock"
+    flock -x 8
+    : >"$lock_ready"
+    sleep 0.2
+) &
+lock_holder_pid=$!
+for _ in {1..30}; do
+    [[ -f "$lock_ready" ]] && break
+    sleep 0.01
+done
+export RALPH_LOCK_WAIT_SECONDS=invalid
+if run_manifest_heartbeat provider_execution 1 1; then
+    ok "invalid lock wait uses the documented fallback"
+else
+    bad "invalid lock wait became nonblocking"
+fi
+wait "$lock_holder_pid"
+unset RALPH_LOCK_WAIT_SECONDS
+eq "fallback-wait heartbeat persists once" 1 "$(jq -r '.heartbeat_sequence' "$lock_default_manifest")"
+set_run_outcome completed lock_default_test
+finalize_run_manifest 0
 
 echo "== EXIT trap classifies unexpected failures =="
 unexpected_root="$TMP/unexpected"
