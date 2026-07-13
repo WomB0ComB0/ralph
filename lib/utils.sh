@@ -261,6 +261,11 @@ resolve_gitdiff_exclude() {
 cleanup_ralph() {
     local exit_code=$?
 
+    # A terminal manifest must mean Ralph no longer owns a live executor/server.
+    if declare -F terminate_registered_processes >/dev/null 2>&1; then
+        terminate_registered_processes >/dev/null 2>&1 || true
+    fi
+
     # Finalize only real iterating runs. Read-only subcommands and test harnesses
     # never activate the manifest, so sourcing this library remains side-effect free.
     if declare -F finalize_run_manifest >/dev/null 2>&1; then
@@ -1330,10 +1335,12 @@ parse_arguments() {
                 ;;
             --sandbox)
                 export SANDBOX_MODE=true
+                export RALPH_SANDBOX_EXPLICITLY_DISABLED=false
                 shift
                 ;;
             --no-sandbox)
                 export SANDBOX_MODE=false
+                export RALPH_SANDBOX_EXPLICITLY_DISABLED=true
                 shift
                 ;;
             --unattended)

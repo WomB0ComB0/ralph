@@ -5,6 +5,8 @@ export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
 # shellcheck disable=SC1090
+source "$R/lib/processes.sh"
+# shellcheck disable=SC1090
 source "$R/lib/engine.sh"
 set +eu
 IFS=$' \t\n'

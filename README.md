@@ -101,6 +101,18 @@ jq '{run_id, status, reason, phase, heartbeat_at, current_iteration, progress}' 
 
 Writes use same-directory temporary files and atomic renames. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected` and records the recovering run ID.
 
+### Reliability Soak
+
+Run a network-free, disposable TERM/KILL recovery cycle against the real entry point:
+
+```bash
+tests/unattended_soak.sh --cycles 2 --duration 120 --seed 42 \
+  --output /tmp/ralph-soak.json
+jq '{status, fault_runs, retention, failures}' /tmp/ralph-soak.json
+```
+
+Each cycle injects both signals in seeded random order, resumes from the prior checkpoint, verifies provider-tree cleanup and stale-manifest reconciliation, and enforces run retention. The mode-`600` JSON report is allowlisted and excludes prompts, logs, environment values, commands, and temporary paths. `--duration` is a wall-clock ceiling checked between cycles; an active cycle always finishes.
+
 ## Common Commands
 
 ### Agent Loop
@@ -116,6 +128,7 @@ Writes use same-directory temporary files and atomic renames. If a process dies 
 ./ralph.sh --interactive           # pause between iterations
 ./ralph.sh --unattended            # no interactive prompts
 ./ralph.sh --sandbox               # run in Docker sandbox
+./ralph.sh --no-sandbox            # explicitly accept host execution
 ./ralph.sh --context docs/api.md   # add context files
 ./ralph.sh --diff-context          # include recent git diff
 ./ralph.sh --review                # self-tuning review pass, no AI call
@@ -244,6 +257,8 @@ Common environment variables:
 | `RALPH_TOOL_IDLE_TIMEOUT` | Progress-aware quiescence timeout in seconds, default `180`; after project changes and declared verification discovery, a quiet provider is stopped and Ralph moves to validation. |
 | `RALPH_TOOL_IDLE_MIN_RUNTIME` / `RALPH_TOOL_IDLE_PROBE_INTERVAL` | Minimum runtime before quiescence can stop a provider, and the probe interval, defaults `30` and `2` seconds. |
 | `RALPH_RUN_HEARTBEAT_INTERVAL` | Minimum seconds between same-phase run-manifest heartbeats, default `15`; phase changes and iteration boundaries write immediately. |
+| `RALPH_LOCK_WAIT_SECONDS` | Seconds to wait for the per-project singleton lock, default `3`, maximum `60`; set `0` for nonblocking behavior. |
+| `RALPH_CHILD_TERM_GRACE` | Seconds to wait after terminating owned provider/server trees before escalating to KILL, default `2`, maximum `30`. |
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
@@ -329,6 +344,7 @@ See [`scripts/README.md`](scripts/README.md) for details.
 |-- ralph.sh                  # entry point
 |-- lib/
 |   |-- engine.sh             # core loop and validation
+|   |-- processes.sh          # owned child cleanup and parent-death guardians
 |   |-- run_manifest.sh       # atomic run lifecycle evidence
 |   |-- lint.sh               # knowledge-store curator checks
 |   |-- signals.sh            # recurring-problem capture

@@ -5,6 +5,7 @@ R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
+source "$R/lib/processes.sh"
 source "$R/lib/engine.sh"
 set +eu
 IFS=' '   # libs set IFS=$'\n\t'; use spaces so "${_AI_CMD[*]}" joins readably for matching
@@ -13,6 +14,14 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  PASS: %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL: %s\n' "$1"; }
 eq()  { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (exp [$2] got [$3])"; fi; }
+valid_test_pid() { local pid="${1:-}"; [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )); }
+test_pid_alive() { valid_test_pid "${1:-}" && kill -0 "$1" 2>/dev/null; }
+kill_test_pids() {
+    local pid
+    for pid in "$@"; do
+        valid_test_pid "$pid" && kill -KILL "$pid" 2>/dev/null || true
+    done
+}
 
 echo "== claude: headless (-p/--print) + model, prompt-as-arg =="
 _build_ai_cmd claude "m1"; eq "claude rc" 0 "$?"
@@ -176,6 +185,150 @@ eq "hung tool returns timeout rc" 124 "$watchdog_rc"
 grep -q "exceeded RALPH_TOOL_TIMEOUT=1s" "$lf" && ok "timeout warning logged" || bad "timeout warning missing"
 rm -rf "$wdir"
 
+echo "== signal cleanup: TERM reaps provider process tree before exit =="
+sdir=$(mktemp -d); sstub="$sdir/bin"; mkdir -p "$sstub" "$sdir/project"
+cat > "$sstub/opencode" <<'SH'
+#!/bin/bash
+printf '%s\n' "$$" > "$PROVIDER_PID_FILE"
+sleep 30 &
+printf '%s\n' "$!" > "$PROVIDER_CHILD_PID_FILE"
+wait
+SH
+chmod +x "$sstub/opencode"
+bash -c '
+    source "$1/lib/utils.sh"
+    source "$1/lib/processes.sh"
+    source "$1/lib/engine.sh"
+    set +eu
+    IFS=" "
+    export PATH="$2/bin:$PATH"
+    export PROVIDER_PID_FILE="$2/provider.pid"
+    export PROVIDER_CHILD_PID_FILE="$2/provider-child.pid"
+    export RALPH_TOOL_TIMEOUT=20
+    export RALPH_TOOL_IDLE_TIMEOUT=0
+    export RALPH_OPENCODE_JSON=0
+    export PROJECT_DIR="$2/project"
+    iteration=1
+    MAX_ITERATIONS=1
+    run_ai_tool opencode "" prompt "$2/log" "$2/out"
+' _ "$R" "$sdir" >/dev/null 2>&1 &
+runner_pid=$!
+for _ in {1..50}; do
+    [[ -s "$sdir/provider.pid" && -s "$sdir/provider-child.pid" ]] && break
+    sleep 0.1
+done
+provider_pid=$(cat "$sdir/provider.pid" 2>/dev/null || true)
+provider_child_pid=$(cat "$sdir/provider-child.pid" 2>/dev/null || true)
+if valid_test_pid "$provider_pid" && valid_test_pid "$provider_child_pid"; then
+    ok "TERM fixture recorded provider process tree"
+else
+    bad "TERM fixture did not record valid provider PIDs"
+fi
+kill -TERM "$runner_pid" 2>/dev/null || true
+wait "$runner_pid"; signal_rc=$?
+for _ in {1..30}; do
+    if ! test_pid_alive "$provider_pid" && ! test_pid_alive "$provider_child_pid"; then
+        break
+    fi
+    sleep 0.1
+done
+eq "TERM preserves conventional exit code" 143 "$signal_rc"
+if test_pid_alive "$provider_pid"; then
+    bad "provider survived Ralph TERM cleanup"
+else
+    ok "provider reaped on Ralph TERM"
+fi
+if test_pid_alive "$provider_child_pid"; then
+    bad "provider descendant survived Ralph TERM cleanup"
+else
+    ok "provider descendant reaped on Ralph TERM"
+fi
+kill_test_pids "$provider_pid" "$provider_child_pid"
+rm -rf "$sdir"
+echo "== parent-death guardian: SIGKILL cannot orphan provider tree =="
+kdir=$(mktemp -d); kstub="$kdir/bin"; mkdir -p "$kstub" "$kdir/project"
+cat > "$kstub/opencode" <<'SH'
+#!/bin/bash
+printf '%s\n' "$$" > "$PROVIDER_PID_FILE"
+sleep 30 &
+printf '%s\n' "$!" > "$PROVIDER_CHILD_PID_FILE"
+wait
+SH
+chmod +x "$kstub/opencode"
+bash -c '
+    source "$1/lib/utils.sh"
+    source "$1/lib/processes.sh"
+    source "$1/lib/engine.sh"
+    set +eu
+    IFS=" "
+    export PATH="$2/bin:$PATH"
+    export PROVIDER_PID_FILE="$2/provider.pid"
+    export PROVIDER_CHILD_PID_FILE="$2/provider-child.pid"
+    export RALPH_TOOL_TIMEOUT=20
+    export RALPH_TOOL_IDLE_TIMEOUT=0
+    export RALPH_OPENCODE_JSON=0
+    export PROJECT_DIR="$2/project"
+    iteration=1
+    MAX_ITERATIONS=1
+    exec 9>"$2/ralph.lock"
+    flock -n 9 || exit 70
+    run_ai_tool opencode "" prompt "$2/log" "$2/out"
+' _ "$R" "$kdir" >/dev/null 2>&1 &
+killed_runner_pid=$!
+for _ in {1..50}; do
+    [[ -s "$kdir/provider.pid" && -s "$kdir/provider-child.pid" ]] && break
+    sleep 0.1
+done
+killed_provider_pid=$(cat "$kdir/provider.pid" 2>/dev/null || true)
+killed_provider_child_pid=$(cat "$kdir/provider-child.pid" 2>/dev/null || true)
+if valid_test_pid "$killed_provider_pid" && valid_test_pid "$killed_provider_child_pid"; then
+    ok "SIGKILL fixture recorded provider process tree"
+else
+    bad "SIGKILL fixture did not record valid provider PIDs"
+fi
+sleep 0.3
+mapfile -t killed_owned_pids < <(pgrep -P "$killed_runner_pid" 2>/dev/null || true)
+kill -KILL "$killed_runner_pid" 2>/dev/null || true
+wait "$killed_runner_pid"; killed_runner_rc=$?
+lock_reacquired=false
+for _ in {1..30}; do
+    if ( flock -n 9 ) 9>"$kdir/ralph.lock"; then
+        lock_reacquired=true
+        break
+    fi
+    sleep 0.1
+done
+for _ in {1..50}; do
+    owned_alive=0
+    for owned_pid in "${killed_owned_pids[@]}"; do
+        test_pid_alive "$owned_pid" && owned_alive=1
+    done
+    if ! test_pid_alive "$killed_provider_pid" &&
+       ! test_pid_alive "$killed_provider_child_pid" &&
+       [[ "$owned_alive" -eq 0 ]]; then
+        break
+    fi
+    sleep 0.1
+done
+eq "SIGKILL preserves conventional exit code" 137 "$killed_runner_rc"
+[[ "$lock_reacquired" == "true" ]] && ok "singleton lock released within recovery window" || bad "child retained singleton lock beyond recovery window"
+if test_pid_alive "$killed_provider_pid"; then
+    bad "provider survived Ralph SIGKILL"
+else
+    ok "guardian reaped provider after Ralph SIGKILL"
+fi
+if test_pid_alive "$killed_provider_child_pid"; then
+    bad "provider descendant survived Ralph SIGKILL"
+else
+    ok "guardian reaped provider descendant after Ralph SIGKILL"
+fi
+owned_alive=0
+for owned_pid in "${killed_owned_pids[@]}"; do
+    test_pid_alive "$owned_pid" && owned_alive=1
+done
+[[ "$owned_alive" -eq 0 ]] && ok "guardian exited after SIGKILL cleanup" || bad "owned process survived SIGKILL cleanup"
+kill_test_pids "$killed_provider_pid" "$killed_provider_child_pid" "${killed_owned_pids[@]}"
+rm -rf "$kdir"
 echo "== run_ai_tool quiescence: quiet-after-change provider is gracefully stopped =="
 if command -v jq >/dev/null 2>&1; then
     qdir=$(mktemp -d); qstub="$qdir/bin"; mkdir -p "$qstub" "$qdir/proj"

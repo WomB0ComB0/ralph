@@ -1009,7 +1009,7 @@ run_ai_tool() {
     log_info "Running ${_RALPH_COLOR_MAGENTA}${tool}${_RALPH_COLOR_NC} with model: ${_RALPH_COLOR_GREEN}${model}${_RALPH_COLOR_NC}"
     log_debug "Prompt length: ${#prompt} characters"
 
-    local pid i exit_code
+    local pid i exit_code guardian_pid=""
 
     if [[ "$tool" == "jules" ]]; then
         if ! declare -F run_jules_remote >/dev/null 2>&1; then
@@ -1073,14 +1073,20 @@ run_ai_tool() {
     # shellcheck disable=SC2094  # both redirections to $log_file are APPENDS (2>> and tee -a),
     # not a read+overwrite — concurrent O_APPEND writes are atomic, so this is safe by design.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        ( { exec 9>&-; } 2>/dev/null || true; _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     else
         # Redirect stdin from /dev/null: these tools take the prompt as an argv, and some (e.g.
         # opencode run) abort immediately on a non-interactive/inherited stdin. A clean EOF makes
         # the autonomous invocation behave the same as an interactive one.
-        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        ( { exec 9>&-; } 2>/dev/null || true; _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
     fi
     pid=$!
+    if declare -F register_child_process >/dev/null 2>&1; then
+        register_child_process "$pid" || true
+    fi
+    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}"; then
+        guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    fi
 
     # Animated spinner while tool runs
     local i=0 timed_out=0 started_at=$SECONDS
@@ -1147,6 +1153,12 @@ run_ai_tool() {
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
+    if declare -F unregister_child_process >/dev/null 2>&1; then
+        unregister_child_process "$pid"
+    fi
+    if [[ -n "$guardian_pid" ]] && declare -F stop_child_guardian >/dev/null 2>&1; then
+        stop_child_guardian "$guardian_pid"
+    fi
     [[ "$timed_out" -eq 1 ]] && exit_code=124
     [[ "$idle_stopped" -eq 1 ]] && exit_code=0
 
@@ -1888,8 +1900,9 @@ main() {
     fi
 
     # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
-    # Skip when already inside the sandbox container (we are the isolation boundary).
-    if [[ "${UNATTENDED:-false}" == "true" && "${SANDBOX_MODE:-false}" != "true" ]] && ! running_in_container; then
+    # Skip inside a container or when the operator explicitly accepted host execution.
+    if [[ "${UNATTENDED:-false}" == "true" && "${SANDBOX_MODE:-false}" != "true" &&
+          "${RALPH_SANDBOX_EXPLICITLY_DISABLED:-false}" != "true" ]] && ! running_in_container; then
         if command_exists docker; then
             log_info "Unattended mode: enabling Docker sandbox for isolation"
             export SANDBOX_MODE=true
@@ -1915,7 +1928,9 @@ main() {
     # (not before the sandbox exec) so the host wrapper does not deadlock against
     # its own bind-mounted container over the same lock file.
     if command_exists flock; then
-        local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock"
+        local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock" lock_wait="${RALPH_LOCK_WAIT_SECONDS:-3}"
+        [[ "$lock_wait" =~ ^[0-9]+$ ]] || lock_wait=3
+        [[ "$lock_wait" -le 60 ]] || lock_wait=60
         mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
         # Guard the FD redirect: a bare `exec 9>file` aborts the whole script under
         # set -e if the file exists but is not writable. The brace group scopes the
@@ -1923,8 +1938,8 @@ main() {
         # would make the stderr redirect PERMANENT and blackhole all later logs.
         if ! { exec 9>"$lock_file"; } 2>/dev/null; then
             log_warning "Cannot open lock file $lock_file; skipping singleton lock."
-        elif ! flock -n 9; then
-            log_error "Another Ralph instance is already running for this project (lock: $lock_file)."
+        elif ! flock -w "$lock_wait" 9; then
+            log_error "Another Ralph instance held the project lock for ${lock_wait}s (lock: $lock_file)."
             log_info "Use a separate git worktree for parallel runs, or wait for the current run to finish."
             exit 1
         else
@@ -2665,7 +2680,7 @@ run_live_smoke() {
     command_exists curl || { printf '%s' $'\n- Live smoke failed: missing curl.'; return 0; }
     command_exists jq || { printf '%s' $'\n- Live smoke failed: missing jq.'; return 0; }
 
-    local cmd port ready_timeout paths log_file probe_file pid started_at pass=false path url code probes_json status diagnostic
+    local cmd port ready_timeout paths log_file probe_file pid guardian_pid="" started_at pass=false path url code probes_json status diagnostic
     if ! cmd=$(collect_live_smoke_command "$project_dir"); then
         printf '%s' $'\n- Live smoke failed: no safe start command found. Add package.json scripts.start or set RALPH_LIVE_SMOKE_COMMAND.'
         return 0
@@ -2685,8 +2700,14 @@ run_live_smoke() {
     probe_file=$(mktemp "${TMPDIR:-/tmp}/ralph-live-smoke.XXXXXX") || probe_file="/tmp/ralph-live-smoke.$$"
     : > "$probe_file"
 
-    (cd "$project_dir" && PORT="$port" HOST=127.0.0.1 bash -lc "$cmd") >"$log_file" 2>&1 &
+    ({ exec 9>&-; } 2>/dev/null || true; cd "$project_dir" && PORT="$port" HOST=127.0.0.1 bash -lc "$cmd") >"$log_file" 2>&1 &
     pid=$!
+    if declare -F register_child_process >/dev/null 2>&1; then
+        register_child_process "$pid" || true
+    fi
+    if declare -F start_child_guardian >/dev/null 2>&1 && start_child_guardian "$pid" "${BASHPID:-$$}"; then
+        guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    fi
     started_at=$SECONDS
 
     while kill -0 "$pid" 2>/dev/null && [[ $((SECONDS - started_at)) -lt "$ready_timeout" ]]; do
@@ -2714,6 +2735,12 @@ run_live_smoke() {
         _kill_process_tree KILL "$pid"
     fi
     wait "$pid" >/dev/null 2>&1 || true
+    if declare -F unregister_child_process >/dev/null 2>&1; then
+        unregister_child_process "$pid"
+    fi
+    if [[ -n "$guardian_pid" ]] && declare -F stop_child_guardian >/dev/null 2>&1; then
+        stop_child_guardian "$guardian_pid"
+    fi
 
     probes_json=$(jq -s '.' "$probe_file" 2>/dev/null || echo '[]')
     rm -f "$probe_file" 2>/dev/null || true

@@ -15,7 +15,7 @@ working tree.
 | File | Covers |
 |------|--------|
 | `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args, secret scan, flock singleton (34 cases) |
-| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping (20) |
+| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping, and explicit sandbox CLI precedence (23) |
 | `test_run_manifest.sh` | Durable run lifecycle: allowlisted schema, permissions, atomic heartbeats, progress, explicit outcomes, resume lineage, stale-run reconciliation, unexpected exits, and HUP/INT/TERM handling (45) |
 | `test_loop_guards.sh` | Pure loop guard predicates: stall ceilings, run budget ceilings, and backlog-drain completion gate enforcement (23) |
 | `test_runtime_verification.sh` | Runtime verification: safe declared command discovery/execution, timeout evidence, opt-in live smoke, and project-owned health-port checks (20) |
@@ -25,7 +25,7 @@ working tree.
 | `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
 | `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (13) |
 | `test_quality_gate.sh` | Durable `QUALITY.md` rubric creation, prompt injection, and `Quality Gate: pass` completion policy (11) |
-| `test_ai_tools.sh` | AI-tool command builder (`_build_ai_cmd`): per-tool invocation for opencode / claude / amp / agy / codex, headless flags, stdin vs positional, subshell-scoped env, agy flag-order + --model, per-call timeout, codex (exec/sandbox), tool validity, stderr/stdout capture separation, claude fallback/budget/auth, opt-in session resume (`--continue`) + `_should_resume` gating, agy `--add-dir` cwd binding, tool-aware `resolve_agents_file` (CLAUDE.md vs AGENTS.md, strict override), opencode JSON normalization, and quiet-after-change quiescence (101) |
+| `test_ai_tools.sh` | AI-tool command builder and execution lifecycle: per-tool invocation for opencode / claude / amp / agy / codex, headless flags, stdin vs positional, scoped env, timeout/quiescence behavior, output normalization, session resume, TERM cleanup, SIGKILL parent-death guarding, and singleton-lock release (111) |
 | `test_jules_provider.sh` | Jules remote executor: payload modes, persisted session reuse, PR completion output, and patch-mode local apply with fixture API calls (22) |
 | `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude alias, amp/codex self-select, agy `agy models`, determine_model source precedence, param-count guard, alias validation (16) |
 | `test_fallback.sh` | Smart model management: `classify_tool_failure` (rate-limit/overload/quota/auth/timeout), `build_model_chain` (primary + fallbacks, local-first, dedup), `preferred_local_model`, `run_ai_with_fallback` graceful degradation, non-sticky, stderr classify, real provider payloads + exit/signal codes (128+N range), rc guard (46) |
@@ -41,6 +41,14 @@ failing assertion first, watch it fail, then implement. New library behavior sho
 land with a matching case here (or in the native `run_internal_tests` in
 `lib/tools.sh` when it needs the full runtime).
 
+## Optional unattended soak
+
+`tests/unattended_soak.sh` runs the real entry point in a disposable Git repository with local fixture executors. Each seeded cycle injects TERM and KILL, resumes from a checkpoint, checks process cleanup and stale-run reconciliation, verifies retention, and emits a mode-`600` JSON report without calling a model provider.
+
+```bash
+tests/unattended_soak.sh --cycles 2 --duration 120 --seed 42 \
+  --output /tmp/ralph-soak.json
+```
 
 ## Optional Docker smoke
 

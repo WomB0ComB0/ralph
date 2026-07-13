@@ -66,5 +66,23 @@ echo "== RALPH_UNATTENDED env maps onto the UNATTENDED flag (documented behavior
 ( cd "$TMP" && unset UNATTENDED && RALPH_UNATTENDED=true load_config >/dev/null 2>&1 && [[ "${UNATTENDED:-}" == "true" ]] ) \
   && ok "RALPH_UNATTENDED=true -> UNATTENDED=true" || bad "RALPH_UNATTENDED not mapped to UNATTENDED"
 
+echo "== explicit sandbox CLI precedence =="
+(
+    unset UNATTENDED SANDBOX_MODE RALPH_SANDBOX_EXPLICITLY_DISABLED
+    CONTEXT_FILES=()
+    parse_arguments --unattended --no-sandbox
+    [[ "$UNATTENDED" == "true" && "$SANDBOX_MODE" == "false" &&
+       "$RALPH_SANDBOX_EXPLICITLY_DISABLED" == "true" ]]
+) && ok "--no-sandbox records explicit host acceptance" || bad "--no-sandbox marker missing"
+(
+    unset SANDBOX_MODE RALPH_SANDBOX_EXPLICITLY_DISABLED
+    CONTEXT_FILES=()
+    parse_arguments --no-sandbox --sandbox
+    [[ "$SANDBOX_MODE" == "true" && "$RALPH_SANDBOX_EXPLICITLY_DISABLED" == "false" ]]
+) && ok "last --sandbox flag restores sandbox selection" || bad "--sandbox did not override earlier --no-sandbox"
+grep -q 'RALPH_SANDBOX_EXPLICITLY_DISABLED.*!= "true"' "$R/lib/engine.sh" &&
+    ok "unattended auto-sandbox honors explicit disable marker" ||
+    bad "unattended auto-sandbox ignores explicit disable marker"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
