@@ -88,10 +88,10 @@ def cleanup_section(cleanup_stats: dict) -> list[str]:
         if not n:
             lines.append("- no samples")
             continue
-        lines.append(f"- p50 / p95 / max: {data.get('p50_duration_ms')} / "
-                     f"{data.get('p95_duration_ms')} / {data.get('max_duration_ms')} ms")
-        lines.append(f"- TERM rate: {data.get('term_rate')} ({data.get('term_count', 0)} events)")
-        lines.append(f"- KILL rate: {data.get('kill_rate')} ({data.get('kill_count', 0)} events)")
+        lines.append(f"- p50 / p95 / max: {data.get('p50_duration_ms', 0)} / "
+                     f"{data.get('p95_duration_ms', 0)} / {data.get('max_duration_ms', 0)} ms")
+        lines.append(f"- TERM rate: {data.get('term_rate', 0)} ({data.get('term_count', 0)} events)")
+        lines.append(f"- KILL rate: {data.get('kill_rate', 0)} ({data.get('kill_count', 0)} events)")
     return lines
 
 
