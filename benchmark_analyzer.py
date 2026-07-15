@@ -95,7 +95,7 @@ def cleanup_section(cleanup_stats: dict) -> list[str]:
     return lines
 
 
-def generate_report(stats, output_file=None, cleanup_stats=None):
+def generate_report(stats: dict | None, output_file: str | None = None, cleanup_stats: dict | None = None) -> None:
     if not stats:
         print("No statistics to report.")
         return
