@@ -340,6 +340,19 @@ scripts/run-tests        # helper wrapper with rollup
 
 The test suites are plain Bash harnesses that source `lib/*.sh` directly and use temporary sandboxes. See [`tests/README.md`](tests/README.md) for the suite breakdown.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the full suite on every pull request and on pushes to `main`. The `test` job is hermetic — it never calls a model provider and needs no AI, Jules, Synapse, or GitHub write credentials (`permissions: contents: read`) — and is the required status check for branch protection. A separate `sandbox-smoke` job (Docker image build plus the provisioning smoke) is manual-only via `workflow_dispatch`.
+
+## Benchmarking
+
+```bash
+./benchmark.sh            # default iteration count
+./benchmark.sh 20         # N iterations
+```
+
+`benchmark.sh` runs Ralph non-interactively, then `benchmark_analyzer.py` turns the per-iteration `metrics.json` into `benchmark_report.md` (execution time, tokens, and tool/model utilization). The report also folds in process-cleanup latency for the runs it produced via [`ralph cleanup-stats`](#cleanup-latency-stats) — per-kind p50/p95/max and TERM/KILL rates.
+
 ## Helper Scripts
 
 The `scripts/` directory contains small `gh` workflow helpers:
