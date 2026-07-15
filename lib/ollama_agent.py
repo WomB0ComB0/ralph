@@ -87,7 +87,13 @@ def post_chat(model: str, messages: list[dict[str, str]], timeout: int) -> str:
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
-    return body.get("message", {}).get("content", "") or body.get("response", "") or ""
+    # The API may return a non-dict body, or `message` present-but-null; guard both so a
+    # malformed response degrades to "" instead of raising AttributeError and crashing.
+    if isinstance(body, dict):
+        message = body.get("message")
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        return content or body.get("response", "") or ""
+    return ""
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -156,9 +162,19 @@ def write_file(root: Path, raw: str, content: str, append: bool = False) -> dict
     return {"path": str(path.relative_to(root)), "bytes": len(content.encode("utf-8")), "append": append}
 
 
+# Shell metacharacters that enable command chaining, substitution, or redirection.
+# run_command executes via `bash -lc`, so an allowed prefix like "npm " must not be
+# followed by `&& curl ... | sh`. Blocking these confines run_command to a single,
+# simple command; the agent has dedicated list_files/read_file/write_file tools for
+# anything that would otherwise need a pipe, redirect, or substitution.
+_SHELL_METACHARACTERS = (";", "&", "|", "<", ">", "`", "$", "(", ")", "{", "}", "\n", "\r")
+
+
 def command_allowed(command: str) -> bool:
     stripped = command.strip()
     if not stripped:
+        return False
+    if any(ch in stripped for ch in _SHELL_METACHARACTERS):
         return False
     if any(re.search(pattern, stripped, re.IGNORECASE) for pattern in DENY_COMMAND_PATTERNS):
         return False

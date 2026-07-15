@@ -177,6 +177,14 @@ jules_write_state() {
     local state_file="$1" session_json="$2" prompt_hash="$3" source="$4" branch="$5" mode="$6"
     local existing session_name session_id state update_time url pr now tmp
     existing=$(jules_existing_state_json "$state_file")
+    # Validate before any bare `jq` parse: an invalid/empty body (gateway error, network
+    # glitch) would make jq exit non-zero and, under ralph.sh's `set -e`, abort the whole
+    # agent. Fail this write closed instead. Do not log the body — it may carry session
+    # content that must stay out of logs.
+    if ! jq -e . <<<"$session_json" >/dev/null 2>&1; then
+        log_error "Jules API returned invalid JSON (${#session_json} bytes); state not updated"
+        return 1
+    fi
     session_name=$(jq -r '.name // empty' <<<"$session_json")
     session_id=$(jq -r '.id // empty' <<<"$session_json")
     [[ -z "$session_id" && -n "$session_name" ]] && session_id=$(jules_session_id "$session_name")
@@ -272,11 +280,33 @@ jules_wait_for_completion() {
     local session_name="$1" state_file="$2" prompt_hash="$3" source="$4" branch="$5" mode="$6" log_file="$7"
     local timeout="${RALPH_JULES_TIMEOUT:-7200}" interval="${RALPH_JULES_POLL_INTERVAL:-15}"
     local start=$SECONDS session_json state elapsed
+    local consecutive_failures=0 max_poll_failures="${RALPH_JULES_MAX_POLL_FAILURES:-5}"
     [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=7200
     [[ "$interval" =~ ^[0-9]+$ ]] || interval=15
+    [[ "$max_poll_failures" =~ ^[0-9]+$ && "$max_poll_failures" -ge 1 ]] || max_poll_failures=5
 
     while true; do
-        session_json=$(jules_get_session "$session_name") || return 1
+        # A single transient failure (timeout, reset, gateway error, invalid JSON) in a
+        # loop that can run for hours must not abort the whole wait. Tolerate up to
+        # max_poll_failures CONSECUTIVE failures, still honoring the overall timeout, and
+        # only escalate when the API is durably unreachable. Validating JSON here also
+        # keeps a malformed body from reaching the bare jq parses below under `set -e`.
+        if ! session_json=$(jules_get_session "$session_name" 2>/dev/null) \
+           || ! jq -e . <<<"$session_json" >/dev/null 2>&1; then
+            consecutive_failures=$((consecutive_failures + 1))
+            log_warning "Jules poll failed or returned invalid JSON (attempt ${consecutive_failures}/${max_poll_failures})"
+            if [[ "$consecutive_failures" -ge "$max_poll_failures" ]]; then
+                log_error "Jules API unreachable after ${max_poll_failures} consecutive attempts"
+                return 1
+            fi
+            elapsed=$((SECONDS - start))
+            if [[ "$timeout" -ne 0 && "$elapsed" -ge "$timeout" ]]; then
+                return 75
+            fi
+            sleep "$interval"
+            continue
+        fi
+        consecutive_failures=0
         state=$(jq -r '.state // "STATE_UNSPECIFIED"' <<<"$session_json")
         jules_write_state "$state_file" "$session_json" "$prompt_hash" "$source" "$branch" "$mode"
         jules_remote_progress "$state" "$session_name"

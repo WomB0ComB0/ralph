@@ -806,10 +806,45 @@ _project_progress_fingerprint() {
         compute_project_hash 2>/dev/null && return 0
     fi
     local project_dir="${PROJECT_DIR:-.}"
+    # Portable, pruned fallback. `find -printf` is a GNU extension that fails silently on
+    # macOS/BSD (yielding an empty, useless fingerprint), and an un-pruned walk over
+    # node_modules/target/dist on every ~2s probe is very expensive. Prefer python3: it is
+    # cross-platform, prunes heavy dirs, and hashes size+mtime so edits are detected. The
+    # project path is passed as argv (not interpolated) so unusual paths can't break it.
+    local fp
+    if command -v python3 >/dev/null 2>&1; then
+        fp=$(python3 - "$project_dir" <<'PY' 2>/dev/null
+import hashlib, os, sys
+root = sys.argv[1]
+exclude = {".git", ".ralph", "node_modules", "target", "dist", "build",
+           "venv", ".venv", ".cache", ".next", ".mypy_cache", ".pytest_cache", "__pycache__"}
+entries = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in exclude]
+    for name in filenames:
+        p = os.path.join(dirpath, name)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        entries.append(f"{os.path.relpath(p, root)}\t{st.st_size}\t{int(st.st_mtime)}")
+entries.sort()
+print(hashlib.md5("\n".join(entries).encode("utf-8", "surrogatepass")).hexdigest())
+PY
+)
+        if [[ -n "$fp" ]]; then
+            printf '%s\n' "$fp"
+            return 0
+        fi
+    fi
+    # Last resort (no git hash, no python3): portable `find` without -printf, pruning the
+    # heavy dirs. Tracks the file SET only (coarser than size+mtime), but never fails
+    # silently the way -printf does on BSD.
     find "$project_dir" \
-        -path '*/.git' -prune -o \
-        -path '*/.ralph' -prune -o \
-        -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum_wrapper | awk '{print $1}'
+        \( -name .git -o -name .ralph -o -name node_modules -o -name target \
+           -o -name dist -o -name build -o -name venv -o -name .venv \
+           -o -name .cache -o -name __pycache__ \) -prune -o \
+        -type f -print 2>/dev/null | LC_ALL=C sort | md5sum_wrapper | awk '{print $1}'
 }
 
 # Name of the available GNU timeout binary (macOS+Homebrew coreutils ships it as gtimeout).
