@@ -14,7 +14,7 @@ working tree.
 
 | File | Covers |
 |------|--------|
-| `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args and explicit `flock` provisioning, secret scan, flock singleton (36 cases) |
+| `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args and explicit `flock` provisioning, name-only sandbox secret forwarding (no value in argv/logs), secret scan, flock singleton (42 cases) |
 | `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping, and explicit sandbox CLI precedence (23) |
 | `test_run_manifest.sh` | Durable run lifecycle: allowlisted schema, permissions, atomic and serialized monotonic heartbeats, lock contention fallback, progress, explicit outcomes, resume lineage, stale-run reconciliation, unexpected exits, and HUP/INT/TERM handling (54) |
 | `test_processes.sh` | Supervised process boundaries: run-local mode-`600` identity handshake, session/group isolation, direct exit/output preservation, daemonized descendant completion, late-fork TERM/KILL escalation, PID-reuse guards, parent-death cleanup, and bounded sanitized evidence (48) |
@@ -58,3 +58,15 @@ tests/unattended_soak.sh --cycles 2 --duration 120 --seed 42 \
 `tests/sandbox_provisioning_smoke.sh` exercises the Docker sandbox image with a
 stubbed selected AI tool. It requires Docker, builds `ralph-sandbox:latest` if
 missing, and does not call a real model provider.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`. The
+`test` job is hermetic: it installs `bc`/`jq`/`sqlite3`, checks Bash syntax and
+Python compilation, runs `./tests/run_all.sh`, and (on PRs) runs a whitespace check
+against the base SHA. It never calls a model provider and never needs AI, Jules,
+Synapse, or GitHub write credentials (`permissions: contents: read`).
+
+**Required status check for branch protection: `test`** (workflow `CI`). A separate
+`sandbox-smoke` job builds the image and runs the Docker smoke; it is manual-only
+(`workflow_dispatch`) and intentionally not part of the required gate.

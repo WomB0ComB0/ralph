@@ -1,0 +1,109 @@
+name: CI
+
+# Quality gate for Ralph. The `test` job is fully hermetic: it never calls a real
+# model provider and never needs AI, Jules, Synapse, or GitHub write credentials.
+# Every suite sources lib/*.sh directly and stubs external tools, so `contents: read`
+# and the default GITHUB_TOKEN are sufficient.
+#
+# Required status check for branch protection: "test" (this workflow, `test` job).
+# The `sandbox-smoke` job is manual-only (workflow_dispatch) because it builds a full
+# Docker image over the network; it is intentionally NOT part of the required gate.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: reading the repo is all the hermetic gate needs.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the PR-range whitespace check can reach the base SHA.
+          fetch-depth: 0
+
+      - name: Install documented dependencies
+        run: |
+          sudo apt-get update
+          # bc/jq/sqlite3 are the ones not guaranteed on the runner image; git,
+          # python3, node/npm, patch, util-linux (flock/setsid) and procps
+          # (ps/pgrep) are preinstalled on ubuntu-latest.
+          sudo apt-get install -y --no-install-recommends bc jq sqlite3
+
+      - name: Tool versions
+        run: |
+          bash --version | head -1
+          jq --version
+          bc --version | head -1
+          sqlite3 --version
+          python3 --version
+          git --version
+          node --version
+          npm --version
+
+      - name: Configure a throwaway git identity
+        run: |
+          # Some suites create ephemeral repos; give git an identity so commits in
+          # those temp repos never fail on a bare runner.
+          git config --global user.email ci@ralph.invalid
+          git config --global user.name "ralph-ci"
+          git config --global init.defaultBranch main
+
+      - name: Bash syntax check
+        run: |
+          rc=0
+          # All *.sh, plus the extensionless bash helpers under scripts/ (skip README.md).
+          for f in $(git ls-files '*.sh' 'scripts/*' | grep -vE '\.md$'); do
+            if ! bash -n "$f"; then
+              echo "::error file=$f::bash syntax error"
+              rc=1
+            fi
+          done
+          exit $rc
+
+      - name: Python compilation check
+        run: |
+          # shellcheck disable=SC2046
+          python3 -m py_compile $(git ls-files '*.py')
+
+      - name: Run test suite
+        run: ./tests/run_all.sh
+
+      - name: Whitespace check (PR range)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # A bare `git diff --check` on a clean checkout compares the worktree to the
+          # index and so checks nothing; diff the actual PR range against the base SHA.
+          git diff --check "$BASE_SHA"...HEAD
+
+  # Optional, manual-only: builds the sandbox image and runs the provisioning +
+  # supervisor smoke. Kept out of the required gate because the image build is heavy
+  # and network-dependent. Trigger from the Actions tab ("Run workflow") when the
+  # Dockerfile generator or sandbox mounts change.
+  sandbox-smoke:
+    name: sandbox-smoke
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run sandbox provisioning smoke
+        run: ./tests/sandbox_provisioning_smoke.sh
