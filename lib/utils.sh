@@ -260,6 +260,17 @@ resolve_gitdiff_exclude() {
 #######################################
 cleanup_ralph() {
     local exit_code=$?
+
+    # A terminal manifest must mean Ralph no longer owns a live executor/server.
+    if declare -F terminate_registered_processes >/dev/null 2>&1; then
+        terminate_registered_processes "$exit_code" >/dev/null 2>&1 || true
+    fi
+
+    # Finalize only real iterating runs. Read-only subcommands and test harnesses
+    # never activate the manifest, so sourcing this library remains side-effect free.
+    if declare -F finalize_run_manifest >/dev/null 2>&1; then
+        finalize_run_manifest "$exit_code" >/dev/null 2>&1 || true
+    fi
     
     # Clean from registry (more reliable)
     if [[ -f "$_RALPH_TEMP_REGISTRY" ]]; then
@@ -277,7 +288,28 @@ cleanup_ralph() {
     exit "$exit_code"
 }
 
-trap cleanup_ralph EXIT INT TERM
+handle_ralph_signal() {
+    local signal_name="${1:-TERM}" exit_code=143
+    case "$signal_name" in
+        HUP)  exit_code=129 ;;
+        INT)  exit_code=130 ;;
+        TERM) exit_code=143 ;;
+    esac
+
+    if declare -F set_run_outcome >/dev/null 2>&1; then
+        set_run_outcome interrupted "signal_${signal_name,,}" || true
+    fi
+
+    # EXIT owns cleanup and manifest finalization. Removing this signal trap first
+    # prevents recursive delivery while shutdown writes the final evidence.
+    trap - "$signal_name"
+    exit "$exit_code"
+}
+
+trap cleanup_ralph EXIT
+trap 'handle_ralph_signal HUP' HUP
+trap 'handle_ralph_signal INT' INT
+trap 'handle_ralph_signal TERM' TERM
 
 #######################################
 # Create a temporary file and track it for cleanup
@@ -389,6 +421,7 @@ check_dependencies() {
         amp)      required_tools+=("amp") ;;
         agy)      required_tools+=("agy") ;;
         codex)    required_tools+=("codex") ;;
+        ollama|ollama-agent) : ;;  # Uses Ollama's local HTTP API through core curl/jq/python deps.
     esac
 
     log_debug "Checking required dependencies..."
@@ -592,7 +625,9 @@ load_config() {
     RALPH_MAX_RUN_TOKENS="${RALPH_MAX_RUN_TOKENS:-0}"          # abort once aggregate estimated prompt tokens reach this
     RALPH_MAX_RUN_SECONDS="${RALPH_MAX_RUN_SECONDS:-0}"        # abort once total run wall-clock reaches this
     RALPH_REQUIRE_VERIFY_ON_COMPLETE="${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}"  # reject a COMPLETE promise while build/artifact verification is failing
-    export RALPH_MAX_LAZY_STREAK RALPH_MAX_RUN_TOKENS RALPH_MAX_RUN_SECONDS RALPH_REQUIRE_VERIFY_ON_COMPLETE
+    RALPH_REQUIRE_QUALITY_ON_COMPLETE="${RALPH_REQUIRE_QUALITY_ON_COMPLETE:-1}"  # reject COMPLETE until QUALITY.md marks the in-scope quality gate pass
+    RALPH_QUALITY_TIER="${RALPH_QUALITY_TIER:-professional}"      # prototype | professional | production-ready | enterprise-grade
+    export RALPH_MAX_LAZY_STREAK RALPH_MAX_RUN_TOKENS RALPH_MAX_RUN_SECONDS RALPH_REQUIRE_VERIFY_ON_COMPLETE RALPH_REQUIRE_QUALITY_ON_COMPLETE RALPH_QUALITY_TIER
     SANDBOX_MODE="${SANDBOX_MODE:-false}"
     VERBOSE="${VERBOSE:-false}"
     PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
@@ -619,6 +654,7 @@ load_config() {
     PRD_FILE="${PRD_FILE:-$ARTIFACT_DIR/prd.json}"
     PLAN_FILE="${PLAN_FILE:-$ARTIFACT_DIR/ralph_plan.md}"
     DIAGRAM_FILE="${DIAGRAM_FILE:-$ARTIFACT_DIR/ralph_architecture.md}"
+    QUALITY_FILE="${QUALITY_FILE:-$ARTIFACT_DIR/QUALITY.md}"
     # Optional EXPLICIT override of the agent-instructions file. Empty by default so
     # resolve_agents_file() can pick each tool's native convention (CLAUDE.md / AGENTS.md / …).
     AGENTS_FILE="${AGENTS_FILE:-}"
@@ -1099,7 +1135,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--init${_RALPH_COLOR_NC}                  Smart project initialization
     ${_RALPH_COLOR_GREEN}--setup${_RALPH_COLOR_NC}                 Install all required dependencies
     ${_RALPH_COLOR_GREEN}--test${_RALPH_COLOR_NC}                  Run internal test suite
-    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), or codex (default: opencode)
+    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), codex, ollama, ollama-agent, or jules (default: opencode)
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
@@ -1174,9 +1210,23 @@ ${_RALPH_COLOR_YELLOW}Gitdiff Exclude:${_RALPH_COLOR_NC}
 
 ${_RALPH_COLOR_YELLOW}List Overrides (better defaults + override):${_RALPH_COLOR_NC}
     RALPH_HASH_EXCLUDES     Extra dir names to skip when hashing (also .ralph/excludes file)
-    RALPH_HEALTH_PORTS      Ports to probe for running services (default broadened)
+    RALPH_HEALTH_PORTS      Explicit ports to probe; unset disables port probes
+    RALPH_HEALTH_EXPECT     Optional response substring required for health probes
+    RALPH_HEALTH_ALLOW_EXTERNAL
+                            Allow health probes for ports not owned by this project
+    RALPH_VERIFY_DECLARED_COMMANDS
+                            Run safe declared checks from ralph.json/package.json (default: 1)
+    RALPH_VERIFY_TIMEOUT    Timeout in seconds for each declared check (default: 120)
     RALPH_MODEL_FAMILIES    Preferred model-family regex for routing (default: gemini|glm|claude)
     RALPH_SANDBOX_ALLOW_ENV Extra env vars to pass through into the sandbox
+
+${_RALPH_COLOR_YELLOW}Jules Remote Executor:${_RALPH_COLOR_NC}
+    JULES_API_KEY           API key for Jules REST requests
+    RALPH_JULES_SOURCE      Connected Jules source resource (sources/)
+    RALPH_JULES_MODE        pr (default) or patch
+    RALPH_JULES_POLL_INTERVAL
+                            Poll cadence in seconds (default: 15)
+    RALPH_JULES_TIMEOUT     Max wait seconds per Ralph iteration (default: 7200)
 
 EOF
     exit 0
@@ -1285,10 +1335,12 @@ parse_arguments() {
                 ;;
             --sandbox)
                 export SANDBOX_MODE=true
+                export RALPH_SANDBOX_EXPLICITLY_DISABLED=false
                 shift
                 ;;
             --no-sandbox)
                 export SANDBOX_MODE=false
+                export RALPH_SANDBOX_EXPLICITLY_DISABLED=true
                 shift
                 ;;
             --unattended)
@@ -1352,7 +1404,7 @@ parse_arguments() {
 # Returns: 0 if valid, exits on invalid config
 #######################################
 _ralph_is_valid_tool() {
-    case "$1" in opencode|claude|amp|agy|codex) return 0 ;; *) return 1 ;; esac
+    case "$1" in opencode|claude|amp|agy|codex|ollama|ollama-agent|jules) return 0 ;; *) return 1 ;; esac
 }
 
 validate_config() {
@@ -1360,7 +1412,7 @@ validate_config() {
 
     # Validate tool selection (single source of truth: _ralph_is_valid_tool)
     if ! _ralph_is_valid_tool "$TOOL"; then
-        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex"
+        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex, ollama, ollama-agent, jules"
         errors=$((errors + 1))
     fi
     

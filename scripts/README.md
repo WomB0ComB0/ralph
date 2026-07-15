@@ -26,6 +26,7 @@ as `scripts/<name>`.
 | Script | What it does |
 |--------|--------------|
 | `run-tests` | Run the full suite (`tests/run_all.sh`) and print the rollup + total case count |
+| `bd-sync-compat` | Compatibility wrapper for session close-out: uses `bd sync` when available, otherwise `bd backup sync`, `bd vc commit`, or a clean skip |
 
 ### The review close-out loop, end to end
 ```bash

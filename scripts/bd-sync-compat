@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# bd-sync-compat - compatibility wrapper for Beads versions without `bd sync`.
+# Usage: scripts/bd-sync-compat
+set -uo pipefail
+
+bd_bin="${BD_BIN:-bd}"
+if ! command -v "$bd_bin" >/dev/null 2>&1; then
+  if command -v "$HOME/go/bin/bd" >/dev/null 2>&1; then
+    bd_bin="$HOME/go/bin/bd"
+  else
+    echo "bd not found; skipping bead sync" >&2
+    exit 0
+  fi
+fi
+
+# Future/other bd builds may have a top-level sync command. Prefer it when present.
+if "$bd_bin" sync --help >/dev/null 2>&1; then
+  exec "$bd_bin" sync
+fi
+
+db_args=()
+if "$bd_bin" where >/dev/null 2>&1; then
+  db_args=()
+elif [[ -f .ralph/beads/tasks.db ]]; then
+  db_args=(--db .ralph/beads/tasks.db)
+else
+  echo "No bead database found; skipping bead sync"
+  exit 0
+fi
+
+backup_status=$("$bd_bin" "${db_args[@]}" backup status 2>&1 || true)
+# Be conservative: current bd prints setup text and exits 0 when no backup destination exists.
+if printf '%s\n' "$backup_status" |
+    grep -Eiq '(backup destination|destination:|remote:)' &&
+   ! printf '%s\n' "$backup_status" |
+    grep -Eiq '(no backup destination|no backup has been performed|run .bd backup init|setup:)'; then
+  exec "$bd_bin" "${db_args[@]}" backup sync
+fi
+
+if "$bd_bin" "${db_args[@]}" vc status >/dev/null 2>&1; then
+  "$bd_bin" "${db_args[@]}" vc status
+  "$bd_bin" "${db_args[@]}" vc commit -m "sync bead state" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+echo "No supported bd sync backend configured; skipping bead sync"
+exit 0

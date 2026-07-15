@@ -43,7 +43,9 @@ echo "== resolve_gitdiff_exclude: precedence =="
 mkdir -p "$TMP/proj"; : > "$TMP/proj/gitdiff-exclude"
 ( unset GITDIFF_EXCLUDE; [[ "$(resolve_gitdiff_exclude "$TMP/proj")" == "$TMP/proj/gitdiff-exclude" ]] ) \
   && ok "repo-root gitdiff-exclude is the default" || bad "repo default"
-( unset GITDIFF_EXCLUDE; [[ -z "$(resolve_gitdiff_exclude "$TMP/empty")" ]] ) \
+# Isolate HOME so the user/CI-runner's real ~/.config/git/gitdiff-exclude fallback
+# can't turn "no file anywhere" into a non-empty result (test must be hermetic).
+( unset GITDIFF_EXCLUDE; HOME="$TMP/empty-home"; [[ -z "$(resolve_gitdiff_exclude "$TMP/empty")" ]] ) \
   && ok "no file -> empty" || bad "empty case"
 
 echo "== compute_project_hash: UNCOMMITTED changes invalidate the cache (lazy-detection) =="

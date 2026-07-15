@@ -937,14 +937,18 @@ setup_sandbox() {
         
         # Check if Dockerfile is newer than image
         local dockerfile_time image_time
-        dockerfile_time=$(stat -f %m "$dockerfile_path" 2>/dev/null || stat -c %Y "$dockerfile_path" 2>/dev/null)
+        dockerfile_time=$(stat -c %Y "$dockerfile_path" 2>/dev/null ||
+            stat -f %m "$dockerfile_path" 2>/dev/null || true)
         image_time=$(docker image inspect -f '{{.Created}}' "${image_name}:${image_tag}" | xargs -I {} date -d {} +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S" "$(docker image inspect -f '{{.Created}}' "${image_name}:${image_tag}" | cut -d. -f1)" +%s 2>/dev/null)
         
-        if [[ -n "$dockerfile_time" && -n "$image_time" && "$dockerfile_time" -gt "$image_time" ]]; then
+        if [[ "$dockerfile_time" =~ ^[0-9]+$ && "$image_time" =~ ^[0-9]+$ &&
+              "$dockerfile_time" -gt "$image_time" ]]; then
             log_info "Dockerfile has been modified, rebuilding image..."
-        else
+        elif [[ "$dockerfile_time" =~ ^[0-9]+$ && "$image_time" =~ ^[0-9]+$ ]]; then
             log_success "Sandbox image is up-to-date"
             return 0
+        else
+            log_warning "Unable to compare Dockerfile and image timestamps; rebuilding defensively."
         fi
     fi
 
@@ -981,6 +985,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     wget \
     jq \
+    python3 \
+    bc \
+    sqlite3 \
+    util-linux \
     ca-certificates \
     gnupg \
     && rm -rf /var/lib/apt/lists/*
@@ -995,8 +1003,23 @@ RUN mkdir -p /etc/apt/keyrings && \
 
 # Create non-root user for security
 RUN useradd -m -s /bin/bash ralph && \
-    mkdir -p /app && \
-    chown -R ralph:ralph /app
+    mkdir -p /app \
+        /home/ralph/.config \
+        /home/ralph/.cache \
+        /home/ralph/.local \
+        /home/ralph/.bun \
+        /home/ralph/.npm \
+        /home/ralph/.npm-global \
+        /home/ralph/go && \
+    chown -R ralph:ralph /app /home/ralph
+
+ENV HOME=/home/ralph
+ENV XDG_CONFIG_HOME=/home/ralph/.config
+ENV XDG_CACHE_HOME=/home/ralph/.cache
+ENV XDG_DATA_HOME=/home/ralph/.local/share
+ENV BUN_INSTALL=/home/ralph/.bun
+ENV npm_config_prefix=/home/ralph/.npm-global
+ENV PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-global/bin:/home/ralph/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Switch to non-root user
 USER ralph
@@ -1004,7 +1027,7 @@ WORKDIR /app
 
 # Install global npm packages as non-root user
 RUN npm config set prefix ~/.npm-global && \
-    echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+    echo 'export PATH=~/.bun/bin:~/.local/bin:~/.npm-global/bin:~/go/bin:$PATH' >> ~/.bashrc
 
 # Default command
 CMD ["/bin/bash"]
@@ -1053,8 +1076,19 @@ run_in_sandbox() {
         "--interactive"
         "--tty"
         "--read-only"                   # Read-only root FS; the /app volume below stays writable
-        "--tmpfs" "/tmp:rw,noexec,nosuid,size=1g"  # Writable tmp with restrictions
-        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,size=500m"  # npm cache
+        # mode=1777 (sticky, world-writable, same as /tmp) is required: Docker mounts
+        # every --tmpfs as root:root 0755, so the non-root `ralph` user below cannot
+        # write to its own XDG dirs otherwise. The container is single-user and each
+        # tmpfs is ephemeral, so this does not weaken the sandbox boundary.
+        "--tmpfs" "/tmp:rw,noexec,nosuid,mode=1777,size=1g"  # Writable tmp with restrictions
+        "--tmpfs" "/home/ralph/.config:rw,noexec,nosuid,mode=1777,size=256m"  # XDG config for AI CLIs
+        "--tmpfs" "/home/ralph/.cache:rw,noexec,nosuid,mode=1777,size=1g"     # Tool caches
+        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,mode=1777,size=500m"     # npm cache
+        # User-level tool installs must be executable: bun, npm globals, bd/go, etc.
+        "--tmpfs" "/home/ralph/.bun:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/.local:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/.npm-global:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/go:rw,nosuid,mode=1777,size=1g"
         # Mount the project READ-WRITE so the agent can actually edit code. The
         # remaining hardening (read-only rootfs, cap-drop, non-root, resource caps)
         # still contains it. This is the whole point of the sandbox.
@@ -1068,6 +1102,13 @@ run_in_sandbox() {
         "--user" "ralph"                # Run as non-root user
         "--cap-drop=ALL"                # Drop all capabilities for security
         "-e" "RALPH_IN_SANDBOX=true"    # Tell the inner Ralph it is already contained
+        "-e" "HOME=/home/ralph"
+        "-e" "XDG_CONFIG_HOME=/home/ralph/.config"
+        "-e" "XDG_CACHE_HOME=/home/ralph/.cache"
+        "-e" "XDG_DATA_HOME=/home/ralph/.local/share"
+        "-e" "BUN_INSTALL=/home/ralph/.bun"
+        "-e" "npm_config_prefix=/home/ralph/.npm-global"
+        "-e" "PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-global/bin:/home/ralph/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         "--memory=${DOCKER_DEFAULT_MEMORY}"
         "--cpus=${DOCKER_DEFAULT_CPUS}"
         "--pids-limit=${DOCKER_PIDS_LIMIT}"
@@ -1106,25 +1147,43 @@ run_in_sandbox() {
             fi
         done
     fi
+    # Forward allowlisted variables by NAME ONLY (`docker -e NAME`). Docker reads the
+    # value from this process's environment, so a forwarded credential is never
+    # embedded in the constructed argv and therefore cannot reach the debug log, the
+    # process table, or any persisted command rendering. Using `-e NAME=value` here
+    # (the previous behavior) leaked the value into both argv and the debug line.
+    # No value regex is needed: because the value never touches the shell command
+    # line, arbitrary secret characters are safe, and the old regex silently dropped
+    # legitimate credentials that contained `/`, `+`, or `=`.
+    local forward_env_names=() var
     for var in "${safe_env_vars[@]}"; do
         if [[ -n "${!var:-}" ]]; then
-            # Validate value to prevent command injection
-            local value="${!var}"
-            if [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-                docker_args+=("-e" "$var=$value")
-            else
-                log_warning "Skipping unsafe env var: $var"
-            fi
+            docker_args+=("-e" "$var")
+            forward_env_names+=("$var")
         fi
     done
-    
+    if [[ ${#forward_env_names[@]} -gt 0 ]]; then
+        # Names only, never values.
+        log_info "Forwarding env vars into sandbox by name: ${forward_env_names[*]}"
+    fi
+
     docker_args+=("$image_name" "./ralph.sh" "${args[@]}")
-    
-    # Run the container
+
+    # Safe to render: docker_args now carries only variable NAMES for the allowlist,
+    # plus non-secret fixed config (paths, HOME, resource caps).
     log_debug "Running: docker ${docker_args[*]}"
-    
-    docker "${docker_args[@]}"
-    local exit_code=$?
+
+    # Export the forwarded names only for the docker child, inside a subshell, so the
+    # caller's environment (and anything it later persists) is left unchanged. Docker
+    # inherits each `-e NAME` value from this exported environment.
+    local exit_code
+    (
+        for var in "${forward_env_names[@]+"${forward_env_names[@]}"}"; do
+            export "${var?}"
+        done
+        docker "${docker_args[@]}"
+    )
+    exit_code=$?
     
     if [[ $exit_code -eq 0 ]]; then
         log_success "Sandbox execution completed successfully"

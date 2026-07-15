@@ -6,13 +6,11 @@ Use Ralph when you want an agent to keep working from a persistent plan instead 
 
 ## What Ralph Does
 
-- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, and GitHub Copilot.
+- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, and GitHub Copilot.
 - Grounds each iteration in project instructions, Beads task state, run artifacts, git context, and optional extra context files.
 - Detects lazy/no-op iterations and repeated loop signatures, then injects corrective prompts.
 - Stores recurring problems as signals and promotes proven fixes into guarded skills.
 - Supports resumable runs, retry/backoff, circuit breakers, bounded swarm workers, and GitHub triage helpers.
-
-<!-- Self-benchmarking note: the next small docs improvement would be adding a short real-world walkthrough from `./ralph.sh --init` to a completed Beads task. -->
 
 ## Quick Start
 
@@ -49,8 +47,9 @@ flowchart TD
     Context --> Git["git diff + repo state"]
     Context --> Memory["signals + skills + genetic memory"]
 
-    Context --> Tool["AI tool executor"]
-    Tool --> Validate["artifact + task validation"]
+    Context --> Boundary["supervised process boundary"]
+    Boundary --> Tool["AI tool executor"]
+    Tool --> Validate["artifact + runtime validation"]
     Validate --> Analyze["progress, lazy, and loop analysis"]
 
     Analyze -->|progress| Persist["checkpoint, logs, metrics"]
@@ -72,10 +71,55 @@ Ralph revolves around a few durable files and stores:
 | `ralph_architecture.md` | Architecture notes and Mermaid diagrams. |
 | `.ralph_checkpoint` | Resume point for interrupted runs. |
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
+| `.ralph/runs/<run-id>/run.json` | Atomic lifecycle manifest with monotonic heartbeat sequence, progress, limits, resume lineage, and terminal outcome. |
+| `.ralph/runs/<run-id>/process-cleanup.json` | Bounded, sanitized, allowlisted provider/live-smoke cleanup latency and escalation evidence. |
+| `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
+| `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
+| `.ralph/artifacts/live-smoke.json` | Opt-in live app smoke evidence: command, port, probes, diagnostics, and server log tail. |
 | `.ralph/artifacts/signals/` | Deduplicated recurring problems. |
 | `.ralph/artifacts/skills/` | Candidate and approved project-local fixes. |
 | `~/.config/ralph/skills/` | Optional cross-project skills. |
 | `~/.config/ralph/memory/` | Cross-project genetic memory. |
+
+## Run Lifecycle Evidence
+
+Every iterating run writes `.ralph/runs/<run-id>/run.json`. It is an allowlisted operational record: Ralph does not copy environment variables, prompts, provider responses, or secret values into this file.
+
+```bash
+jq '{run_id, status, reason, phase, heartbeat_at, heartbeat_sequence, current_iteration, progress}' .ralph/runs/latest/run.json
+```
+
+| Status | Meaning |
+|--------|---------|
+| `initializing` | Run directory and manifest exist; bootstrap is still in progress. |
+| `running` | The loop or a local/remote provider is active. |
+| `completed` | The completion gates passed or the tracked backlog drained. |
+| `paused` | An intentional `--once` scheduler handoff. |
+| `incomplete` | The iteration ceiling was reached before completion. |
+| `failed` | A model, provider, stall, budget, or unexpected process failure stopped the run. |
+| `interrupted` | HUP, INT, TERM, or a stale active manifest from an unclean exit. |
+
+Writes use same-directory temporary files and atomic renames. Heartbeat replacements are serialized, and `heartbeat_sequence` starts at `0` and increments exactly once for each persisted heartbeat. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected`, preserves its final heartbeat sequence, and records the recovering run ID.
+
+### Executor Boundaries
+
+Every local AI provider and live-smoke server starts through `lib/process_supervisor.py` in a dedicated Unix session and process group. Before the command is released, Ralph validates a mode-`600` ephemeral handshake against the supervisor PID, process start tokens, parent PID, process-group ID, and session ID. The handshake is then deleted.
+
+Timeout, signal, verification, and parent-death cleanup send TERM to the complete validated group, wait for the configured grace period, and escalate remaining members to KILL. The supervisor preserves the direct command's exit code and does not report completion while in-group descendants remain. This closes late-fork and daemonized-child races that PID-tree snapshots cannot close.
+
+Process groups provide lifecycle ownership, not a security boundary against a deliberately escaping process. Use `--sandbox` when the executor itself is untrusted.
+
+### Reliability Soak
+
+Run a network-free, disposable TERM/KILL recovery cycle against the real entry point:
+
+```bash
+tests/unattended_soak.sh --cycles 2 --duration 120 --seed 42 \
+  --output /tmp/ralph-soak.json
+jq '{status, fault_runs, retention, failures}' /tmp/ralph-soak.json
+```
+
+Each cycle injects both signals in seeded random order, resumes from the prior checkpoint, verifies provider-boundary cleanup, cleanup evidence, and stale-manifest reconciliation, and enforces run retention. The mode-`600` JSON report is allowlisted and excludes prompts, logs, environment values, commands, and temporary paths. `--duration` is a wall-clock ceiling checked between cycles; an active cycle always finishes.
 
 ## Common Commands
 
@@ -85,12 +129,14 @@ Ralph revolves around a few durable files and stores:
 ./ralph.sh                         # default tool
 ./ralph.sh --tool opencode         # choose a tool
 ./ralph.sh --tool codex            # OpenAI Codex via `codex exec`
+./ralph.sh --tool jules            # Jules remote executor; requires JULES_API_KEY and a connected source
 ./ralph.sh --model "provider/id"   # pin a model
 ./ralph.sh --max-iterations 20     # change loop limit
 ./ralph.sh --resume                # resume from checkpoint
 ./ralph.sh --interactive           # pause between iterations
 ./ralph.sh --unattended            # no interactive prompts
 ./ralph.sh --sandbox               # run in Docker sandbox
+./ralph.sh --no-sandbox            # explicitly accept host execution
 ./ralph.sh --context docs/api.md   # add context files
 ./ralph.sh --diff-context          # include recent git diff
 ./ralph.sh --review                # self-tuning review pass, no AI call
@@ -106,6 +152,7 @@ Supported AI tools:
 | `amp` | Anthropic MCP workflow. |
 | `agy` | Google Antigravity CLI. |
 | `codex` | OpenAI Codex CLI, executed in sandboxed mode. |
+| `jules` | Asynchronous Jules REST executor. PR mode creates/records a remote PR; patch mode applies returned diffs locally. |
 | `copilot` | Available through the Copilot subcommands below. |
 
 ### Copilot
@@ -134,6 +181,15 @@ Supported AI tools:
 ```
 
 Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that can be recalled when matching signals reappear. `lint` is a read-only curator pass over that knowledge store.
+
+### Cleanup latency stats
+
+```bash
+./ralph.sh cleanup-stats                 # aggregate across .ralph/runs
+./ralph.sh cleanup-stats /path/to/runs   # or an explicit run root
+```
+
+`cleanup-stats` is a read-only pass over retained `process-cleanup.json` artifacts. It prints an allowlisted JSON summary — per-kind (`provider`, `live_smoke`) sample count, nearest-rank p50/p95 and maximum duration, and TERM/KILL counts and rates — plus the number of runs scanned and malformed artifacts skipped. It never emits commands, PIDs, prompts, logs, environment values, event timestamps, run ids, or paths outside the run root, and never follows a symlinked run directory or artifact. Override the scanned root with `RALPH_RUN_ROOT`.
 
 ### Swarm
 
@@ -206,7 +262,7 @@ Common environment variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, or `codex`. |
+| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, or `jules`. |
 | `RALPH_ROLE` | Routing role: `planner`, `engineer`, `tester`, or `thinker`. |
 | `AGENTS_FILE` | Explicit instruction file override. |
 | `SELECTED_MODEL` | Specific model to pin. |
@@ -214,7 +270,14 @@ Common environment variables:
 | `LOG_FILE` | Log path, default `ralph.log`. |
 | `VERBOSE` | Enable debug logs. |
 | `RALPH_UNATTENDED` | Same behavior as `--unattended`. |
-| `RALPH_TOOL_TIMEOUT` | Per-iteration timeout in seconds, default `1800`; `0` disables Ralph's wrapper. |
+| `RALPH_TOOL_TIMEOUT` | Per-iteration hard timeout enforced by Ralph's internal boundary watchdog, default `1800` seconds; `0` disables it. |
+| `RALPH_TOOL_IDLE_TIMEOUT` | Progress-aware quiescence timeout in seconds, default `180`; after project changes and declared verification discovery, a quiet provider is stopped and Ralph moves to validation. |
+| `RALPH_TOOL_IDLE_MIN_RUNTIME` / `RALPH_TOOL_IDLE_PROBE_INTERVAL` | Minimum runtime before quiescence can stop a provider, and the probe interval, defaults `30` and `2` seconds. |
+| `RALPH_RUN_HEARTBEAT_INTERVAL` | Minimum seconds between same-phase run-manifest heartbeats, default `15`; phase changes and iteration boundaries write immediately. |
+| `RALPH_LOCK_WAIT_SECONDS` | Seconds to wait for the per-project singleton lock, default `3`, maximum `60`; set `0` for nonblocking behavior. |
+| `RALPH_CHILD_TERM_GRACE` | Seconds to wait after terminating an owned provider/server process group before escalating to KILL, default `2`, maximum `30`. |
+| `RALPH_PROCESS_CLEANUP_FILE` | Override the process-cleanup evidence path, default `.ralph/runs/<run-id>/process-cleanup.json`; the mode-`600` artifact retains at most 50 allowlisted events. |
+| `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
 | `RALPH_RESUME_SESSION` | Reuse supported tool sessions within a run. |
@@ -227,11 +290,28 @@ Common environment variables:
 | `RALPH_MAX_RUN_TOKENS` | Aggregate estimated-token ceiling for the whole run; hard-aborts when reached, default `0` (unlimited). |
 | `RALPH_MAX_RUN_SECONDS` | Wall-clock ceiling (seconds) for the whole run; hard-aborts when reached, default `0` (unlimited). |
 | `RALPH_REQUIRE_VERIFY_ON_COMPLETE` | Reject a `COMPLETE` promise while build/artifact verification is failing, default `1`; `0` allows completion over failing checks. |
+| `RALPH_REQUIRE_QUALITY_ON_COMPLETE` | Reject a `COMPLETE` promise until `.ralph/artifacts/QUALITY.md` says `Quality Gate: pass`, default `1`; `0` disables the quality gate. |
+| `RALPH_QUALITY_TIER` | Requested quality tier for `QUALITY.md`, default `professional` (`prototype`, `professional`, `production-ready`, or `enterprise-grade`). |
+| `RALPH_VERIFY_DECLARED_COMMANDS` | Run safe declared checks from `ralph.json` or package scripts during completion verification, default `1`. |
+| `RALPH_VERIFY_TIMEOUT` | Per-command timeout for declared verification checks, default `120` seconds. |
+| `RALPH_VERIFICATION_FILE` | Override the verification evidence path, default `.ralph/artifacts/verification.json`. |
+| `RALPH_WRITE_VERIFICATION_EVIDENCE` | Set to `0` to disable writing verification evidence. |
+| `RALPH_LIVE_SMOKE` | Set to `1` to start the declared app, probe localhost, persist `.ralph/artifacts/live-smoke.json`, and tear the server down during verification. |
+| `RALPH_LIVE_SMOKE_COMMAND` / `RALPH_LIVE_SMOKE_PORT` / `RALPH_LIVE_SMOKE_PATHS` | Optional live-smoke overrides; default command is `npm|pnpm|bun|yarn start`, default port `18080`, default paths `/health /api/health /api/v1/status /`. |
+| `RALPH_HEALTH_PORTS` | Explicit comma- or space-separated ports to probe; unset disables liveness probes so unrelated local services are ignored. |
+| `RALPH_HEALTH_EXPECT` | Optional response substring required for a health probe to pass. |
+| `RALPH_HEALTH_ALLOW_EXTERNAL` | Set to `1` to allow health probes against ports whose owning process is not rooted in the project. |
 | `RALPH_HASH_EXCLUDES` | Extra names excluded from project hashing. |
 | `GITDIFF_EXCLUDE` | Diff-exclude file for `--diff-context`. |
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
+| `JULES_API_KEY` | Jules REST API key, required for `TOOL=jules`; keep it in the environment or a secret store. |
+| `RALPH_JULES_SOURCE` | Jules source resource such as `sources/github-owner-repo`; if unset, Ralph tries to match the GitHub `origin` against connected Jules sources. |
+| `RALPH_JULES_MODE` | Jules completion mode: `pr` (default, records remote PR output) or `patch` (applies returned `changeSet.gitPatch` locally). |
+| `RALPH_JULES_STARTING_BRANCH` | Branch Jules should start from; defaults to the current Git branch, then `main`. |
+| `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
+| `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
 
 ## Dependencies
@@ -244,6 +324,7 @@ Core dependencies:
 - `curl`
 - `bc`
 - `sqlite3`
+- `flock` (provided by `util-linux` on common Linux distributions)
 - Python 3
 - Bun or npm
 
@@ -282,6 +363,9 @@ See [`scripts/README.md`](scripts/README.md) for details.
 |-- ralph.sh                  # entry point
 |-- lib/
 |   |-- engine.sh             # core loop and validation
+|   |-- processes.sh          # process-group ownership and parent-death guardians
+|   |-- process_supervisor.py # isolated executor launch and output capture
+|   |-- run_manifest.sh       # atomic run lifecycle evidence
 |   |-- lint.sh               # knowledge-store curator checks
 |   |-- signals.sh            # recurring-problem capture
 |   |-- skills.sh             # guarded skill capture and recall

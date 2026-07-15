@@ -12,7 +12,7 @@ Self-benchmarking: analyze the codebase and suggest one small improvement in a c
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   scripts/bd-sync-compat
    git push
    git status  # MUST show "up to date with origin"
    ```

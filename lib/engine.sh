@@ -239,12 +239,64 @@ _pick_latest_model() {
         END{ if(best!="") print best }'
 }
 
+
+_ollama_base_url() {
+    local base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+    base="${base%/}"; base="${base%/v1}"
+    printf '%s\n' "$base"
+}
+
+ollama_model_list() {
+    local base; base=$(_ollama_base_url)
+    curl -fsS "$base/api/tags" 2>/dev/null | jq -r '.models[]? | "\(.name)\t\(.size // 0)"' 2>/dev/null || true
+}
+
+# Pick an Ollama model from "name<TAB>size_bytes" lines. Dynamic, local, and pure.
+# RALPH_OLLAMA_MAX_BYTES can cap selection for constrained laptops.
+_pick_ollama_model() {
+    local role="$1" list="$2" max_bytes="${RALPH_OLLAMA_MAX_BYTES:-0}"
+    [[ -n "$list" ]] || return 0
+    [[ "$max_bytes" =~ ^[0-9]+$ ]] || max_bytes=0
+    printf '%s\n' "$list" | awk -v role="$role" -v max="$max_bytes" '
+        BEGIN{ best=""; bestscore=-999999 }
+        /^[[:space:]]*$/ { next }
+        {
+          name=$1; size=0
+          if (NF>=2 && $2 ~ /^[0-9]+$/) size=$2+0
+          if (max > 0 && size > max) next
+          lname=tolower(name)
+          score=0
+          if (lname ~ /(coder|code|deepseek|qwen|starcoder|devstral)/) score += 5000
+          if (lname ~ /(llama|gemma|mistral|phi)/) score += 2500
+          if (lname ~ /(instruct|chat)/) score += 800
+          if (role ~ /planner|thinker/ && lname ~ /(reason|thinking|pro|qwen3)/) score += 1500
+          if (role ~ /tester/ && lname ~ /(mini|small|0\.5b|0\.6b|1b|1\.5b)/) score += 2000
+          if (role !~ /tester/) score += int(size / 10000000)
+          else score -= int(size / 10000000)
+          clean=lname; gsub(/[0-9]+[bB]/, "", clean)
+          if (match(clean, /[0-9]+(\.[0-9]+)?/)) score += int(substr(clean, RSTART, RLENGTH) * 100)
+          if (best == "" || score > bestscore) { best=name; bestscore=score }
+        }
+        END{ if(best!="") print best }'
+}
+
+resolve_ollama_model_for_role() {
+    local role="${1:-engineer}" list picked
+    if [[ -n "${RALPH_LOCAL_MODEL:-}" ]]; then printf '%s\n' "$RALPH_LOCAL_MODEL"; return 0; fi
+    list=$(ollama_model_list)
+    picked=$(_pick_ollama_model "$role" "$list")
+    [[ -n "$picked" ]] && { printf '%s\n' "$picked"; return 0; }
+    printf '%s\n' "${RALPH_OLLAMA_DEFAULT_MODEL:-qwen3:0.6b}"
+}
+
 #######################################
 # Resolve a model for the active tool + role, preferring each tool's OWN live source
 # over any pinned string (gemini CLI is deprecated; agy/Antigravity is Google's CLI).
 #   agy       -> `agy models` then newest-for-role (empty => agy auto-selects latest)
 #   claude/amp-> tier alias (opus|sonnet) which resolves to the latest server-side
 #   opencode  -> existing dynamic opencode-models router
+#   ollama    -> local Ollama chat model from /api/tags
+#   ollama-agent -> local Ollama coding agent model from /api/tags
 # Arguments: $1 tool (default $TOOL), $2 role (default engineer)
 #######################################
 resolve_model_for_tool() {
@@ -257,8 +309,11 @@ resolve_model_for_tool() {
         claude)
             case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
             ;;
-        amp|codex)
+        amp|codex|jules)
             echo ""   # no usable --model in our invocation -> they self-select (don't fabricate one)
+            ;;
+        ollama|ollama-agent)
+            resolve_ollama_model_for_role "$role"
             ;;
         opencode|*)
             get_model_for_role "$role"
@@ -428,6 +483,23 @@ validate_model_availability() {
                 return 1
             fi
             ;;
+        ollama|ollama-agent)
+            [[ -n "$model" ]] || model="$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")"
+            if ! command_exists curl || ! command_exists jq; then
+                log_error "ollama tool requires curl and jq"
+                return 1
+            fi
+            local base tags
+            base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+            base="${base%/}"; base="${base%/v1}"
+            tags=$(curl -fsS "$base/api/tags" 2>/dev/null | jq -r '.models[]?.name' 2>/dev/null || true)
+            if echo "$tags" | grep -qxF "$model"; then
+                log_debug "Ollama model validated: $model"
+                return 0
+            fi
+            log_warning "Ollama model not found locally: $model"
+            return 1
+            ;;
 
         amp|claude)
             # Can't validate without an API call; accept tier aliases (opus/sonnet/haiku,
@@ -531,6 +603,7 @@ EOF
 #   $7  - Recent changes
 #   $8  - Resource context
 #   $9  - User provided context
+#   $10 - Quality rubric context
 # Returns: Complete system prompt
 #######################################
 generate_system_prompt() {
@@ -544,7 +617,8 @@ generate_system_prompt() {
     local recent_changes="$7"
     local resource_context="$8"
     local user_provided_context="$9"
-    local project_instructions="${10:-}"
+    local quality_context="${10:-No quality rubric loaded.}"
+    local project_instructions="${11:-}"
 
     local role_instructions
     role_instructions=$(get_role_instructions "${RALPH_ROLE:-engineer}")
@@ -562,25 +636,27 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 1. **Reflect:** Analyze the <recent_changes> and <global_context>. If the previous iteration failed or made no progress, identify the root cause.
 2. **Plan:** Identify the next unblocked task from Beads (\`bd ready\`).
 3. **Reason:** Determine the most efficient tool-path to complete the task.
-4. **Anticipate:** Identify potential side effects or breaking changes to the architecture.
+4. **Judge:** Compare the current output against QUALITY.md and decide whether to improve, defer, or stop.
+5. **Anticipate:** Identify potential side effects or breaking changes to the architecture.
 </cognitive_process>
 
 <capabilities>
 1. **Full-Stack Engineering:** Expert in modern software delivery and best practices.
 2. **Architectural Visualization:** Use Mermaid syntax in '${DIAGRAM_FILE:-ralph_architecture.md}' to model system state, data flow, and dependencies.
 3. **Requirement Engineering:** Maintain '${PRD_FILE:-prd.json}' (JSON) to define goals, user stories, and success metrics.
-4. **Time-Travel Task Memory (Beads + Dolt):** Use 'bd' CLI for reliable, dependency-aware task tracking with full version history.
+4. **Quality Judging:** Maintain '${QUALITY_FILE:-QUALITY.md}' as the reviewer/stopper rubric. Use it to decide whether another iteration is valuable or whether the work is professionally complete within scope.
+5. **Time-Travel Task Memory (Beads + Dolt):** Use 'bd' CLI for reliable, dependency-aware task tracking with full version history.
    - Create task: \`bd create "Title" -d "Description" [--deps "id1,id2"]\`
    - List ready tasks: \`bd ready\`
    - **Time-Travel:** You can view previous task states if needed using \`bd vc log\`.
-5. **Intelligent Model Routing:** Your requests are automatically routed to specialized models based on your current role:
+6. **Intelligent Model Routing:** Your requests are automatically routed to specialized models based on your current role:
    - **Planner/Thinker:** Routed to high-reasoning models (Gemini 2.0 Pro/Thinking).
    - **Engineer/Tester:** Routed to high-speed implementation models (Gemini 2.0 Flash).
-6. **Self-Healing Tooling:** If a required test runner or dependency (e.g., pytest, npm, cargo) is missing, you can attempt to autonomously install it using \`ralph setup\`.
-7. **Swarm Orchestration:** You can act as a Team Leader or Specialist.
+7. **Self-Healing Tooling:** If a required test runner or dependency (e.g., pytest, npm, cargo) is missing, you can attempt to autonomously install it using \`ralph setup\`.
+8. **Swarm Orchestration:** You can act as a Team Leader or Specialist.
    - Spawn sub-agents: \`ralph swarm spawn --role "RoleName" --task "Task description"\`
    - Send messages: \`ralph swarm msg --to <agent_id> --content "Message"\`
-8. **Long-Term Memory:** To persist a durable, cross-project lesson (an engineering pattern, architectural decision, or "lesson learned"), emit a line \`<memory>the lesson in one sentence</memory>\` in your response. Ralph captures these into long-term memory (surfaced as \`<genetic_memory>\` in future runs). Use sparingly — only genuinely reusable lessons, not per-task notes.
+9. **Long-Term Memory:** To persist a durable, cross-project lesson (an engineering pattern, architectural decision, or "lesson learned"), emit a line \`<memory>the lesson in one sentence</memory>\` in your response. Ralph captures these into long-term memory (surfaced as \`<genetic_memory>\` in future runs). Use sparingly — only genuinely reusable lessons, not per-task notes.
 </capabilities>
 
 <workflow>
@@ -588,7 +664,8 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 2. **Align:** Ensure code changes align with Architecture ('$DIAGRAM_FILE') and Requirements ('$PRD_FILE').
 3. **Execute:** Perform the next unblocked task from 'bd ready'. Close it with 'bd close' when done.
 4. **Verify:** Write and run tests for every implementation. Never assume code works.
-5. **Sync:** Reflect changes back into documentation files in '$ARTIFACT_DIR' as the system evolves.
+5. **Judge:** Update '$QUALITY_FILE' with the current review, blocking issues, in-scope improvements, deferred follow-ups, and \`Quality Gate: continue|pass\`.
+6. **Sync:** Reflect changes back into documentation files in '$ARTIFACT_DIR' as the system evolves.
 </workflow>
 
 <constraints>
@@ -596,7 +673,9 @@ At the start of every response, you MUST use a internal monologue or <thought> b
 - **Verification Mandatory:** Do not close a Beads task until you have executed a test that passes.
 - **Valid Artifacts:** Ensure '$PRD_FILE' is valid JSON and '$DIAGRAM_FILE' is valid Mermaid.
 - **No Loops:** If you are stuck in a cycle (repeatedly failing), STOP and ask for user intervention or try a radically different approach.
-- **Termination:** Output <promise>COMPLETE</promise> only when ALL Beads tasks are CLOSED and docs are synced.
+- **Quality Gate:** Keep \`Quality Gate: continue\` in '$QUALITY_FILE' while there are blocking issues or high-value in-scope improvements. Set \`Quality Gate: pass\` only when the stop policy in QUALITY.md is satisfied.
+- **Scope Control:** Do not chase infinite polish. If an improvement is speculative, enterprise-only, or outside the requested tier, document it as follow-up instead of extending the task.
+- **Termination:** Output <promise>COMPLETE</promise> only when ALL Beads tasks are CLOSED, docs are synced, verification passes, and '$QUALITY_FILE' says \`Quality Gate: pass\`.
 </constraints>
 
 <high_integrity_checklist>
@@ -604,6 +683,7 @@ Before finalizing your response, verify:
 - [ ] Have I updated the Mermaid diagram to reflect architectural changes?
 - [ ] Have I closed the relevant Beads task if the work is verified?
 - [ ] Have I created follow-up tasks in Beads for discovered work?
+- [ ] Have I updated QUALITY.md with a concrete reviewer judgment and stop decision?
 - [ ] Is the code idiomatic and properly tested?
 </high_integrity_checklist>
 
@@ -619,6 +699,10 @@ $prd_context
 <architecture_diagrams>
 $diagram_context
 </architecture_diagrams>
+
+<quality_rubric>
+$quality_context
+</quality_rubric>
 
 <execution_plan>
 $plan_context
@@ -643,7 +727,8 @@ $reflection_instruction
 1. Use the <cognitive_process> to analyze the current state.
 2. Execute the next task from Beads.
 3. Update artifacts and verify with tests.
-4. Review the <high_integrity_checklist>.
+4. Update QUALITY.md with the current judgment: blockers, in-scope improvements, follow-ups, and Quality Gate status.
+5. Review the <high_integrity_checklist>.
 </instructions>
 </system_prompt>
 EOF
@@ -667,6 +752,8 @@ EOF
 #   claude   -p/--print (REQUIRED for headless — without it claude 2.x goes interactive),
 #            --permission-mode bypassPermissions, --model
 #   opencode  opencode run --model <provider/model>
+#   ollama    curl local Ollama /api/chat via jq-encoded stdin prompt
+#   ollama-agent python local coding-agent loop with guarded file/command tools
 #   agy      --print --dangerously-skip-permissions  (Google Antigravity CLI; no --model flag)
 # Arguments: $1 tool, $2 model
 # Returns: 0 and sets _AI_CMD/_AI_STDIN; 1 for an unknown tool.
@@ -680,12 +767,164 @@ _ai_timeout_secs() {
     echo "$d"
 }
 
+_ai_idle_timeout_secs() {
+    local d="${RALPH_TOOL_IDLE_TIMEOUT:-180}"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=180
+    echo "$d"
+}
+
+_ai_idle_min_runtime_secs() {
+    local d="${RALPH_TOOL_IDLE_MIN_RUNTIME:-30}"
+    [[ "$d" =~ ^[0-9]+$ ]] || d=30
+    echo "$d"
+}
+
+_ai_idle_probe_interval_secs() {
+    local d="${RALPH_TOOL_IDLE_PROBE_INTERVAL:-2}"
+    [[ "$d" =~ ^[0-9]+$ && "$d" -gt 0 ]] || d=2
+    echo "$d"
+}
+
+_file_size_bytes() {
+    local file="$1"
+    [[ -f "$file" ]] || { echo 0; return 0; }
+    wc -c < "$file" 2>/dev/null | tr -d '[:space:]' || echo 0
+}
+
+_ai_quiescence_verify_available() {
+    [[ "${RALPH_TOOL_IDLE_REQUIRE_VERIFY:-1}" == "1" ]] || return 0
+    local cmd
+    while IFS= read -r cmd; do
+        [[ -n "$cmd" ]] || continue
+        runtime_command_allowed "$cmd" && return 0
+    done < <(collect_runtime_commands "${PROJECT_DIR:-.}" 2>/dev/null || true)
+    return 1
+}
+
+_project_progress_fingerprint() {
+    if declare -F compute_project_hash >/dev/null 2>&1; then
+        compute_project_hash 2>/dev/null && return 0
+    fi
+    local project_dir="${PROJECT_DIR:-.}"
+    # Portable, pruned fallback. `find -printf` is a GNU extension that fails silently on
+    # macOS/BSD (yielding an empty, useless fingerprint), and an un-pruned walk over
+    # node_modules/target/dist on every ~2s probe is very expensive. Prefer python3: it is
+    # cross-platform, prunes heavy dirs, and hashes size+mtime so edits are detected. The
+    # project path is passed as argv (not interpolated) so unusual paths can't break it.
+    local fp
+    if command -v python3 >/dev/null 2>&1; then
+        fp=$(python3 - "$project_dir" <<'PY' 2>/dev/null
+import hashlib, os, sys
+root = sys.argv[1]
+exclude = {".git", ".ralph", "node_modules", "target", "dist", "build",
+           "venv", ".venv", ".cache", ".next", ".mypy_cache", ".pytest_cache", "__pycache__"}
+entries = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in exclude]
+    for name in filenames:
+        p = os.path.join(dirpath, name)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        entries.append(f"{os.path.relpath(p, root)}\t{st.st_size}\t{int(st.st_mtime)}")
+entries.sort()
+print(hashlib.md5("\n".join(entries).encode("utf-8", "surrogatepass")).hexdigest())
+PY
+)
+        if [[ -n "$fp" ]]; then
+            printf '%s\n' "$fp"
+            return 0
+        fi
+    fi
+    # Last resort (no git hash, no python3): portable `find` without -printf, pruning the
+    # heavy dirs. Tracks the file SET only (coarser than size+mtime), but never fails
+    # silently the way -printf does on BSD.
+    find "$project_dir" \
+        \( -name .git -o -name .ralph -o -name node_modules -o -name target \
+           -o -name dist -o -name build -o -name venv -o -name .venv \
+           -o -name .cache -o -name __pycache__ \) -prune -o \
+        -type f -print 2>/dev/null | LC_ALL=C sort | md5sum_wrapper | awk '{print $1}'
+}
+
 # Name of the available GNU timeout binary (macOS+Homebrew coreutils ships it as gtimeout).
 # Echoes "timeout" | "gtimeout" | "" (none).
 _timeout_bin() {
     if command_exists timeout; then echo timeout
     elif command_exists gtimeout; then echo gtimeout
     else echo ""; fi
+}
+
+_opencode_json_text_filter() {
+    cat <<'JQ'
+def chunks:
+  if type == "string" then .
+  elif type == "array" then .[] | chunks
+  elif type == "object" then
+    (.text? | chunks),
+    (.content? | chunks),
+    (.message? | chunks),
+    (.delta? | chunks),
+    (.part? | chunks)
+  else empty end;
+(fromjson? // empty) as $event
+| select(((($event.role? // $event.message.role? // "") | tostring) != "user"))
+| ($event.message? | chunks),
+  ($event.assistant? | chunks),
+  ($event.content? | chunks),
+  ($event.text? | chunks),
+  ($event.delta? | chunks),
+  ($event.part? | chunks)
+JQ
+}
+
+opencode_provider_state_file() {
+    printf '%s\n' "${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/providers/opencode.json"
+}
+
+# Self-benchmarking: next small improvement is to map opencode terminal events into
+# a provider-complete signal instead of relying only on process exit.
+normalize_opencode_json_output() {
+    local output_file="$1" log_file="${2:-/dev/null}" raw_file text_file state_file updated_at
+    [[ "${RALPH_OPENCODE_JSON:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    [[ -s "$output_file" ]] || return 0
+
+    raw_file="${output_file}.opencode.jsonl"
+    text_file="${output_file}.text"
+    cp "$output_file" "$raw_file" 2>/dev/null || return 0
+
+    if jq -Rr "$(_opencode_json_text_filter)" "$raw_file" > "$text_file" 2>/dev/null && [[ -s "$text_file" ]]; then
+        cat "$text_file" > "$output_file"
+    fi
+
+    state_file=$(opencode_provider_state_file)
+    mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    jq -Rsc \
+        --arg run_id "${RUN_ID:-manual}" \
+        --arg updated_at "$updated_at" \
+        '[split("\n")[] | select(length > 0) | fromjson?] as $events
+         | {provider:"opencode",
+            run_id:$run_id,
+            updated_at:$updated_at,
+            event_count:($events | length),
+            sessions:([$events[] | (.sessionID? // .sessionId? // .session_id? // .session?.id?) | select(. != null)] | unique),
+            terminal_events:([$events[] | (.type? // .event? // .status?) | select(. != null) | tostring | select(test("complete|completed|finish|finished|done|failed|error"; "i"))])}' \
+        "$raw_file" > "$state_file.tmp" 2>/dev/null && mv "$state_file.tmp" "$state_file" 2>/dev/null || true
+
+    printf 'opencode JSON events captured: %s\n' "$raw_file" >> "$log_file" 2>/dev/null || true
+}
+
+_kill_process_tree() {
+    local sig="$1" pid="$2" child
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    if command_exists pgrep; then
+        while IFS= read -r child; do
+            [[ -n "$child" ]] && _kill_process_tree "$sig" "$child"
+        done < <(pgrep -P "$pid" 2>/dev/null || true)
+    fi
+    kill "-$sig" "$pid" 2>/dev/null || true
 }
 
 _build_ai_cmd() {
@@ -710,8 +949,36 @@ _build_ai_cmd() {
             ;;
         opencode)
             _AI_CMD=(opencode run)
+            [[ "${RALPH_OPENCODE_JSON:-1}" == "1" ]] && _AI_CMD+=(--format json)
             [[ -n "$model" ]] && _AI_CMD+=(--model "$model")   # empty -> let opencode self-select
             [[ "$resume" == "1" ]] && _AI_CMD+=(--continue) ;;
+        # Self-benchmarking: Move Ollama API request payload construction to a separate helper function to improve testability and reduce bash inline complexity.
+        ollama)
+            local _omodel="${model:-$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")}"
+            _AI_CMD=(env RALPH_OLLAMA_MODEL="$_omodel" bash -c '
+                set -euo pipefail
+                prompt=$(cat)
+                base="${OLLAMA_BASE_URL:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
+                base="${base%/}"; base="${base%/v1}"
+                think="${RALPH_OLLAMA_THINK:-false}"
+                case "$think" in true|false) ;; *) think=false ;; esac
+                num="${RALPH_OLLAMA_NUM_PREDICT:-1024}"
+                [[ "$num" =~ ^[0-9]+$ ]] || num=1024
+                payload=$(jq -n \
+                    --arg model "$RALPH_OLLAMA_MODEL" \
+                    --arg prompt "$prompt" \
+                    --argjson think "$think" \
+                    --argjson num "$num" \
+                    "{model:\$model,messages:[{role:\"user\",content:\$prompt}],stream:false,think:\$think,options:{num_predict:\$num,temperature:0}}")
+                curl -fsS "$base/api/chat" -H "Content-Type: application/json" -d "$payload" |
+                    jq -r ".message.content // .response // empty"
+            ')
+            _AI_STDIN=1 ;;
+        ollama-agent)
+            local _omodel="${model:-$(resolve_ollama_model_for_role "${RALPH_ROLE:-engineer}")}" _agent_dir
+            _agent_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || return 1
+            _AI_CMD=(python3 "$_agent_dir/ollama_agent.py" --model "$_omodel")
+            _AI_STDIN=1 ;;
         agy)
             # --print is STRING-VALUED: it consumes the NEXT token as the prompt, so it
             # MUST be last — run_ai_tool appends "$prompt" as its value. (With --print
@@ -777,7 +1044,23 @@ run_ai_tool() {
     log_info "Running ${_RALPH_COLOR_MAGENTA}${tool}${_RALPH_COLOR_NC} with model: ${_RALPH_COLOR_GREEN}${model}${_RALPH_COLOR_NC}"
     log_debug "Prompt length: ${#prompt} characters"
 
-    local pid i exit_code
+    local pid i exit_code guardian_pid="" cleanup_recorded=0 cleanup_trigger=normal
+    local supervisor_path state_file ack_file
+
+    if [[ "$tool" == "jules" ]]; then
+        if ! declare -F run_jules_remote >/dev/null 2>&1; then
+            log_error "tool=jules requested, but lib/jules.sh is not loaded"
+            return 1
+        fi
+        exit_code=0
+        run_jules_remote "$tool" "$model" "$prompt" "$log_file" "$output_file" || exit_code=$?
+        if [[ $exit_code -eq 0 ]]; then
+            log_success "Iteration $iteration: Jules Remote Response Received"
+            return 0
+        fi
+        log_error "Iteration $iteration: Jules Remote Failed (Exit $exit_code)"
+        return "$exit_code"
+    fi
 
     # Opt-in session continuity: resume the tool's prior conversation once a session has
     # been established (after the first SUCCESSFUL call this run). Default off.
@@ -797,40 +1080,148 @@ run_ai_tool() {
         log_error "Unknown tool: $tool"
         return 1
     fi
-    # Hard wall-clock backstop so a hung tool can't block the loop forever (exit 124 on
-    # timeout, which the retry/circuit-breaker then treats as a failed iteration).
-    local -a tmo=(); local _dur _to; _dur=$(_ai_timeout_secs); _to=$(_timeout_bin)
-    if [[ "$_dur" -gt 0 ]]; then
-        if [[ -n "$_to" ]]; then
-            tmo=("$_to" --kill-after=15 "$_dur")
-        elif [[ -z "${_RALPH_TIMEOUT_WARNED:-}" ]]; then
-            log_warning "RALPH_TOOL_TIMEOUT=$_dur set but neither 'timeout' nor 'gtimeout' is installed; AI tool calls have no wall-clock backstop (install coreutils)"
-            _RALPH_TIMEOUT_WARNED=1
-        fi
+    local _dur; _dur=$(_ai_timeout_secs)
+
+    local idle_timeout idle_min_runtime idle_probe_interval idle_last_probe=0 idle_last_activity=$SECONDS
+    local idle_last_out_size idle_last_log_size idle_last_hash idle_cur_out_size idle_cur_log_size idle_cur_hash
+    local idle_project_changed=0 idle_armed=0 idle_stopped=0
+    idle_timeout=$(_ai_idle_timeout_secs)
+    idle_min_runtime=$(_ai_idle_min_runtime_secs)
+    idle_probe_interval=$(_ai_idle_probe_interval_secs)
+    if [[ "$idle_timeout" -gt 0 ]]; then
+        idle_last_hash=$(_project_progress_fingerprint 2>/dev/null || echo unknown)
     fi
 
-    # Launch in the background; per-tool env is applied INSIDE the subshell so it can't
-    # leak into the parent shell or later iterations. stderr (tool diagnostics) goes to the
-    # log only; stdout (the actual answer) goes to BOTH log and output_file, so the captured
-    # result + per-step trace are clean for emptiness/observability.
-    # shellcheck disable=SC2094  # both redirections to $log_file are APPENDS (2>> and tee -a),
-    # not a read+overwrite — concurrent O_APPEND writes are atomic, so this is safe by design.
+    # The tracked PID is a supervisor outside a new child session/process group. It owns
+    # stdout/stderr capture, so no pipeline process can obscure provider ownership.
+    if ! declare -F prepare_supervised_process >/dev/null 2>&1 ||
+       ! supervisor_path=$(_ralph_process_supervisor_path) ||
+       ! prepare_supervised_process; then
+        log_error "Unable to prepare the isolated provider process boundary"
+        return 1
+    fi
+    state_file="$_RALPH_BOUNDARY_STATE_FILE"
+    ack_file="$_RALPH_BOUNDARY_ACK_FILE"
+
+    # Per-tool environment changes remain inside the launch subshell. Closing fd 9
+    # before exec prevents providers and the supervisor from retaining Ralph's lock.
     if [[ "$_AI_STDIN" == "1" ]]; then
-        ( _apply_tool_env "$tool"; printf '%s\n' "$prompt" | "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        (
+            { exec 9>&-; } 2>/dev/null || true
+            _apply_tool_env "$tool"
+            exec python3 "$supervisor_path" \
+                --state-file "$state_file" \
+                --ack-file "$ack_file" \
+                --log-file "$log_file" \
+                --stdout-file "$output_file" \
+                -- "${_AI_CMD[@]}" <<<"$prompt"
+        ) &
     else
-        # Redirect stdin from /dev/null: these tools take the prompt as an argv, and some (e.g.
-        # opencode run) abort immediately on a non-interactive/inherited stdin. A clean EOF makes
-        # the autonomous invocation behave the same as an interactive one.
-        ( _apply_tool_env "$tool"; "${tmo[@]+"${tmo[@]}"}" "${_AI_CMD[@]}" "$prompt" </dev/null 2>>"$log_file" | tee -a "$log_file" > "$output_file") &
+        (
+            { exec 9>&-; } 2>/dev/null || true
+            _apply_tool_env "$tool"
+            exec python3 "$supervisor_path" \
+                --state-file "$state_file" \
+                --ack-file "$ack_file" \
+                --log-file "$log_file" \
+                --stdout-file "$output_file" \
+                -- "${_AI_CMD[@]}" "$prompt" </dev/null
+        ) &
     fi
     pid=$!
+    if ! register_supervised_process "$pid" provider "$state_file" "$ack_file" 0; then
+        log_error "Provider process boundary failed identity validation"
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
+    fi
+    if ! start_child_guardian "$pid" "${BASHPID:-$$}" provider; then
+        log_error "Provider process boundary guardian failed to start"
+        terminate_owned_process "$pid" provider exit 0
+        wait "$pid" 2>/dev/null || true
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
+    fi
+    guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    if ! release_supervised_process "$pid" "$ack_file"; then
+        log_error "Provider process boundary failed to release"
+        terminate_owned_process "$pid" provider exit 0
+        wait "$pid" 2>/dev/null || true
+        stop_child_guardian "$guardian_pid"
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" 2>/dev/null || true
+        return 1
+    fi
 
     # Animated spinner while tool runs
-    local i=0
+    local i=0 timed_out=0 started_at=$SECONDS
+    if [[ "$idle_timeout" -gt 0 ]]; then
+        idle_last_out_size=$(_file_size_bytes "$output_file")
+        idle_last_log_size=$(_file_size_bytes "$log_file")
+    fi
     start_progress_timer
     update_status "Thinking" "$(basename "${PROJECT_DIR:-.}")"
 
     while kill -0 $pid 2>/dev/null; do
+        _run_manifest_heartbeat_safe provider_execution "${_RALPH_CURRENT_ITERATION:-$iteration}" 0
+        if [[ "$_dur" -gt 0 && $((SECONDS - started_at)) -ge "$_dur" ]]; then
+            timed_out=1
+            log_warning "AI tool exceeded RALPH_TOOL_TIMEOUT=${_dur}s; terminating process boundary"
+            printf 'AI tool exceeded RALPH_TOOL_TIMEOUT=%ss; terminating process boundary\n' "$_dur" >>"$log_file"
+            if declare -F terminate_owned_process >/dev/null 2>&1; then
+                terminate_owned_process "$pid" provider timeout
+                cleanup_recorded=1
+            else
+                _kill_process_tree TERM "$pid"
+                sleep 1
+                if kill -0 "$pid" 2>/dev/null; then
+                    _kill_process_tree KILL "$pid"
+                fi
+            fi
+            break
+        fi
+
+        if [[ "$idle_timeout" -gt 0 && $((SECONDS - idle_last_probe)) -ge "$idle_probe_interval" ]]; then
+            idle_last_probe=$SECONDS
+            idle_cur_out_size=$(_file_size_bytes "$output_file")
+            idle_cur_log_size=$(_file_size_bytes "$log_file")
+            idle_cur_hash=$(_project_progress_fingerprint 2>/dev/null || echo unknown)
+
+            log_debug "quiescence probe: out=$idle_cur_out_size log=$idle_cur_log_size changed=$idle_project_changed armed=$idle_armed idle_for=$((SECONDS - idle_last_activity))s"
+            if [[ "$idle_cur_out_size" != "$idle_last_out_size" || "$idle_cur_log_size" != "$idle_last_log_size" || "$idle_cur_hash" != "$idle_last_hash" ]]; then
+                idle_last_activity=$SECONDS
+                [[ "$idle_cur_hash" != "$idle_last_hash" ]] && idle_project_changed=1
+                idle_last_out_size="$idle_cur_out_size"
+                idle_last_log_size="$idle_cur_log_size"
+                idle_last_hash="$idle_cur_hash"
+            fi
+
+            if [[ "$idle_project_changed" == "1" && "$idle_armed" == "0" ]] && _ai_quiescence_verify_available; then
+                idle_armed=1
+                idle_last_activity=$SECONDS
+                log_info "AI quiescence watchdog armed after project progress and declared verification discovery"
+            fi
+
+            if [[ "$idle_armed" == "1" && $((SECONDS - started_at)) -ge "$idle_min_runtime" && $((SECONDS - idle_last_activity)) -ge "$idle_timeout" ]]; then
+                idle_stopped=1
+                log_warning "AI tool quiet after project progress for ${idle_timeout}s; terminating process boundary and moving to verification"
+                printf 'AI tool quiet after project progress for %ss; terminating process boundary and moving to verification\n' "$idle_timeout" >>"$log_file"
+                if declare -F terminate_owned_process >/dev/null 2>&1; then
+                    terminate_owned_process "$pid" provider quiescence
+                    cleanup_recorded=1
+                else
+                    _kill_process_tree TERM "$pid"
+                    sleep 1
+                    if kill -0 "$pid" 2>/dev/null; then
+                        _kill_process_tree KILL "$pid"
+                    fi
+                fi
+                break
+            fi
+        fi
+
         render_status_bar "$iteration" "$MAX_ITERATIONS" "$i"
         i=$(( (i+1) % 10 ))
         sleep 0.1
@@ -839,6 +1230,23 @@ run_ai_tool() {
     # Get exit code (124 = timed out). Defensive form so a non-zero wait never aborts.
     exit_code=0
     wait "$pid" || exit_code=$?
+    if declare -F unregister_child_process >/dev/null 2>&1; then
+        unregister_child_process "$pid"
+    fi
+    if [[ -n "$guardian_pid" ]] && declare -F stop_child_guardian >/dev/null 2>&1; then
+        stop_child_guardian "$guardian_pid"
+    fi
+    [[ "$timed_out" -eq 1 ]] && exit_code=124
+    [[ "$idle_stopped" -eq 1 ]] && exit_code=0
+    if [[ "$cleanup_recorded" -eq 0 ]] && declare -F _ralph_record_process_cleanup_event >/dev/null 2>&1; then
+        cleanup_trigger=normal
+        [[ "$exit_code" -eq 124 ]] && cleanup_trigger=timeout
+        _ralph_record_process_cleanup_event provider "$cleanup_trigger" already_exited 0 || true
+    fi
+
+    if [[ "$tool" == "opencode" ]] && declare -F normalize_opencode_json_output >/dev/null 2>&1; then
+        normalize_opencode_json_output "$output_file" "$log_file"
+    fi
 
     # Clear line and show final success/fail
     printf "\r\033[K"
@@ -891,6 +1299,71 @@ run_ai_with_fallback() {
         esac
     done
     return "${rc:-1}"
+}
+
+
+#######################################
+# Durable quality rubric / stopping policy
+#######################################
+default_quality_rubric() {
+    cat <<EOF
+# Ralph Quality Rubric
+
+Purpose: make the agent judge and improve its own work without expanding beyond the original product scope.
+
+Requested Tier: ${RALPH_QUALITY_TIER:-professional}
+Product Scope: the current user request, PRD, Beads tasks, and project instructions. Do not add enterprise features unless the user explicitly requested that tier.
+Quality Gate: continue
+Stop Reason: initial rubric created; no review has passed yet.
+
+## Rubric
+| Dimension | Pass Standard |
+| --- | --- |
+| Correctness | The requested behavior works end-to-end and edge cases introduced by the change are handled. |
+| Verification | Relevant tests, builds, linters, or live smoke checks were run and pass. |
+| Maintainability | The implementation follows local patterns, has clear boundaries, and avoids unnecessary abstraction. |
+| UX / Operator Experience | User-facing flows are understandable, responsive, and expose useful states/errors. |
+| Security / Privacy | Secrets, proprietary data, auth, tenancy, and unsafe side effects are handled deliberately. |
+| Performance / Reliability | The solution is bounded, has clear failure behavior, and avoids avoidable resource waste. |
+| Docs / Handoff | Run, test, and operational notes are current enough for the next session. |
+| Scope Control | Remaining ideas are classified as in-scope blockers, follow-up issues, or out-of-scope polish. |
+
+## Iteration Review
+- Last reviewed iteration: 0
+- Blocking issues: unknown
+- High-value in-scope improvements: unknown
+- Deferred or out-of-scope follow-ups: unknown
+
+## Stop Policy
+Set \`Quality Gate: pass\` only when all of these are true:
+- The original goal and all tracked Beads work are complete.
+- Verification passed for the changed behavior.
+- No blocking or high-severity reviewer findings remain.
+- Remaining improvements are documented follow-ups or out of scope.
+- Another iteration is unlikely to add meaningful in-scope value without increasing complexity or scope.
+EOF
+}
+
+ensure_quality_file() {
+    local file="${QUALITY_FILE:-${ARTIFACT_DIR:-.ralph/artifacts}/QUALITY.md}"
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    [[ -f "$file" ]] && return 0
+    default_quality_rubric > "$file"
+}
+
+load_quality_context() {
+    ensure_quality_file 2>/dev/null || true
+    if [[ -f "${QUALITY_FILE:-}" ]]; then
+        cat "$QUALITY_FILE"
+    else
+        echo "No QUALITY.md found. Create one with a rubric and Quality Gate status before completing."
+    fi
+}
+
+quality_gate_allows_complete() {
+    [[ "${RALPH_REQUIRE_QUALITY_ON_COMPLETE:-1}" == "1" ]] || return 0
+    [[ -f "${QUALITY_FILE:-}" ]] || return 1
+    grep -Eiq '^[[:space:]]*Quality Gate:[[:space:]]*pass([[:space:]]|$)' "$QUALITY_FILE"
 }
 
 #######################################
@@ -1024,6 +1497,24 @@ run_budget_exceeded() {
     return 1
 }
 
+# backlog_exit_allowed VERIFY_OK QUEUED_CORRECTION
+# Return 0 only when a task-backlog early exit is allowed to stand in for an
+# explicit COMPLETE promise. This keeps the Beads drain path from bypassing the
+# same verification and quality gates enforced on agent-declared completion.
+# Self-benchmarking: next small improvement is to emit structured block reasons
+# here so `review_run` can report the exact gate without parsing human logs.
+backlog_exit_allowed() {
+    local verify_ok="${1:-false}"
+    local queued_correction="${2-}"
+
+    if [[ "${RALPH_REQUIRE_VERIFY_ON_COMPLETE:-1}" == "1" && "$verify_ok" != "true" ]]; then
+        return 1
+    fi
+    [[ -z "$queued_correction" ]] || return 1
+    quality_gate_allows_complete || return 1
+    return 0
+}
+
 execute_iteration() {
     local iteration=$1
     local temp_output gitdiff_exclude_args
@@ -1060,10 +1551,18 @@ execute_iteration() {
         fi
     fi
 
+    # Create the quality rubric before hashing so the framework artifact itself is
+    # not mistaken for agent progress in this iteration.
+    ensure_quality_file || true
+
     # Capture project state before execution
     local project_hash_before
     project_hash_before=$(compute_project_hash)
     log_debug "Project hash before: $project_hash_before"
+    _RALPH_REMOTE_PROGRESS=0
+    _RALPH_REMOTE_STATE=""
+    _RALPH_REMOTE_SESSION=""
+    export _RALPH_REMOTE_PROGRESS _RALPH_REMOTE_STATE _RALPH_REMOTE_SESSION
 
     # Generate current log signature for loop detection
     local current_log_signature
@@ -1094,6 +1593,9 @@ execute_iteration() {
     else
         diagram_context="No architecture diagrams found. Create one for complex systems or multi-component features."
     fi
+
+    local quality_context
+    quality_context=$(load_quality_context)
 
     # Same resolved instructions file (already located above as $agents_path).
     if [[ -n "${agents_path:-}" && -f "$agents_path" ]]; then
@@ -1176,6 +1678,7 @@ execute_iteration() {
     # a transient/API failure is NOT mistaken for "no work left to do". On full exhaustion we
     # return a distinct code (2) and emit a durable failure event. (Default chain = 1 model.)
     local ai_attempts="${AI_RETRY_ATTEMPTS:-3}"
+    _run_manifest_heartbeat_safe provider_execution "$iteration" 1
     if ! run_ai_with_fallback "$TOOL" "${RALPH_ROLE:-engineer}" "$structured_prompt" "$LOG_FILE" "$temp_output"; then
         # Report the model actually used (the chain may have degraded past the primary).
         local used_model="${_RALPH_ACTIVE_MODEL:-$SELECTED_MODEL}"
@@ -1188,9 +1691,11 @@ execute_iteration() {
         emit_event "iteration_failed" "$fail_payload"
         store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $used_model)."
         record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $used_model did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
+        _run_manifest_heartbeat_safe provider_failed "$iteration" 1
         return 2
     fi
 
+    _run_manifest_heartbeat_safe verification "$iteration" 1
     end_ts=$(get_high_res_time)
     iteration_latency=$(echo "$end_ts - $start_ts" | bc 2>/dev/null || echo "0")
 
@@ -1222,6 +1727,9 @@ execute_iteration() {
         verify_ok=false
         export NEXT_INSTRUCTION="${artifact_errors}${runtime_errors}"
         log_warning "Validation or runtime errors detected, will correct in next iteration"
+        if [[ "${TOOL:-}" == "jules" && "${_RALPH_REMOTE_STATE:-}" == "COMPLETED" ]] && declare -F jules_send_verification_feedback >/dev/null 2>&1; then
+            jules_send_verification_feedback "${artifact_errors}${runtime_errors}" "$LOG_FILE" || true
+        fi
         SIGNAL_CLEAN_STREAK=0
         # Record recurring failures as deduped signals (frequency climbs on repeat).
         [[ -n "$artifact_errors" ]] && record_signal validation_failure "artifact validation failed" "$artifact_errors" "fix the flagged artifacts before continuing" "validation" >/dev/null 2>&1 || true
@@ -1234,18 +1742,25 @@ execute_iteration() {
             _signal_auto_resolve_family runtime_failure || true
         fi
     fi
+    LAST_VERIFY_OK="$verify_ok"; export LAST_VERIFY_OK
 
     # Analyze project changes
     local project_hash_after
     project_hash_after=$(compute_project_hash)
     log_debug "Project hash after: $project_hash_after"
 
-    if [[ "$project_hash_before" == "$project_hash_after" ]]; then
+    local remote_progress="${_RALPH_REMOTE_PROGRESS:-0}"
+    if [[ "$project_hash_before" == "$project_hash_after" && "$remote_progress" != "1" ]]; then
         LAZY_STREAK=$(( ${LAZY_STREAK:-0} + 1 ))
         log_warning "No files modified this iteration (streak: $LAZY_STREAK)"
         if [[ ${LAZY_STREAK:-0} -ge ${LAZY_THRESHOLD:-2} ]]; then
             record_signal lazy_streak "no files modified for $LAZY_STREAK consecutive iterations" "no-files-modified" "make a concrete code change or output the completion promise" "lazy_detection" >/dev/null 2>&1 || true
         fi
+    elif [[ "$remote_progress" == "1" ]]; then
+        log_success "Remote provider progressed (${_RALPH_REMOTE_SESSION:-unknown}: ${_RALPH_REMOTE_STATE:-unknown})"
+        LAZY_STREAK=0
+        _signal_auto_resolve_family lazy_streak >/dev/null 2>&1 || true
+        _signal_auto_resolve_family loop_detected >/dev/null 2>&1 || true
     else
         log_success "Files modified - agent is making progress"
         LAZY_STREAK=0
@@ -1268,6 +1783,7 @@ execute_iteration() {
     # iteration's build/artifact verification pass? (booleans, emitted as JSON.)
     local changed_json=false verify_json="${verify_ok:-true}"
     [[ "$project_hash_before" != "$project_hash_after" ]] && changed_json=true
+    [[ "${_RALPH_REMOTE_PROGRESS:-0}" == "1" ]] && changed_json=true
     metrics_payload=""
     if command_exists jq; then
         metrics_payload=$(jq -nc \
@@ -1314,6 +1830,7 @@ execute_iteration() {
         "[prompt](${RUN_DIR:-.}/steps/iter-$iteration/prompt.txt) · [output](${RUN_DIR:-.}/steps/iter-$iteration/output.txt)" \
         "" \
         "changed=$_changed · lazy_streak=${LAZY_STREAK:-0} · tokens=$est_tokens" || true
+    _run_manifest_heartbeat_safe iteration_complete "$iteration" 1
 
     # Check for completion signal
     if echo "$output" | grep -qF "<promise>COMPLETE</promise>"; then
@@ -1322,12 +1839,22 @@ execute_iteration() {
             # build/artifact checks are failing, so the loop cannot declare success
             # over a broken tree. The failing details were queued in NEXT_INSTRUCTION
             # above; reinforce that completion is blocked until they pass.
-            log_warning "Agent signaled completion, but verification is failing — completion REJECTED until it passes."
+            log_warning "Agent signaled completion, but verification is failing - completion REJECTED until it passes."
             export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED because build/artifact verification is still failing. Fix the errors below, confirm they pass, and only then complete:
 ${artifact_errors}${runtime_errors}"
             record_signal completion_blocked "completion promise rejected while verification is failing" "verify-gate-block" "fix the failing build/artifact checks, then re-emit completion" "verify_gate" "high" >/dev/null 2>&1 || true
-        elif verify_beads_complete; then
-            log_success "Agent signaled completion and all Beads tasks are closed"
+        elif ! verify_beads_complete; then
+            log_warning "Agent signaled completion but incomplete tasks remain in Beads"
+            local ready_tasks
+            ready_tasks=$(_bd ready --pretty)
+            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
+$ready_tasks"
+        elif ! quality_gate_allows_complete; then
+            log_warning "Agent signaled completion, but QUALITY.md does not mark Quality Gate: pass - completion REJECTED."
+            export NEXT_INSTRUCTION="You output <promise>COMPLETE</promise>, but completion is BLOCKED by the quality gate. Update ${QUALITY_FILE:-QUALITY.md} with a reviewer judgment. Keep Quality Gate: continue if meaningful in-scope improvements or blockers remain; set Quality Gate: pass only if the stop policy is satisfied. Then re-run verification and complete."
+            record_signal quality_gate_blocked "completion promise rejected by quality gate" "quality-gate-not-pass" "update QUALITY.md with the reviewer judgment and either continue improving or mark Quality Gate: pass" "quality_gate" "medium" >/dev/null 2>&1 || true
+        else
+            log_success "Agent signaled completion, all Beads tasks are closed, and quality gate passed"
 
             # Store lesson learned (basic heuristic: extract summary or use project name)
             local project_name
@@ -1335,12 +1862,6 @@ ${artifact_errors}${runtime_errors}"
             store_lesson "Project '$project_name' completed successfully with $iteration iterations."
 
             return 0
-        else
-            log_warning "Agent signaled completion but incomplete tasks remain in Beads"
-            local ready_tasks
-            ready_tasks=$(_bd ready --pretty)
-            export NEXT_INSTRUCTION="You signaled completion, but the following tasks are still incomplete in Beads. Please complete them and use 'bd close <id>' for each before terminating:
-$ready_tasks"
         fi
     fi
 
@@ -1350,6 +1871,18 @@ $ready_tasks"
 #######################################
 # Main execution entry point
 #######################################
+_run_manifest_heartbeat_safe() {
+    if declare -F run_manifest_heartbeat >/dev/null 2>&1; then
+        run_manifest_heartbeat "$@" || true
+    fi
+}
+
+_set_run_outcome_safe() {
+    if declare -F set_run_outcome >/dev/null 2>&1; then
+        set_run_outcome "$@" || true
+    fi
+}
+
 main() {
     # Check for swarm command
     if [[ "${1:-}" == "swarm" ]]; then
@@ -1392,6 +1925,25 @@ main() {
     if [[ "${1:-}" == "triage" ]]; then
         shift
         handle_triage_command "$@"
+        exit $?
+    fi
+    # Synapse (agent-backplane) client + per-agent live-test CLIs. Defined in lib/synapse.sh.
+    if [[ "${1:-}" == "agents" ]]; then
+        shift
+        handle_agents_command "$@"
+        exit $?
+    fi
+    if [[ "${1:-}" == "synapse" ]]; then
+        shift
+        handle_synapse_command "$@"
+        exit $?
+    fi
+    # Read-only cleanup-latency aggregation across retained runs. Dispatched here (after
+    # load_config so _RALPH_DIR/run root exist, before check_dependencies) so it works on
+    # hosts without the AI toolchain. Aggregation logic lives in lib/processes.sh.
+    if [[ "${1:-}" == "cleanup-stats" ]]; then
+        shift
+        handle_cleanup_stats_command "$@"
         exit $?
     fi
 
@@ -1438,8 +1990,9 @@ main() {
     fi
 
     # Unattended mode: prefer the hardened Docker sandbox for autonomous runs.
-    # Skip when already inside the sandbox container (we are the isolation boundary).
-    if [[ "${UNATTENDED:-false}" == "true" && "${SANDBOX_MODE:-false}" != "true" ]] && ! running_in_container; then
+    # Skip inside a container or when the operator explicitly accepted host execution.
+    if [[ "${UNATTENDED:-false}" == "true" && "${SANDBOX_MODE:-false}" != "true" &&
+          "${RALPH_SANDBOX_EXPLICITLY_DISABLED:-false}" != "true" ]] && ! running_in_container; then
         if command_exists docker; then
             log_info "Unattended mode: enabling Docker sandbox for isolation"
             export SANDBOX_MODE=true
@@ -1465,7 +2018,9 @@ main() {
     # (not before the sandbox exec) so the host wrapper does not deadlock against
     # its own bind-mounted container over the same lock file.
     if command_exists flock; then
-        local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock"
+        local lock_file="${STATE_DIR:-.ralph/state}/ralph.lock" lock_wait="${RALPH_LOCK_WAIT_SECONDS:-3}"
+        [[ "$lock_wait" =~ ^[0-9]+$ ]] || lock_wait=3
+        [[ "$lock_wait" -le 60 ]] || lock_wait=60
         mkdir -p "$(dirname "$lock_file")" 2>/dev/null || true
         # Guard the FD redirect: a bare `exec 9>file` aborts the whole script under
         # set -e if the file exists but is not writable. The brace group scopes the
@@ -1473,8 +2028,8 @@ main() {
         # would make the stderr redirect PERMANENT and blackhole all later logs.
         if ! { exec 9>"$lock_file"; } 2>/dev/null; then
             log_warning "Cannot open lock file $lock_file; skipping singleton lock."
-        elif ! flock -n 9; then
-            log_error "Another Ralph instance is already running for this project (lock: $lock_file)."
+        elif ! flock -w "$lock_wait" 9; then
+            log_error "Another Ralph instance held the project lock for ${lock_wait}s (lock: $lock_file)."
             log_info "Use a separate git worktree for parallel runs, or wait for the current run to finish."
             exit 1
         else
@@ -1489,6 +2044,9 @@ main() {
     # prune old runs to bound disk growth.
     mkdir -p "$RUN_DIR/steps" 2>/dev/null || true
     chmod 700 "$RUN_DIR" 2>/dev/null || true   # step traces may contain prompt secrets
+    if declare -F init_run_manifest >/dev/null 2>&1; then
+        init_run_manifest || log_warning "Continuing without durable run manifest evidence"
+    fi
     ln -sfn "$RUN_DIR" "$_RALPH_DIR/runs/latest" 2>/dev/null || true
     prune_old_runs "$_RALPH_DIR/runs" "${RALPH_RUN_RETENTION:-20}"
 
@@ -1518,6 +2076,7 @@ main() {
     # Determine model to use
     determine_model || {
         log_error "Failed to determine model"
+        _set_run_outcome_safe failed model_selection_failed
         exit 1
     }
 
@@ -1526,6 +2085,7 @@ main() {
     export SIGNAL_CLEAN_STREAK=0
     export PREVIOUS_LOG_HASH=""
     export NEXT_INSTRUCTION=""
+    export LAST_VERIFY_OK=false
     # Aggregate run budget accounting (per invocation; a --resume run starts a
     # fresh token/time budget). Consumed by the FinOps ceiling check below.
     export RUN_TOKENS_TOTAL=0
@@ -1542,6 +2102,7 @@ main() {
 
         if [[ "$last_checkpoint" =~ ^[0-9]+$ ]] && [[ $last_checkpoint -gt 0 ]]; then
             log_info "Resuming from checkpoint: Iteration $last_checkpoint"
+            _RALPH_RESUME_CHECKPOINT="$last_checkpoint"
             start_iter=$((last_checkpoint + 1))
 
             # Restore loop-control state so a resumed run keeps its lazy streak,
@@ -1556,8 +2117,13 @@ main() {
         fi
     fi
 
+    _run_manifest_heartbeat_safe ready "$((start_iter - 1))" 1
+
     # Main iteration loop
     for i in $(seq "$start_iter" "$MAX_ITERATIONS"); do
+
+        _RALPH_CURRENT_ITERATION="$i"
+        _run_manifest_heartbeat_safe iteration_prepare "$i" 1
 
         # Interactive mode: pause for user input
         if [[ "${INTERACTIVE_MODE:-false}" == "true" ]]; then
@@ -1585,6 +2151,7 @@ main() {
             log_success "╚══════════════════════════════════════╝"
             log_success "Completed at iteration $i of $MAX_ITERATIONS"
             review_run
+            _set_run_outcome_safe completed completion_signal
             exit 0
         elif [[ $iter_rc -eq 2 ]]; then
             CONSECUTIVE_FAILURES=$(( CONSECUTIVE_FAILURES + 1 ))
@@ -1592,6 +2159,7 @@ main() {
             if [[ $CONSECUTIVE_FAILURES -ge ${MAX_CONSECUTIVE_FAILURES:-3} ]]; then
                 log_error "Aborting: ${CONSECUTIVE_FAILURES} consecutive tool failures. Check connectivity, auth, or model availability."
                 send_notification "Ralph stopped" "Aborted after ${CONSECUTIVE_FAILURES} consecutive tool failures" "critical"
+                _set_run_outcome_safe failed provider_failure_circuit_breaker
                 exit 1
             fi
             log_warning "Backing off before re-attempting the loop..."
@@ -1605,14 +2173,22 @@ main() {
         # Stop early once the backlog is provably drained for TWO consecutive
         # iterations (work done, nothing open). The streak avoids exiting on a
         # transient empty queue between task phases. Only after a normal iteration.
+        local _backlog_drained=false
         if [[ $iter_rc -eq 1 ]] && backlog_drained; then
+            _backlog_drained=true
+        fi
+        if [[ "$_backlog_drained" == "true" ]] && backlog_exit_allowed "${LAST_VERIFY_OK:-false}" "${NEXT_INSTRUCTION:-}"; then
             DRAIN_STREAK=$(( DRAIN_STREAK + 1 ))
             if [[ $DRAIN_STREAK -ge 2 ]]; then
                 log_success "Task backlog drained for 2 iterations — all tracked work is complete."
                 review_run
+                _set_run_outcome_safe completed backlog_drained
                 exit 0
             fi
             log_info "Backlog appears drained (streak ${DRAIN_STREAK}/2); confirming on next iteration."
+        elif [[ "$_backlog_drained" == "true" ]]; then
+            DRAIN_STREAK=0
+            log_warning "Backlog is drained, but completion gates are still blocking; continuing until verification and quality pass."
         else
             DRAIN_STREAK=0
         fi
@@ -1625,6 +2201,7 @@ main() {
             record_signal stall_abort "run aborted after ${LAZY_STREAK} no-progress iterations" "stall-ceiling" "break the task down or intervene; the agent stopped changing state" "stall_abort" "high" >/dev/null 2>&1 || true
             send_notification "Ralph stopped" "Stalled: no progress for ${LAZY_STREAK} iterations" "critical"
             review_run
+            _set_run_outcome_safe failed stall_limit
             exit 1
         fi
 
@@ -1637,6 +2214,7 @@ main() {
             record_signal budget_abort "run aborted: ${_budget_reason}" "run-budget" "raise RALPH_MAX_RUN_TOKENS / RALPH_MAX_RUN_SECONDS, or split the work" "budget_abort" "high" >/dev/null 2>&1 || true
             send_notification "Ralph stopped" "Run budget exceeded: ${_budget_reason}" "critical"
             review_run
+            _set_run_outcome_safe failed budget_exceeded
             exit 1
         fi
 
@@ -1647,9 +2225,11 @@ main() {
                 # The in-process circuit breaker cannot accumulate across cron ticks,
                 # so alert here on a hard failure instead of exiting silently non-zero.
                 send_notification "Ralph (--once) failed" "Iteration $i tool failure; check logs" "critical"
+                _set_run_outcome_safe failed provider_failure
                 exit 1
             fi
             review_run
+            _set_run_outcome_safe paused single_iteration
             exit 0
         fi
     done
@@ -1665,6 +2245,7 @@ main() {
     log_info "Use --resume to continue from checkpoint"
 
     review_run
+    _set_run_outcome_safe incomplete max_iterations
     exit 1
 }
 
@@ -1932,14 +2513,442 @@ validate_execution_plan() {
 
 
 #######################################
+# Runtime verification helpers
+#######################################
+verification_evidence_file() {
+    printf '%s\n' "${RALPH_VERIFICATION_FILE:-${ARTIFACT_DIR:-${PROJECT_DIR:-.}/.ralph/artifacts}/verification.json}"
+}
+
+init_verification_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local file updated_at
+    file=$(verification_evidence_file)
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    jq -n \
+        --arg schema_version "1" \
+        --arg project_dir "${PROJECT_DIR:-.}" \
+        --arg run_id "${RUN_ID:-manual}" \
+        --argjson iteration "${iteration:-0}" \
+        --arg started_at "$updated_at" \
+        '{schema_version:($schema_version|tonumber), project_dir:$project_dir, run_id:$run_id, iteration:$iteration, started_at:$started_at, updated_at:$started_at, commands:[], summary:{total:0, failed:0, timed_out:0}}' \
+        > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
+runtime_timeout_diagnostic() {
+    local cmd="$1" timeout_s="$2"
+    local msg="timed out after ${timeout_s}s"
+    case "$cmd" in
+        npm\ test|pnpm\ test|yarn\ test|bun\ test|*node\ --test*)
+            msg+="; if assertions passed before timeout, check for an open server/listener/timer and close it in test teardown"
+            ;;
+    esac
+    printf '%s\n' "$msg"
+}
+
+append_verification_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local cmd="$1" rc="$2" timed_out="$3" timeout_s="$4" elapsed_s="$5" stdout_file="$6" stderr_file="$7" diagnostic="${8:-}"
+    local file stdout_tail stderr_tail updated_at timed_out_json
+    file=$(verification_evidence_file)
+    [[ -f "$file" ]] || init_verification_evidence
+    [[ -f "$file" ]] || return 0
+    stdout_tail=$(tail -n 40 "$stdout_file" 2>/dev/null || true)
+    stderr_tail=$(tail -n 40 "$stderr_file" 2>/dev/null || true)
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    [[ "$timed_out" == "true" ]] && timed_out_json=true || timed_out_json=false
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+    [[ "$timeout_s" =~ ^[0-9]+$ ]] || timeout_s=0
+    [[ "$elapsed_s" =~ ^[0-9]+$ ]] || elapsed_s=0
+
+    jq \
+        --arg command "$cmd" \
+        --argjson exit_code "$rc" \
+        --argjson timed_out "$timed_out_json" \
+        --argjson timeout_seconds "$timeout_s" \
+        --argjson elapsed_seconds "$elapsed_s" \
+        --arg stdout_tail "$stdout_tail" \
+        --arg stderr_tail "$stderr_tail" \
+        --arg diagnostic "$diagnostic" \
+        --arg updated_at "$updated_at" \
+        '.commands += [{command:$command, exit_code:$exit_code, timed_out:$timed_out, timeout_seconds:$timeout_seconds, elapsed_seconds:$elapsed_seconds, diagnostic:$diagnostic, stdout_tail:$stdout_tail, stderr_tail:$stderr_tail}]
+         | .updated_at = $updated_at
+         | .summary = {total:(.commands|length), failed:([.commands[] | select(.exit_code != 0)] | length), timed_out:([.commands[] | select(.timed_out == true)] | length)}' \
+        "$file" > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
+_runtime_add_command() {
+    local cmd="$1"
+    [[ -n "$cmd" ]] || return 0
+    case "$cmd" in
+        "No build command detected"|"No test command detected"|echo\ "No build command detected"*|echo\ "No test command detected"*) return 0 ;;
+    esac
+    if [[ "${_RALPH_RUNTIME_SEEN:-}" == *$'\n'"$cmd"$'\n'* ]]; then
+        return 0
+    fi
+    _RALPH_RUNTIME_SEEN+="$cmd"$'\n'
+    printf '%s\n' "$cmd"
+}
+
+runtime_package_manager() {
+    local project_dir="${1:-.}"
+    if [[ -f "$project_dir/bun.lock" || -f "$project_dir/bun.lockb" ]]; then
+        echo bun
+    elif [[ -f "$project_dir/pnpm-lock.yaml" ]]; then
+        echo pnpm
+    elif [[ -f "$project_dir/yarn.lock" ]]; then
+        echo yarn
+    else
+        echo npm
+    fi
+}
+
+collect_runtime_commands() {
+    local project_dir="${1:-.}" pm script value
+    _RALPH_RUNTIME_SEEN=$'\n'
+
+    if command_exists jq && [[ -f "$project_dir/ralph.json" ]]; then
+        while IFS= read -r value; do
+            _runtime_add_command "$value"
+        done < <(jq -r '.commands // {} | to_entries[] | . as $entry | select(["verify","test","build","smoke","lint","check"] | index($entry.key)) | select($entry.value | type == "string") | $entry.value' "$project_dir/ralph.json" 2>/dev/null || true)
+    fi
+
+    if command_exists jq && [[ -f "$project_dir/package.json" ]]; then
+        pm=$(runtime_package_manager "$project_dir")
+        for script in test build lint smoke check; do
+            value=$(jq -r --arg script "$script" '.scripts[$script] // empty' "$project_dir/package.json" 2>/dev/null || true)
+            [[ -n "$value" ]] || continue
+            case "$value" in *"no test specified"*) continue ;; esac
+            if [[ "$script" == "test" ]]; then
+                _runtime_add_command "$pm test"
+            else
+                _runtime_add_command "$pm run $script"
+            fi
+        done
+    fi
+
+    unset _RALPH_RUNTIME_SEEN
+}
+
+runtime_command_allowed() {
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+    [[ "$cmd" != *$'\n'* && "$cmd" != *$'\r'* ]] || return 1
+    [[ "$cmd" != *";"* && "$cmd" != *"&"* && "$cmd" != *"|"* && "$cmd" != *"<"* && "$cmd" != *">"* ]] || return 1
+    [[ "$cmd" != *'`'* && "$cmd" != *'$('* && "$cmd" != *'${'* ]] || return 1
+
+    [[ "$cmd" =~ ^(npm|pnpm|bun|yarn)[[:space:]]+(test|run[[:space:]]+[A-Za-z0-9:_-]+)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^cargo[[:space:]]+(test|build|check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^go[[:space:]]+(test|build|vet)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^(pytest|ruff[[:space:]]+check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^python3?[[:space:]]+-m[[:space:]]+pytest([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    [[ "$cmd" =~ ^make[[:space:]]+(test|check)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    return 1
+}
+
+run_runtime_command() {
+    local project_dir="$1" cmd="$2" timeout_s="${RALPH_VERIFY_TIMEOUT:-120}"
+    local stdout_file stderr_file start_s end_s elapsed_s rc=0 timed_out=false diagnostic=""
+    [[ "$timeout_s" =~ ^[0-9]+$ ]] || timeout_s=120
+    stdout_file=$(mktemp "${TMPDIR:-/tmp}/ralph-verify-out.XXXXXX") || stdout_file="/tmp/ralph-verify-out.$$"
+    stderr_file=$(mktemp "${TMPDIR:-/tmp}/ralph-verify-err.XXXXXX") || stderr_file="/tmp/ralph-verify-err.$$"
+    start_s=$(date +%s)
+
+    if command_exists timeout && [[ "$timeout_s" -gt 0 ]]; then
+        (cd "$project_dir" && timeout "$timeout_s" bash -lc "$cmd") >"$stdout_file" 2>"$stderr_file" || rc=$?
+    else
+        (cd "$project_dir" && bash -lc "$cmd") >"$stdout_file" 2>"$stderr_file" || rc=$?
+    fi
+
+    end_s=$(date +%s)
+    elapsed_s=$(( end_s - start_s ))
+    if [[ "$rc" == "124" || "$rc" == "137" ]]; then
+        timed_out=true
+        diagnostic=$(runtime_timeout_diagnostic "$cmd" "$timeout_s")
+    fi
+
+    _RALPH_RUNTIME_LAST_RC="$rc"
+    _RALPH_RUNTIME_LAST_TIMED_OUT="$timed_out"
+    _RALPH_RUNTIME_LAST_DIAGNOSTIC="$diagnostic"
+    export _RALPH_RUNTIME_LAST_RC _RALPH_RUNTIME_LAST_TIMED_OUT _RALPH_RUNTIME_LAST_DIAGNOSTIC
+
+    append_verification_evidence "$cmd" "$rc" "$timed_out" "$timeout_s" "$elapsed_s" "$stdout_file" "$stderr_file" "$diagnostic"
+    rm -f "$stdout_file" "$stderr_file" 2>/dev/null || true
+    return "$rc"
+}
+
+_health_port_listening() {
+    local port="$1"
+    command_exists ss || return 1
+    ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { found=1 } END { exit !found }'
+}
+
+_health_port_pids() {
+    local port="$1"
+    command_exists ss || return 1
+    ss -H -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p "$" { print }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+_path_within_project() {
+    local child="$1" root="$2" child_real root_real
+    child_real=$(cd "$child" 2>/dev/null && pwd -P) || return 1
+    root_real=$(cd "$root" 2>/dev/null && pwd -P) || return 1
+    [[ "$child_real" == "$root_real" || "$child_real" == "$root_real"/* ]]
+}
+
+_health_port_owned_by_project() {
+    local port="$1" project_dir="$2" pid cwd found_pid=false
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] || continue
+        found_pid=true
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+        [[ -n "$cwd" ]] || continue
+        if _path_within_project "$cwd" "$project_dir"; then
+            return 0
+        fi
+    done < <(_health_port_pids "$port")
+    [[ "$found_pid" == "false" ]] && return 1
+    return 1
+}
+
+live_smoke_evidence_file() {
+    printf '%s\n' "${RALPH_LIVE_SMOKE_FILE:-${ARTIFACT_DIR:-${PROJECT_DIR:-.}/.ralph/artifacts}/live-smoke.json}"
+}
+
+runtime_server_command_allowed() {
+    local cmd="${1:-}"
+    [[ -n "$cmd" ]] || return 1
+    [[ "$cmd" != *$'\n'* && "$cmd" != *$'\r'* ]] || return 1
+    [[ "$cmd" != *";"* && "$cmd" != *"&"* && "$cmd" != *"|"* && "$cmd" != *"<"* && "$cmd" != *">"* ]] || return 1
+    [[ "$cmd" != *'`'* && "$cmd" != *'$('* && "$cmd" != *'${'* ]] || return 1
+    [[ "$cmd" =~ ^(npm|pnpm|bun|yarn)[[:space:]]+(start|run[[:space:]]+[A-Za-z0-9:_-]+)([[:space:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]] && return 0
+    return 1
+}
+
+collect_live_smoke_command() {
+    local project_dir="${1:-.}" pm value
+    if [[ -n "${RALPH_LIVE_SMOKE_COMMAND:-}" ]]; then
+        runtime_server_command_allowed "$RALPH_LIVE_SMOKE_COMMAND" && printf '%s\n' "$RALPH_LIVE_SMOKE_COMMAND"
+        return $?
+    fi
+    command_exists jq || return 1
+    [[ -f "$project_dir/package.json" ]] || return 1
+    value=$(jq -r '.scripts.start // empty' "$project_dir/package.json" 2>/dev/null || true)
+    [[ -n "$value" ]] || return 1
+    pm=$(runtime_package_manager "$project_dir")
+    printf '%s\n' "$pm start"
+}
+
+write_live_smoke_evidence() {
+    [[ "${RALPH_WRITE_VERIFICATION_EVIDENCE:-1}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local status="$1" command="$2" port="$3" probes_json="$4" log_file="$5" diagnostic="${6:-}"
+    local file updated_at log_tail
+    file=$(live_smoke_evidence_file)
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    log_tail=$(tail -n 80 "$log_file" 2>/dev/null || true)
+    [[ "$port" =~ ^[0-9]+$ ]] || port=0
+    [[ -n "$probes_json" ]] || probes_json='[]'
+    jq -n \
+        --arg status "$status" \
+        --arg command "$command" \
+        --argjson port "$port" \
+        --arg updated_at "$updated_at" \
+        --arg diagnostic "$diagnostic" \
+        --arg log_tail "$log_tail" \
+        --argjson probes "$probes_json" \
+        '{schema_version:1, status:$status, command:$command, port:$port, updated_at:$updated_at, diagnostic:$diagnostic, probes:$probes, log_tail:$log_tail}' \
+        > "$file.tmp" 2>/dev/null && mv "$file.tmp" "$file" 2>/dev/null || true
+}
+
+run_live_smoke() {
+    local project_dir="${1:-.}" errors=""
+    [[ "${RALPH_LIVE_SMOKE:-0}" == "1" ]] || return 0
+    command_exists curl || { printf '%s' $'\n- Live smoke failed: missing curl.'; return 0; }
+    command_exists jq || { printf '%s' $'\n- Live smoke failed: missing jq.'; return 0; }
+
+    local cmd port ready_timeout paths log_file probe_file pid guardian_pid="" started_at pass=false path url code probes_json status diagnostic
+    local supervisor_path state_file ack_file
+    if ! cmd=$(collect_live_smoke_command "$project_dir"); then
+        printf '%s' $'\n- Live smoke failed: no safe start command found. Add package.json scripts.start or set RALPH_LIVE_SMOKE_COMMAND.'
+        return 0
+    fi
+    if ! runtime_server_command_allowed "$cmd"; then
+        printf '%s\n' "- Live smoke failed: server command rejected as unsafe: $cmd"
+        return 0
+    fi
+
+    port="${RALPH_LIVE_SMOKE_PORT:-18080}"
+    [[ "$port" =~ ^[0-9]+$ ]] || port=18080
+    ready_timeout="${RALPH_LIVE_SMOKE_READY_TIMEOUT:-20}"
+    [[ "$ready_timeout" =~ ^[0-9]+$ ]] || ready_timeout=20
+    paths="${RALPH_LIVE_SMOKE_PATHS:-/health /api/health /api/v1/status /}"
+    log_file="${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/live-smoke.log"
+    mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+    probe_file=$(mktemp "${TMPDIR:-/tmp}/ralph-live-smoke.XXXXXX") || probe_file="/tmp/ralph-live-smoke.$$"
+    : > "$probe_file"
+
+    if ! declare -F prepare_supervised_process >/dev/null 2>&1 ||
+       ! supervisor_path=$(_ralph_process_supervisor_path) ||
+       ! prepare_supervised_process; then
+        rm -f "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: unable to prepare the isolated server process boundary.'
+        return 0
+    fi
+    state_file="$_RALPH_BOUNDARY_STATE_FILE"
+    ack_file="$_RALPH_BOUNDARY_ACK_FILE"
+    (
+        { exec 9>&-; } 2>/dev/null || true
+        cd "$project_dir" || exit 1
+        export PORT="$port" HOST=127.0.0.1
+        exec python3 "$supervisor_path" \
+            --state-file "$state_file" \
+            --ack-file "$ack_file" \
+            --log-file "$log_file" \
+            --merge-stderr \
+            -- bash -lc "$cmd" </dev/null
+    ) &
+    pid=$!
+    if ! register_supervised_process "$pid" live_smoke "$state_file" "$ack_file" 0; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary failed identity validation.'
+        return 0
+    fi
+    if ! start_child_guardian "$pid" "${BASHPID:-$$}" live_smoke; then
+        terminate_owned_process "$pid" live_smoke exit 0
+        wait "$pid" 2>/dev/null || true
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary guardian failed to start.'
+        return 0
+    fi
+    guardian_pid="${_RALPH_LAST_GUARDIAN_PID:-}"
+    if ! release_supervised_process "$pid" "$ack_file"; then
+        terminate_owned_process "$pid" live_smoke exit 0
+        wait "$pid" 2>/dev/null || true
+        stop_child_guardian "$guardian_pid"
+        unregister_child_process "$pid"
+        rm -f "$state_file" "$ack_file" "$probe_file" 2>/dev/null || true
+        printf '%s' $'\n- Live smoke failed: server process boundary failed to release.'
+        return 0
+    fi
+    started_at=$SECONDS
+
+    while kill -0 "$pid" 2>/dev/null && [[ $((SECONDS - started_at)) -lt "$ready_timeout" ]]; do
+        for path in $paths; do
+            [[ "$path" == /* ]] || path="/$path"
+            url="http://127.0.0.1:${port}${path}"
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+            [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+            local code_num ok_json=false
+            code_num=$((10#$code))
+            [[ "$code" =~ ^[23] ]] && ok_json=true
+            jq -n --arg path "$path" --arg url "$url" --argjson code "$code_num" --argjson ok "$ok_json" \
+                '{path:$path,url:$url,http_code:$code,ok:$ok}' >> "$probe_file" 2>/dev/null || true
+            if [[ "$ok_json" == "true" ]]; then
+                pass=true
+                break 2
+            fi
+        done
+        sleep 1
+    done
+
+    if declare -F terminate_owned_process >/dev/null 2>&1; then
+        terminate_owned_process "$pid" live_smoke verification
+    else
+        _kill_process_tree TERM "$pid"
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            _kill_process_tree KILL "$pid"
+        fi
+    fi
+    wait "$pid" >/dev/null 2>&1 || true
+    if declare -F unregister_child_process >/dev/null 2>&1; then
+        unregister_child_process "$pid"
+    fi
+    if [[ -n "$guardian_pid" ]] && declare -F stop_child_guardian >/dev/null 2>&1; then
+        stop_child_guardian "$guardian_pid"
+    fi
+
+    probes_json=$(jq -s '.' "$probe_file" 2>/dev/null || echo '[]')
+    rm -f "$probe_file" 2>/dev/null || true
+    if [[ "$pass" == "true" ]]; then
+        status=pass
+        diagnostic=""
+        log_success "Live smoke passed on port $port"
+    else
+        status=fail
+        diagnostic="no configured live-smoke endpoint returned HTTP 2xx/3xx before ${ready_timeout}s"
+        errors+=$'\n'"- Live smoke failed: $diagnostic."
+    fi
+    write_live_smoke_evidence "$status" "$cmd" "$port" "$probes_json" "$log_file" "$diagnostic"
+    printf '%s' "$errors"
+}
+
+verify_health_ports() {
+    local project_dir="${1:-.}" errors="" port ep url code body
+    local ports=()
+    [[ -n "${RALPH_HEALTH_PORTS:-}" ]] || return 0
+    IFS=$' \t\n,' read -r -a ports <<< "${RALPH_HEALTH_PORTS:-}" || true
+    for port in ${ports[@]+"${ports[@]}"}; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        _health_port_listening "$port" || continue
+
+        if [[ "${RALPH_HEALTH_ALLOW_EXTERNAL:-0}" != "1" ]] && ! _health_port_owned_by_project "$port" "$project_dir"; then
+            errors+=$'\n'"- Health port $port is listening, but no owning process is rooted in $project_dir. Refusing to treat it as this project's service."
+            continue
+        fi
+
+        log_success "Project service detected on port $port"
+        if command_exists curl; then
+            local passed=false
+            for ep in "/health" "/api/hello" "/api/v1/status" "/"; do
+                url="http://localhost:$port$ep"
+                if [[ -n "${RALPH_HEALTH_EXPECT:-}" ]]; then
+                    body=$(curl -fsS "$url" 2>/dev/null || true)
+                    if [[ "$body" == *"$RALPH_HEALTH_EXPECT"* ]]; then
+                        passed=true
+                    fi
+                else
+                    code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
+                    [[ "$code" == "200" ]] && passed=true
+                fi
+                if [[ "$passed" == "true" ]]; then
+                    log_success "Health check passed: $url"
+                    if [[ "$port" == "8080" ]]; then
+                        local bench_result
+                        bench_result=$(run_mini_bench "$url" 5)
+                        [[ "$bench_result" == *"<performance_alert>"* ]] && errors+=$'\n'"$bench_result"
+                    fi
+                    if [[ "$port" == "3000" ]]; then
+                        local visual_report
+                        visual_report=$(verify_ui_visual "$url")
+                        [[ -n "$visual_report" ]] && errors+=$'\n'"$visual_report"
+                    fi
+                    break
+                fi
+            done
+            [[ "$passed" == "true" ]] || errors+=$'\n'"- Health checks failed for project-owned port $port."
+        fi
+    done
+    printf '%s' "$errors"
+}
+
+#######################################
 # Perform runtime verification of services
-# Identifies services and runs liveness probes
+# Identifies services and runs declared checks plus explicit liveness probes
 # Returns: Error string if verification fails
 #######################################
 verify_runtime() {
     local errors=""
     local project_dir="${PROJECT_DIR:-.}"
 
+    init_verification_evidence
     log_debug "Starting runtime verification..."
 
     # 1. Identify and verify Rust services
@@ -1953,11 +2962,11 @@ verify_runtime() {
     # 2. Identify and verify Node.js services
     if [[ -f "$project_dir/package.json" ]]; then
         log_info "Verifying Node.js project..."
+        if command_exists jq && ! jq empty "$project_dir/package.json" >/dev/null 2>&1; then
+            errors+=$'\n'"- Invalid package.json format."
+        fi
         if [[ ! -d "$project_dir/node_modules" ]]; then
-            log_warning "node_modules missing, attempt to check package.json validity..."
-            if ! jq empty "$project_dir/package.json" >/dev/null 2>&1; then
-                errors+=$'\n'"- Invalid package.json format."
-            fi
+            log_warning "node_modules missing; package install may be required before full verification."
         fi
     fi
 
@@ -1987,49 +2996,37 @@ verify_runtime() {
         fi
     fi
 
-    # 5. Liveness Probe (Port scanning & Health checks)
-    # Checks common dev ports
-    local ports=()
-    IFS=$' \t\n,' read -r -a ports <<< "${RALPH_HEALTH_PORTS:-8080 3000 5000 8000 8443 4000 5173 3001 8888}" || true
-    for port in ${ports[@]+"${ports[@]}"}; do
-        [[ "$port" =~ ^[0-9]+$ ]] || continue   # ignore junk tokens from RALPH_HEALTH_PORTS
-        if command_exists ss; then
-            if ss -tuln | grep -q ":$port "; then
-                log_success "Service detected on port $port"
-
-                # Dynamic Health Check
-                if command_exists curl; then
-                    # Try common health endpoints across all identified ports
-                    for ep in "/health" "/api/hello" "/api/v1/status" "/"; do
-                        local url="http://localhost:$port$ep"
-                        local code
-                        code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
-                        if [[ "$code" == "200" ]]; then
-                            log_success "Health check passed: $url"
-
-                            # Trigger Benchmarking if port is 8080 (Primary API)
-                            if [[ "$port" == "8080" ]]; then
-                                local bench_result
-                                bench_result=$(run_mini_bench "$url" 5)
-                                if [[ "$bench_result" == *"<performance_alert>"* ]]; then
-                                    errors+=$'\n'"$bench_result"
-                                fi
-                            fi
-                            # Trigger Visual Audit if port is 3000 (Frontend)
-                            if [[ "$port" == "3000" ]]; then
-                                local visual_report
-                                visual_report=$(verify_ui_visual "$url")
-                                if [[ -n "$visual_report" ]]; then
-                                    errors+=$'\n'"$visual_report"
-                                fi
-                            fi
-                            break
-                        fi
-                    done
+    # 5. Run declared project verification commands when present.
+    if [[ "${RALPH_VERIFY_DECLARED_COMMANDS:-1}" == "1" ]]; then
+        local cmd
+        while IFS= read -r cmd; do
+            [[ -n "$cmd" ]] || continue
+            if ! runtime_command_allowed "$cmd"; then
+                errors+=$'\n'"- Declared verification command rejected as unsafe: $cmd"
+                continue
+            fi
+            log_info "Running declared verification command: $cmd"
+            if ! run_runtime_command "$project_dir" "$cmd"; then
+                local detail="${_RALPH_RUNTIME_LAST_DIAGNOSTIC:-}"
+                if [[ -n "$detail" ]]; then
+                    errors+=$'\n'"- Declared verification command failed: $cmd ($detail)."
+                else
+                    errors+=$'\n'"- Declared verification command failed: $cmd"
                 fi
             fi
-        fi
-    done
+        done < <(collect_runtime_commands "$project_dir")
+    fi
+
+    # 6. Optional first-class live smoke: start the declared app, probe localhost,
+    # persist evidence, and tear the server down before normal health-port checks.
+    local live_smoke_errors
+    live_smoke_errors=$(run_live_smoke "$project_dir")
+    [[ -n "$live_smoke_errors" ]] && errors+="$live_smoke_errors"
+
+    # 7. Explicit liveness probes. Ports are opt-in to avoid matching unrelated local services.
+    local health_errors
+    health_errors=$(verify_health_ports "$project_dir")
+    [[ -n "$health_errors" ]] && errors+="$health_errors"
 
     if [[ -n "$errors" ]]; then
         echo "<runtime_error>$errors</runtime_error>"
