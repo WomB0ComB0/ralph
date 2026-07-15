@@ -1076,15 +1076,19 @@ run_in_sandbox() {
         "--interactive"
         "--tty"
         "--read-only"                   # Read-only root FS; the /app volume below stays writable
-        "--tmpfs" "/tmp:rw,noexec,nosuid,size=1g"  # Writable tmp with restrictions
-        "--tmpfs" "/home/ralph/.config:rw,noexec,nosuid,size=256m"  # XDG config for AI CLIs
-        "--tmpfs" "/home/ralph/.cache:rw,noexec,nosuid,size=1g"     # Tool caches
-        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,size=500m"     # npm cache
+        # mode=1777 (sticky, world-writable, same as /tmp) is required: Docker mounts
+        # every --tmpfs as root:root 0755, so the non-root `ralph` user below cannot
+        # write to its own XDG dirs otherwise. The container is single-user and each
+        # tmpfs is ephemeral, so this does not weaken the sandbox boundary.
+        "--tmpfs" "/tmp:rw,noexec,nosuid,mode=1777,size=1g"  # Writable tmp with restrictions
+        "--tmpfs" "/home/ralph/.config:rw,noexec,nosuid,mode=1777,size=256m"  # XDG config for AI CLIs
+        "--tmpfs" "/home/ralph/.cache:rw,noexec,nosuid,mode=1777,size=1g"     # Tool caches
+        "--tmpfs" "/home/ralph/.npm:rw,noexec,nosuid,mode=1777,size=500m"     # npm cache
         # User-level tool installs must be executable: bun, npm globals, bd/go, etc.
-        "--tmpfs" "/home/ralph/.bun:rw,nosuid,size=1g"
-        "--tmpfs" "/home/ralph/.local:rw,nosuid,size=1g"
-        "--tmpfs" "/home/ralph/.npm-global:rw,nosuid,size=1g"
-        "--tmpfs" "/home/ralph/go:rw,nosuid,size=1g"
+        "--tmpfs" "/home/ralph/.bun:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/.local:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/.npm-global:rw,nosuid,mode=1777,size=1g"
+        "--tmpfs" "/home/ralph/go:rw,nosuid,mode=1777,size=1g"
         # Mount the project READ-WRITE so the agent can actually edit code. The
         # remaining hardening (read-only rootfs, cap-drop, non-root, resource caps)
         # still contains it. This is the whole point of the sandbox.
@@ -1143,25 +1147,43 @@ run_in_sandbox() {
             fi
         done
     fi
+    # Forward allowlisted variables by NAME ONLY (`docker -e NAME`). Docker reads the
+    # value from this process's environment, so a forwarded credential is never
+    # embedded in the constructed argv and therefore cannot reach the debug log, the
+    # process table, or any persisted command rendering. Using `-e NAME=value` here
+    # (the previous behavior) leaked the value into both argv and the debug line.
+    # No value regex is needed: because the value never touches the shell command
+    # line, arbitrary secret characters are safe, and the old regex silently dropped
+    # legitimate credentials that contained `/`, `+`, or `=`.
+    local forward_env_names=() var
     for var in "${safe_env_vars[@]}"; do
         if [[ -n "${!var:-}" ]]; then
-            # Validate value to prevent command injection
-            local value="${!var}"
-            if [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-                docker_args+=("-e" "$var=$value")
-            else
-                log_warning "Skipping unsafe env var: $var"
-            fi
+            docker_args+=("-e" "$var")
+            forward_env_names+=("$var")
         fi
     done
-    
+    if [[ ${#forward_env_names[@]} -gt 0 ]]; then
+        # Names only, never values.
+        log_info "Forwarding env vars into sandbox by name: ${forward_env_names[*]}"
+    fi
+
     docker_args+=("$image_name" "./ralph.sh" "${args[@]}")
-    
-    # Run the container
+
+    # Safe to render: docker_args now carries only variable NAMES for the allowlist,
+    # plus non-secret fixed config (paths, HOME, resource caps).
     log_debug "Running: docker ${docker_args[*]}"
-    
-    docker "${docker_args[@]}"
-    local exit_code=$?
+
+    # Export the forwarded names only for the docker child, inside a subshell, so the
+    # caller's environment (and anything it later persists) is left unchanged. Docker
+    # inherits each `-e NAME` value from this exported environment.
+    local exit_code
+    (
+        for var in "${forward_env_names[@]+"${forward_env_names[@]}"}"; do
+            export "${var?}"
+        done
+        docker "${docker_args[@]}"
+    )
+    exit_code=$?
     
     if [[ $exit_code -eq 0 ]]; then
         log_success "Sandbox execution completed successfully"

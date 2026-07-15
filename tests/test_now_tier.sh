@@ -113,7 +113,15 @@ assert_rc "benign config -> rc 1 (clean)" 1 "$rc"
 # ---------------------------------------------------------------------------
 note "== run_in_sandbox docker arguments =="
 
-grep -q 'util-linux' "$RALPH_ROOT/Dockerfile.ralph" && ok "committed sandbox image provisions flock" || bad "committed sandbox image omits util-linux"
+# The sandbox image must provision util-linux (for flock). Dockerfile.ralph is a
+# generated, git-ignored artifact, so a fresh checkout / CI won't have it; fall back
+# to the tracked generator so the invariant is still verified hermetically.
+_sandbox_dockerfile="$RALPH_ROOT/Dockerfile.ralph"
+if [[ ! -f "$_sandbox_dockerfile" ]]; then
+    _sandbox_dockerfile="$TMP/committed.Dockerfile"
+    create_default_dockerfile "$_sandbox_dockerfile" >/dev/null 2>&1
+fi
+grep -q 'util-linux' "$_sandbox_dockerfile" && ok "committed sandbox image provisions flock" || bad "committed sandbox image omits util-linux"
 create_default_dockerfile "$TMP/generated.Dockerfile"
 grep -q 'util-linux' "$TMP/generated.Dockerfile" && ok "generated sandbox image provisions flock" || bad "generated sandbox image omits util-linux"
 
@@ -133,12 +141,12 @@ export PROJECT_DIR="$SANDBOX_PROJECT"
 unset RALPH_SANDBOX_NETWORK RALPH_SANDBOX_ALLOW_ENV
 run_in_sandbox --sandbox --version >/dev/null 2>&1; rc=$?
 assert_rc "sandbox wrapper returns docker rc" 0 "$rc"
-grep -qxF '/home/ralph/.config:rw,noexec,nosuid,size=256m' "$DOCKER_CAPTURE" && ok "config tmpfs is writable" || bad "config tmpfs missing"
-grep -qxF '/home/ralph/.cache:rw,noexec,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "cache tmpfs is writable" || bad "cache tmpfs missing"
-grep -qxF '/home/ralph/.bun:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "bun install dir is executable tmpfs" || bad "bun tmpfs missing"
-grep -qxF '/home/ralph/.local:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "local install dir is executable tmpfs" || bad "local tmpfs missing"
-grep -qxF '/home/ralph/.npm-global:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "npm globals dir is executable tmpfs" || bad "npm-global tmpfs missing"
-grep -qxF '/home/ralph/go:rw,nosuid,size=1g' "$DOCKER_CAPTURE" && ok "go bin dir is executable tmpfs" || bad "go tmpfs missing"
+grep -qxF '/home/ralph/.config:rw,noexec,nosuid,mode=1777,size=256m' "$DOCKER_CAPTURE" && ok "config tmpfs is writable" || bad "config tmpfs missing"
+grep -qxF '/home/ralph/.cache:rw,noexec,nosuid,mode=1777,size=1g' "$DOCKER_CAPTURE" && ok "cache tmpfs is writable" || bad "cache tmpfs missing"
+grep -qxF '/home/ralph/.bun:rw,nosuid,mode=1777,size=1g' "$DOCKER_CAPTURE" && ok "bun install dir is executable tmpfs" || bad "bun tmpfs missing"
+grep -qxF '/home/ralph/.local:rw,nosuid,mode=1777,size=1g' "$DOCKER_CAPTURE" && ok "local install dir is executable tmpfs" || bad "local tmpfs missing"
+grep -qxF '/home/ralph/.npm-global:rw,nosuid,mode=1777,size=1g' "$DOCKER_CAPTURE" && ok "npm globals dir is executable tmpfs" || bad "npm-global tmpfs missing"
+grep -qxF '/home/ralph/go:rw,nosuid,mode=1777,size=1g' "$DOCKER_CAPTURE" && ok "go bin dir is executable tmpfs" || bad "go tmpfs missing"
 grep -qxF 'HOME=/home/ralph' "$DOCKER_CAPTURE" && ok "HOME passed into sandbox" || bad "HOME env missing"
 grep -qxF 'XDG_CONFIG_HOME=/home/ralph/.config' "$DOCKER_CAPTURE" && ok "XDG config env passed" || bad "XDG config env missing"
 grep -qxF 'BUN_INSTALL=/home/ralph/.bun' "$DOCKER_CAPTURE" && ok "BUN_INSTALL passed" || bad "BUN_INSTALL env missing"
@@ -146,6 +154,51 @@ grep -q '^PATH=/home/ralph/.bun/bin:/home/ralph/.local/bin:/home/ralph/.npm-glob
 grep -qxF -- '--no-sandbox' "$DOCKER_CAPTURE" && ok "inner run disables recursive sandbox" || bad "inner --no-sandbox missing"
 if grep -qxF -- '--sandbox' "$DOCKER_CAPTURE"; then bad "inner command kept --sandbox"; else ok "inner command strips --sandbox"; fi
 unset -f docker
+
+# ---------------------------------------------------------------------------
+note "== run_in_sandbox forwards secrets by name only (ralph-0gv) =="
+
+# Distinctive sentinel containing '/', '+', '=' and '.': the OLD value regex would
+# have refused to forward this at all; the fix forwards it safely, by name.
+SENTINEL_SECRET='RALPH-SENTINEL-a1b2c3/deadbeef+cafe=x.y'
+# Set as a NON-exported shell var so the ONLY way it can reach the docker child is
+# the fix's own subshell export. A regression that embeds values in argv trips
+# assertion (3); a regression that forgets to export trips assertion (1).
+RALPH_SANDBOX_SECRET_FIXTURE="$SENTINEL_SECRET"
+RALPH_SANDBOX_ALLOW_ENV="RALPH_SANDBOX_SECRET_FIXTURE"
+
+SENTINEL_ARGV="$TMP/sentinel-argv.txt"
+SENTINEL_ENV="$TMP/sentinel-env.txt"
+SENTINEL_LOG="$TMP/sentinel-log.txt"
+
+docker() {
+    if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
+        return 0
+    fi
+    printf '%s\n' "$@" > "$SENTINEL_ARGV"
+    # The environment docker would inherit == how the real container receives -e NAME.
+    printenv > "$SENTINEL_ENV"
+    return 0
+}
+
+# VERBOSE=true forces the debug command render; capture stdout+stderr so we can prove
+# the value never leaks even with debug logging on.
+VERBOSE=true run_in_sandbox --sandbox --version > "$SENTINEL_LOG" 2>&1; rc=$?
+assert_rc "sentinel sandbox run returns docker rc" 0 "$rc"
+
+# (1) Value reaches the container via inherited environment.
+if grep -qF "$SENTINEL_SECRET" "$SENTINEL_ENV"; then ok "secret value reaches sandbox via env inheritance"; else bad "secret value did not reach sandbox env"; fi
+# (2) Forwarded by NAME: a bare name line, never NAME=value.
+if grep -qxF 'RALPH_SANDBOX_SECRET_FIXTURE' "$SENTINEL_ARGV"; then ok "secret forwarded by name (-e NAME)"; else bad "secret name not forwarded to docker"; fi
+# (3) Value NEVER in the rendered docker argv.
+if grep -qF "$SENTINEL_SECRET" "$SENTINEL_ARGV"; then bad "secret VALUE leaked into docker argv"; else ok "secret value absent from docker argv"; fi
+# (4) Value NEVER in logs, even with VERBOSE debug on.
+if grep -qF "$SENTINEL_SECRET" "$SENTINEL_LOG"; then bad "secret VALUE leaked into logs"; else ok "secret value absent from logs"; fi
+# (5) Only the NAME is logged (the forwarding notice).
+if grep -qF 'RALPH_SANDBOX_SECRET_FIXTURE' "$SENTINEL_LOG"; then ok "forwarding notice logs the name only"; else bad "forwarding notice missing from logs"; fi
+
+unset -f docker
+unset RALPH_SANDBOX_ALLOW_ENV RALPH_SANDBOX_SECRET_FIXTURE
 
 # ---------------------------------------------------------------------------
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"

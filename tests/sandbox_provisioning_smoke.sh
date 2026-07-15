@@ -44,14 +44,14 @@ chmod +x "$tmp/bin"/*
 
 docker run --rm \
   --read-only \
-  --tmpfs /tmp:rw,noexec,nosuid,size=1g \
-  --tmpfs /home/ralph/.config:rw,noexec,nosuid,size=256m \
-  --tmpfs /home/ralph/.cache:rw,noexec,nosuid,size=1g \
-  --tmpfs /home/ralph/.npm:rw,noexec,nosuid,size=500m \
-  --tmpfs /home/ralph/.bun:rw,nosuid,size=1g \
-  --tmpfs /home/ralph/.local:rw,nosuid,size=1g \
-  --tmpfs /home/ralph/.npm-global:rw,nosuid,size=1g \
-  --tmpfs /home/ralph/go:rw,nosuid,size=1g \
+  --tmpfs /tmp:rw,noexec,nosuid,mode=1777,size=1g \
+  --tmpfs /home/ralph/.config:rw,noexec,nosuid,mode=1777,size=256m \
+  --tmpfs /home/ralph/.cache:rw,noexec,nosuid,mode=1777,size=1g \
+  --tmpfs /home/ralph/.npm:rw,noexec,nosuid,mode=1777,size=500m \
+  --tmpfs /home/ralph/.bun:rw,nosuid,mode=1777,size=1g \
+  --tmpfs /home/ralph/.local:rw,nosuid,mode=1777,size=1g \
+  --tmpfs /home/ralph/.npm-global:rw,nosuid,mode=1777,size=1g \
+  --tmpfs /home/ralph/go:rw,nosuid,mode=1777,size=1g \
   -v "$R:/app:ro" \
   -v "$tmp/bin:/sandbox-bin:ro" \
   -w /app \
