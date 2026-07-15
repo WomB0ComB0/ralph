@@ -288,8 +288,9 @@ _ralph_process_cleanup_file() {
     fi
 }
 
-# Self-benchmarking: next, aggregate cleanup latency percentiles across retained
-# runs without expanding the per-run event detail.
+# Self-benchmarking: cleanup latency percentiles across retained runs are aggregated
+# read-only by handle_cleanup_stats_command (below), without expanding the per-run
+# event detail.
 _ralph_record_process_cleanup_event() {
     local kind="${1:-}" trigger="${2:-}" outcome="${3:-}" duration_ms="${4:-0}"
     local file now tmp lock_file lock_fd lock_wait=3
@@ -403,6 +404,130 @@ _ralph_record_process_cleanup_event() {
     rm -f "$tmp"
     [[ -n "${lock_fd:-}" ]] && exec {lock_fd}>&-
     return 1
+}
+
+#######################################
+# Read-only aggregation of process-cleanup latency across retained runs.
+#
+# Operator command: `ralph cleanup-stats [run-root]`. Scans
+# <run-root>/*/process-cleanup.json (default ${RALPH_RUN_ROOT:-${_RALPH_DIR}/runs}),
+# validates each artifact against the v1 allowlist, and prints an allowlisted JSON
+# summary to stdout: per-kind (provider, live_smoke) sample count, p50/p95 and
+# maximum duration, plus TERM/KILL counts and rates.
+#
+# Deterministic percentile convention: NEAREST-RANK. For N ascending samples the
+# p-th percentile is the value at 1-based rank ceil(p/100 * N), computed with
+# integer arithmetic as floor((p*N + 99) / 100).
+#
+# Redaction: emits only aggregate numbers, kind names, counts, and the scanned
+# run-root path. It never emits commands, PIDs, prompts, logs, environment values,
+# event timestamps, run ids, or any path outside the run root, and it never follows
+# a symlinked run directory or artifact.
+#
+# Arguments: $1 run root (required). Returns 0 on success (prints JSON), 1 on error.
+#######################################
+_ralph_aggregate_cleanup_stats() {
+    local run_root="${1:-}"
+    [[ -n "$run_root" ]] || { log_error "cleanup-stats: no run root"; return 1; }
+    command -v jq >/dev/null 2>&1 || { log_error "cleanup-stats requires jq"; return 1; }
+
+    # Bound total work so a pathological run root cannot loop unbounded; retention
+    # keeps this far below the cap in practice.
+    local scanned=0 skipped=0 max_artifacts=100000
+    local entry file events_file rc
+
+    # Per-event allowlist, identical to the recorder's own validation.
+    local event_filter='
+        (.events // [])[]?
+        | select(type == "object")
+        | select(.kind == "provider" or .kind == "live_smoke")
+        | select(.trigger == "normal" or .trigger == "timeout"
+                 or .trigger == "quiescence" or .trigger == "verification"
+                 or .trigger == "signal" or .trigger == "exit"
+                 or .trigger == "parent_death")
+        | select(.outcome == "already_exited" or .outcome == "term" or .outcome == "kill")
+        | select((.duration_ms | type) == "number"
+                 and .duration_ms >= 0 and .duration_ms <= 86400000
+                 and (.duration_ms | floor) == .duration_ms)
+        | select((.finished_at | type) == "string"
+                 and (.finished_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")))
+        | {kind, outcome, duration_ms}
+    '
+
+    events_file=$(mktemp) || return 1
+    chmod 600 "$events_file" 2>/dev/null || true
+
+    # Only traverse a real directory; never follow a symlinked run root.
+    if [[ -d "$run_root" && ! -L "$run_root" ]]; then
+        for entry in "$run_root"/*; do
+            [[ $((scanned + skipped)) -lt "$max_artifacts" ]] || break
+            # Run dir must be a real directory (no symlink following).
+            [[ -d "$entry" && ! -L "$entry" ]] || continue
+            file="$entry/process-cleanup.json"
+            # A run without a cleanup artifact is simply not counted.
+            [[ -e "$file" ]] || continue
+            # A present artifact that is not a regular file, or is a symlink, is skipped.
+            if [[ ! -f "$file" || -L "$file" ]]; then
+                skipped=$((skipped + 1)); continue
+            fi
+            # Whole-artifact schema gate; malformed artifacts are skipped, not fatal.
+            if ! jq -e '(.schema_version == 1) and (.artifact == "ralph_process_cleanup") and ((.events | type) == "array")' \
+                    "$file" >/dev/null 2>&1; then
+                skipped=$((skipped + 1)); continue
+            fi
+            scanned=$((scanned + 1))
+            jq -c "$event_filter" "$file" >>"$events_file" 2>/dev/null || true
+        done
+    fi
+
+    jq -s \
+        --arg run_root "$run_root" \
+        --argjson scanned "$scanned" \
+        --argjson skipped "$skipped" '
+        def nearest_rank($sorted; $p):
+            ($sorted | length) as $n
+            | if $n == 0 then null
+              else $sorted[ ((($p * $n) + 99) / 100 | floor) - 1 ] end;
+        def kind_stats($ev):
+            ($ev | map(.duration_ms) | sort) as $d
+            | ($ev | length) as $n
+            | ([$ev[] | select(.outcome == "term")] | length) as $term
+            | ([$ev[] | select(.outcome == "kill")] | length) as $kill
+            | ([$ev[] | select(.outcome == "already_exited")] | length) as $exited
+            | {
+                sample_count: $n,
+                p50_duration_ms: nearest_rank($d; 50),
+                p95_duration_ms: nearest_rank($d; 95),
+                max_duration_ms: (if $n == 0 then null else ($d | last) end),
+                term_count: $term,
+                kill_count: $kill,
+                already_exited_count: $exited,
+                term_rate: (if $n == 0 then null else (($term * 10000 / $n) | round) / 10000 end),
+                kill_rate: (if $n == 0 then null else (($kill * 10000 / $n) | round) / 10000 end)
+              };
+        {
+            schema_version: 1,
+            artifact: "ralph_cleanup_stats",
+            run_root: $run_root,
+            runs_scanned: $scanned,
+            artifacts_skipped: $skipped,
+            percentile_method: "nearest-rank",
+            kinds: {
+                provider:   kind_stats([ .[] | select(.kind == "provider") ]),
+                live_smoke: kind_stats([ .[] | select(.kind == "live_smoke") ])
+            }
+        }' "$events_file"
+    rc=$?
+
+    rm -f "$events_file"
+    return $rc
+}
+
+# Operator entry point: `ralph cleanup-stats [run-root]`. Read-only; dispatched from
+# main() before the model dependency check.
+handle_cleanup_stats_command() {
+    local run_root="${1:-${RALPH_RUN_ROOT:-${_RALPH_DIR:-.ralph}/runs}}"
+    _ralph_aggregate_cleanup_stats "$run_root"
 }
 
 _ralph_process_tree_snapshot() {

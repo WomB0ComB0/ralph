@@ -182,6 +182,15 @@ Supported AI tools:
 
 Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that can be recalled when matching signals reappear. `lint` is a read-only curator pass over that knowledge store.
 
+### Cleanup latency stats
+
+```bash
+./ralph.sh cleanup-stats                 # aggregate across .ralph/runs
+./ralph.sh cleanup-stats /path/to/runs   # or an explicit run root
+```
+
+`cleanup-stats` is a read-only pass over retained `process-cleanup.json` artifacts. It prints an allowlisted JSON summary — per-kind (`provider`, `live_smoke`) sample count, nearest-rank p50/p95 and maximum duration, and TERM/KILL counts and rates — plus the number of runs scanned and malformed artifacts skipped. It never emits commands, PIDs, prompts, logs, environment values, event timestamps, run ids, or paths outside the run root, and never follows a symlinked run directory or artifact. Override the scanned root with `RALPH_RUN_ROOT`.
+
 ### Swarm
 
 ```bash

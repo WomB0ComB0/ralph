@@ -1903,6 +1903,14 @@ main() {
         handle_synapse_command "$@"
         exit $?
     fi
+    # Read-only cleanup-latency aggregation across retained runs. Dispatched here (after
+    # load_config so _RALPH_DIR/run root exist, before check_dependencies) so it works on
+    # hosts without the AI toolchain. Aggregation logic lives in lib/processes.sh.
+    if [[ "${1:-}" == "cleanup-stats" ]]; then
+        shift
+        handle_cleanup_stats_command "$@"
+        exit $?
+    fi
 
     parse_arguments "$@"
 
