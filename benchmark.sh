@@ -35,7 +35,7 @@ echo "Analyzing results..."
 if [[ -f "$METRICS_FILE" ]]; then
     # Fold in process-cleanup latency from the runs this benchmark just produced.
     CLEANUP_STATS="$SCRIPT_DIR/.ralph/state/cleanup-stats.json"
-    if ./ralph.sh cleanup-stats > "$CLEANUP_STATS" 2>/dev/null; then
+    if "$SCRIPT_DIR/ralph.sh" cleanup-stats > "$CLEANUP_STATS" 2>/dev/null; then
         python3 "$SCRIPT_DIR/benchmark_analyzer.py" --input "$METRICS_FILE" \
             --cleanup-stats "$CLEANUP_STATS" --output "$REPORT_FILE"
     else
