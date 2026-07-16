@@ -423,13 +423,13 @@ _triage_suggest_body() {
 triage_suggest() {
     local repo="$1" apply="${2:-0}"
     local all=""
-    trap '[[ -n "$all" ]] && rm -f "$all"' RETURN
     all=$(mktemp) || { log_error "[$repo] mktemp failed."; return 1; }
     triage_scan_repo "$repo" > "$all" 2>/dev/null || true
     local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
-    if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; return 0; fi
+    if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; rm -f "$all"; return 0; fi
     local title body; title="Ralph triage: $count item(s) needing attention"
     body=$(_triage_suggest_body < "$all")
+    rm -f "$all"
     if [[ "$apply" != "1" ]]; then
         log_info "[$repo] DRY-RUN — would open/update an issue:"
         printf '    title: %s\n' "$title"
