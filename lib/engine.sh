@@ -309,7 +309,7 @@ resolve_model_for_tool() {
         claude)
             case "$role" in planner|thinker) echo "opus" ;; *) echo "sonnet" ;; esac
             ;;
-        amp|codex|jules)
+        amp|codex|jules|jules-cli)
             echo ""   # no usable --model in our invocation -> they self-select (don't fabricate one)
             ;;
         ollama|ollama-agent)
@@ -1047,18 +1047,23 @@ run_ai_tool() {
     local pid i exit_code guardian_pid="" cleanup_recorded=0 cleanup_trigger=normal
     local supervisor_path state_file ack_file
 
-    if [[ "$tool" == "jules" ]]; then
-        if ! declare -F run_jules_remote >/dev/null 2>&1; then
-            log_error "tool=jules requested, but lib/jules.sh is not loaded"
+    if [[ "$tool" == "jules" || "$tool" == "jules-cli" ]]; then
+        local jules_provider_fn="run_jules_remote" jules_provider_label="Jules Remote"
+        if [[ "$tool" == "jules-cli" ]]; then
+            jules_provider_fn="run_jules_cli_remote"
+            jules_provider_label="Jules CLI Remote"
+        fi
+        if ! declare -F "$jules_provider_fn" >/dev/null 2>&1; then
+            log_error "tool=$tool requested, but lib/jules.sh is not loaded"
             return 1
         fi
         exit_code=0
-        run_jules_remote "$tool" "$model" "$prompt" "$log_file" "$output_file" || exit_code=$?
+        "$jules_provider_fn" "$tool" "$model" "$prompt" "$log_file" "$output_file" || exit_code=$?
         if [[ $exit_code -eq 0 ]]; then
-            log_success "Iteration $iteration: Jules Remote Response Received"
+            log_success "Iteration $iteration: ${jules_provider_label} Response Received"
             return 0
         fi
-        log_error "Iteration $iteration: Jules Remote Failed (Exit $exit_code)"
+        log_error "Iteration $iteration: ${jules_provider_label} Failed (Exit $exit_code)"
         return "$exit_code"
     fi
 

@@ -147,7 +147,7 @@ _build_ai_cmd codex "gpt-5-codex"; [[ "${_AI_CMD[*]}" == *"--model gpt-5-codex"*
 eq "resolve_model_for_tool codex -> empty (self-select)" "" "$(resolve_model_for_tool codex engineer)"
 
 echo "== _ralph_is_valid_tool accepts all wired tools, rejects bogus =="
-for t in opencode claude amp agy codex ollama ollama-agent jules; do _ralph_is_valid_tool "$t" && ok "valid: $t" || bad "rejected valid tool: $t"; done
+for t in opencode claude amp agy codex ollama ollama-agent jules jules-cli; do _ralph_is_valid_tool "$t" && ok "valid: $t" || bad "rejected valid tool: $t"; done
 _ralph_is_valid_tool gemini && bad "gemini (deprecated CLI) accepted" || ok "gemini rejected (deprecated)"
 _ralph_is_valid_tool bogus && bad "bogus accepted" || ok "bogus rejected"
 

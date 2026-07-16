@@ -6,7 +6,7 @@ Use Ralph when you want an agent to keep working from a persistent plan instead 
 
 ## What Ralph Does
 
-- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, and GitHub Copilot.
+- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, `jules-cli`, and GitHub Copilot.
 - Grounds each iteration in project instructions, Beads task state, run artifacts, git context, and optional extra context files.
 - Detects lazy/no-op iterations and repeated loop signatures, then injects corrective prompts.
 - Stores recurring problems as signals and promotes proven fixes into guarded skills.
@@ -129,7 +129,8 @@ Each cycle injects both signals in seeded random order, resumes from the prior c
 ./ralph.sh                         # default tool
 ./ralph.sh --tool opencode         # choose a tool
 ./ralph.sh --tool codex            # OpenAI Codex via `codex exec`
-./ralph.sh --tool jules            # Jules remote executor; requires JULES_API_KEY and a connected source
+./ralph.sh --tool jules            # Jules REST remote executor; requires JULES_API_KEY and a connected source
+./ralph.sh --tool jules-cli        # Jules CLI remote executor; uses existing `jules login` OAuth state
 ./ralph.sh --model "provider/id"   # pin a model
 ./ralph.sh --max-iterations 20     # change loop limit
 ./ralph.sh --resume                # resume from checkpoint
@@ -153,6 +154,7 @@ Supported AI tools:
 | `agy` | Google Antigravity CLI. |
 | `codex` | OpenAI Codex CLI, executed in sandboxed mode. |
 | `jules` | Asynchronous Jules REST executor. PR mode creates/records a remote PR; patch mode applies returned diffs locally. |
+| `jules-cli` | Asynchronous Jules CLI executor. Uses the authenticated local `jules` CLI, persists the remote session ID, and pulls/applies completed results. |
 | `copilot` | Available through the Copilot subcommands below. |
 
 ### Copilot
@@ -262,7 +264,7 @@ Common environment variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, or `jules`. |
+| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, `jules`, or `jules-cli`. |
 | `RALPH_ROLE` | Routing role: `planner`, `engineer`, `tester`, or `thinker`. |
 | `AGENTS_FILE` | Explicit instruction file override. |
 | `SELECTED_MODEL` | Specific model to pin. |
@@ -307,6 +309,8 @@ Common environment variables:
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
 | `JULES_API_KEY` | Jules REST API key, required for `TOOL=jules`; keep it in the environment or a secret store. |
+| `RALPH_JULES_CLI_REPO` | Optional `owner/repo` override for `TOOL=jules-cli`; otherwise Ralph derives the GitHub repo from `origin`. |
+| `RALPH_JULES_CLI_MODE` | `apply` (default) runs `jules remote pull --apply`; `pull` records completed output without applying it. |
 | `RALPH_JULES_SOURCE` | Jules source resource such as `sources/github-owner-repo`; if unset, Ralph tries to match the GitHub `origin` against connected Jules sources. |
 | `RALPH_JULES_MODE` | Jules completion mode: `pr` (default, records remote PR output) or `patch` (applies returned `changeSet.gitPatch` locally). |
 | `RALPH_JULES_STARTING_BRANCH` | Branch Jules should start from; defaults to the current Git branch, then `main`. |

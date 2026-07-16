@@ -421,6 +421,7 @@ check_dependencies() {
         amp)      required_tools+=("amp") ;;
         agy)      required_tools+=("agy") ;;
         codex)    required_tools+=("codex") ;;
+        jules-cli) required_tools+=("jules") ;;
         ollama|ollama-agent) : ;;  # Uses Ollama's local HTTP API through core curl/jq/python deps.
     esac
 
@@ -1135,7 +1136,7 @@ ${_RALPH_COLOR_YELLOW}Options:${_RALPH_COLOR_NC}
     ${_RALPH_COLOR_GREEN}--init${_RALPH_COLOR_NC}                  Smart project initialization
     ${_RALPH_COLOR_GREEN}--setup${_RALPH_COLOR_NC}                 Install all required dependencies
     ${_RALPH_COLOR_GREEN}--test${_RALPH_COLOR_NC}                  Run internal test suite
-    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), codex, ollama, ollama-agent, or jules (default: opencode)
+    ${_RALPH_COLOR_GREEN}--tool${_RALPH_COLOR_NC} TOOL             AI tool: opencode, claude, amp, agy (Antigravity), codex, ollama, ollama-agent, jules, or jules-cli (default: opencode)
     ${_RALPH_COLOR_GREEN}--max-iterations${_RALPH_COLOR_NC} N      Maximum iterations (default: 10)
     ${_RALPH_COLOR_GREEN}--model${_RALPH_COLOR_NC} MODEL           Specific model to use (overrides auto-detection)
     ${_RALPH_COLOR_GREEN}--gitdiff-exclude${_RALPH_COLOR_NC} FILE  Path to gitdiff exclude file
@@ -1404,7 +1405,7 @@ parse_arguments() {
 # Returns: 0 if valid, exits on invalid config
 #######################################
 _ralph_is_valid_tool() {
-    case "$1" in opencode|claude|amp|agy|codex|ollama|ollama-agent|jules) return 0 ;; *) return 1 ;; esac
+    case "$1" in opencode|claude|amp|agy|codex|ollama|ollama-agent|jules|jules-cli) return 0 ;; *) return 1 ;; esac
 }
 
 validate_config() {
@@ -1412,7 +1413,7 @@ validate_config() {
 
     # Validate tool selection (single source of truth: _ralph_is_valid_tool)
     if ! _ralph_is_valid_tool "$TOOL"; then
-        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex, ollama, ollama-agent, jules"
+        log_error "Invalid tool '$TOOL'. Must be one of: opencode, claude, amp, agy, codex, ollama, ollama-agent, jules, jules-cli"
         errors=$((errors + 1))
     fi
     

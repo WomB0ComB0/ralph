@@ -24,14 +24,30 @@ mkdir -p "$PROJECT_DIR" "$RUN_DIR"
 
 echo "== tool wiring =="
 _ralph_is_valid_tool jules && ok "jules is a valid tool" || bad "jules rejected as tool"
+_ralph_is_valid_tool jules-cli && ok "jules-cli is a valid tool" || bad "jules-cli rejected as tool"
 eq "jules resolves empty model" "" "$(resolve_model_for_tool jules engineer)"
+eq "jules-cli resolves empty model" "" "$(resolve_model_for_tool jules-cli engineer)"
 _build_ai_cmd jules "" >/dev/null 2>&1; eq "jules stays out of local command builder" 1 "$?"
+_build_ai_cmd jules-cli "" >/dev/null 2>&1; eq "jules-cli stays out of local command builder" 1 "$?"
+
+CHECK_LOG="$TMP/dependency-checks.log"; : > "$CHECK_LOG"
+(
+    command_exists() { printf '%s\n' "$1" >> "$CHECK_LOG"; return 0; }
+    TOOL=jules-cli check_dependencies >/dev/null 2>&1
+); rc=$?
+eq "jules-cli dependency check succeeds with stubbed deps" 0 "$rc"
+grep -qx 'jules' "$CHECK_LOG" && ok "jules-cli requires jules binary" || bad "jules-cli did not require jules binary"
+! grep -qx 'jules-cli' "$CHECK_LOG" && ok "jules-cli does not require same-named binary" || bad "jules-cli incorrectly required jules-cli binary"
 
 echo "== run_ai_tool dispatch =="
 run_jules_remote() { printf 'stub remote\n' > "$5"; return 0; }
+run_jules_cli_remote() { printf 'stub cli remote\n' > "$5"; return 0; }
 iteration=1 MAX_ITERATIONS=1 run_ai_tool jules "" "prompt" "$TMP/dispatch.log" "$TMP/dispatch.out"; rc=$?
 eq "run_ai_tool dispatches jules provider" 0 "$rc"
 eq "dispatch writes provider output" "stub remote" "$(tr -d '\n' < "$TMP/dispatch.out")"
+iteration=1 MAX_ITERATIONS=1 run_ai_tool jules-cli "" "prompt" "$TMP/dispatch-cli.log" "$TMP/dispatch-cli.out"; rc=$?
+eq "run_ai_tool dispatches jules-cli provider" 0 "$rc"
+eq "dispatch writes cli provider output" "stub cli remote" "$(tr -d '\n' < "$TMP/dispatch-cli.out")"
 # Restore the real provider functions after the dispatch probe.
 # shellcheck disable=SC1090
 source "$R/lib/jules.sh"
@@ -127,6 +143,68 @@ eq "patch mode run succeeds" 0 "$rc"
 eq "patch changed file locally" "new" "$(tr -d '\n' < "$PROJECT_DIR/app.txt")"
 eq "state marks patch applied" true "$(jq -r '.patchApplied' "$(jules_state_file)")"
 grep -q "Suggested commit: Update app text" "$out" && ok "suggested commit surfaced" || bad "suggested commit missing"
+
+
+echo "== Jules CLI mode creates once, waits, then pulls/apply =="
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR" "$TMP/bin"
+cat > "$TMP/bin/jules" <<'SH'
+#!/bin/sh
+set -eu
+case "$1 $2" in
+  "new --repo")
+    repo="$3"
+    prompt=$(cat)
+    printf 'new repo=%s prompt=%s\n' "$repo" "$prompt" >> "$JULES_STUB_LOG"
+    printf 'Created Jules session 424242 for %s\n' "$repo"
+    ;;
+  "remote pull")
+    shift 2
+    session=""; apply=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --session) session="$2"; shift 2 ;;
+        --apply) apply=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    printf 'pull session=%s apply=%s\n' "$session" "$apply" >> "$JULES_STUB_LOG"
+    case "${JULES_STUB_PULL:-success}" in
+      waiting) printf 'Session %s is still running\n' "$session"; exit 1 ;;
+      success) printf 'Applied result for session %s\n' "$session" ;;
+      fail) printf 'authentication failed\n'; exit 2 ;;
+    esac
+    ;;
+  *)
+    printf 'unexpected jules args: %s\n' "$*" >&2
+    exit 9
+    ;;
+esac
+SH
+chmod +x "$TMP/bin/jules"
+export PATH="$TMP/bin:$PATH" JULES_STUB_LOG="$TMP/jules-cli.log" RALPH_JULES_CLI_REPO="owner/repo" RALPH_JULES_CLI_MODE=apply
+: > "$JULES_STUB_LOG"
+log="$TMP/cli.log"; out="$TMP/cli.out"; : > "$log"; : > "$out"
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli create succeeds" 0 "$rc"
+eq "jules-cli state stores session" "424242" "$(jq -r '.sessionId' "$(jules_cli_state_file)")"
+eq "jules-cli state provider" "jules-cli" "$(jq -r '.provider' "$(jules_cli_state_file)")"
+grep -q 'new repo=owner/repo prompt=build via cli' "$JULES_STUB_LOG" && ok "jules-cli pipes prompt to new" || bad "jules-cli new did not receive prompt"
+grep -q 'State: CREATED' "$out" && ok "jules-cli create output marks created" || bad "jules-cli create output missing state"
+eq "jules-cli create remote progress" 1 "${_RALPH_REMOTE_PROGRESS:-0}"
+
+export JULES_STUB_PULL=waiting
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli waiting pull returns progress" 0 "$rc"
+eq "jules-cli waiting state" "IN_PROGRESS" "$(jq -r '.state' "$(jules_cli_state_file)")"
+grep -q 'Session 424242 is still running' "$out" && ok "jules-cli waiting output surfaced" || bad "jules-cli waiting output missing"
+
+export JULES_STUB_PULL=success
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli completed pull succeeds" 0 "$rc"
+eq "jules-cli completed state" "COMPLETED" "$(jq -r '.state' "$(jules_cli_state_file)")"
+eq "jules-cli apply marks patchApplied" true "$(jq -r '.patchApplied' "$(jules_cli_state_file)")"
+grep -q '<promise>COMPLETE</promise>' "$out" && ok "jules-cli completed emits promise" || bad "jules-cli completion promise missing"
+grep -q 'pull session=424242 apply=1' "$JULES_STUB_LOG" && ok "jules-cli pull uses --apply" || bad "jules-cli pull did not apply"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
