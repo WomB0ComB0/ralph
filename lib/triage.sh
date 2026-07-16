@@ -417,6 +417,12 @@ _triage_suggest_body() {
     echo "<!-- ralph-triage -->"
 }
 
+_triage_clean_body() {
+    echo "Automated triage by \`ralph triage --suggest\`: no current findings on the latest scan."
+    echo
+    echo "<!-- ralph-triage -->"
+}
+
 # Suggest-only mode: digest a repo's findings into ONE GitHub issue (idempotent — comments an
 # existing open ralph-triage issue rather than spamming). Lower blast radius than autofix→PR:
 # it never touches code. DRY-RUN by default.
@@ -426,23 +432,64 @@ triage_suggest() {
     all=$(mktemp) || { log_error "[$repo] mktemp failed."; return 1; }
     triage_scan_repo "$repo" > "$all" 2>/dev/null || true
     local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
-    if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; rm -f "$all"; return 0; fi
-    local title body; title="Ralph triage: $count item(s) needing attention"
-    body=$(_triage_suggest_body < "$all")
-    rm -f "$all"
+
     if [[ "$apply" != "1" ]]; then
+        if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; rm -f "$all"; return 0; fi
+        local dry_title dry_body; dry_title="Ralph triage: $count item(s) needing attention"
+        dry_body=$(_triage_suggest_body < "$all")
+        rm -f "$all"
         log_info "[$repo] DRY-RUN — would open/update an issue:"
-        printf '    title: %s\n' "$title"
-        printf '%s\n' "$body" | sed 's/^/    /'
+        printf '    title: %s\n' "$dry_title"
+        printf '%s\n' "$dry_body" | sed 's/^/    /'
         printf '    re-run with --apply to create/update the issue.\n'
         return 0
     fi
+
     # Idempotent: reuse an existing open issue carrying the ralph-triage marker.
     local existing
     existing=$(gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+    if [[ "$count" -eq 0 ]]; then
+        rm -f "$all"
+        if [[ -n "$existing" ]]; then
+            local clean_title clean_body
+            clean_title="Ralph triage: clean"
+            clean_body=$(_triage_clean_body)
+            if gh issue edit "$existing" --repo "$repo" --title "$clean_title" --body "$clean_body" >/dev/null 2>&1; then
+                if gh issue close "$existing" --repo "$repo" --reason completed --comment "Ralph triage is clean on the latest scan; closing this automated tracking issue." >/dev/null 2>&1; then
+                    log_success "[$repo] closed clean triage issue #$existing."
+                else
+                    log_error "[$repo] failed to close clean triage issue #$existing."; return 1
+                fi
+            else
+                log_error "[$repo] failed to mark triage issue #$existing clean."; return 1
+            fi
+        else
+            log_success "[$repo] nothing to suggest."
+        fi
+        return 0
+    fi
+
+    local title body; title="Ralph triage: $count item(s) needing attention"
+    body=$(_triage_suggest_body < "$all")
+    rm -f "$all"
+
     if [[ -n "$existing" ]]; then
-        gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1 \
-            && log_success "[$repo] updated triage issue #$existing." || { log_error "[$repo] failed to comment on #$existing."; return 1; }
+        local current current_title current_body
+        current=$(gh issue view "$existing" --repo "$repo" --json title,body 2>/dev/null || true)
+        current_title=$(printf '%s' "$current" | jq -r '.title // ""' 2>/dev/null || true)
+        current_body=$(printf '%s' "$current" | jq -r '.body // ""' 2>/dev/null || true)
+        if [[ "$current_title" == "$title" && "$current_body" == "$body" ]]; then
+            log_success "[$repo] triage issue #$existing already current."
+        elif gh issue edit "$existing" --repo "$repo" --title "$title" --body "$body" >/dev/null 2>&1; then
+            if gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1; then
+                log_success "[$repo] updated triage issue #$existing."
+            else
+                log_error "[$repo] failed to comment on triage issue #$existing."; return 1
+            fi
+        else
+            log_error "[$repo] failed to update triage issue #$existing."; return 1
+        fi
     else
         local url
         if url=$(gh issue create --repo "$repo" --title "$title" --body "$body" 2>/dev/null); then
