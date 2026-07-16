@@ -1,0 +1,103 @@
+#!/bin/bash
+# Install a user-level systemd timer for scripts/resq-org-patrol.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ralph_home="${RALPH_HOME:-$(cd "$script_dir/.." && pwd)}"
+org="${RALPH_ORG:-resq-software}"
+interval="${RALPH_ORG_TIMER_INTERVAL:-30min}"
+unit_name="ralph-${org}-patrol"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+systemd_dir="$config_home/systemd/user"
+ralph_config_dir="$config_home/ralph"
+env_file="$ralph_config_dir/${org}-patrol.env"
+service_file="$systemd_dir/${unit_name}.service"
+timer_file="$systemd_dir/${unit_name}.timer"
+cmd="install"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/resq-org-install-systemd [install|uninstall|status] [--interval DURATION]
+
+Installs a user systemd timer that runs scripts/resq-org-patrol periodically.
+Default interval: 30min. Configure behavior in ~/.config/ralph/resq-software-patrol.env.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        install|uninstall|status) cmd="$1"; shift ;;
+        --interval) interval="${2:?--interval requires a value}"; shift 2 ;;
+        --interval=*) interval="${1#*=}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$cmd" in
+    uninstall)
+        systemctl --user disable --now "${unit_name}.timer" 2>/dev/null || true
+        rm -f "$service_file" "$timer_file"
+        systemctl --user daemon-reload
+        echo "uninstalled ${unit_name}.timer"
+        exit 0
+        ;;
+    status)
+        systemctl --user status "${unit_name}.timer" --no-pager || true
+        exit 0
+        ;;
+esac
+
+mkdir -p "$systemd_dir" "$ralph_config_dir" "$state_home/ralph/$org"
+if [[ ! -f "$env_file" ]]; then
+    cat > "$env_file" <<EOF
+# Ralph public org patrol config. No secrets are required for default read-only mode.
+# Synapse check is off by default for the timer; enable after the local Synapse DB uses a non-RLS-bypassing app role.
+RALPH_ORG=$org
+RALPH_ORG_TRIAGE_MODE=report
+RALPH_ORG_SYNAPSE_CHECK=0
+RALPH_ORG_TARGETS_FILE=$ralph_config_dir/${org}.targets
+RALPH_ORG_LOG_DIR=$state_home/ralph/$org
+SYNAPSE_URL=http://127.0.0.1:8080
+SYNAPSE_TENANT=$org
+SYNAPSE_PRINCIPAL=agent:ralph
+EOF
+    chmod 600 "$env_file"
+fi
+
+cat > "$service_file" <<EOF
+[Unit]
+Description=Ralph public org patrol for $org
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$ralph_home
+Environment=PATH=$HOME/go/bin:/usr/local/bin:/usr/bin:/bin
+Environment=RALPH_HOME=$ralph_home
+EnvironmentFile=$env_file
+ExecStart=$ralph_home/scripts/resq-org-patrol
+EOF
+
+cat > "$timer_file" <<EOF
+[Unit]
+Description=Run Ralph public org patrol for $org every $interval
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=$interval
+Persistent=true
+Unit=${unit_name}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now "${unit_name}.timer"
+echo "installed and started ${unit_name}.timer"
+echo "config: $env_file"
+echo "logs:   $state_home/ralph/$org"
+systemctl --user list-timers "${unit_name}.timer" --no-pager || true

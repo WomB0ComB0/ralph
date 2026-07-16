@@ -1,0 +1,51 @@
+#!/bin/bash
+# List active public repositories for an organization as owner/repo lines.
+set -euo pipefail
+
+org="${RALPH_ORG:-resq-software}"
+limit="${RALPH_ORG_REPO_LIMIT:-200}"
+include_archived=false
+write_file=""
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/resq-public-targets [--org ORG] [--limit N] [--include-archived] [--write FILE]
+
+Print active public GitHub repositories as owner/repo lines. Requires authenticated gh and jq.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --org) org="${2:?--org requires a value}"; shift 2 ;;
+        --org=*) org="${1#*=}"; shift ;;
+        --limit) limit="${2:?--limit requires a value}"; shift 2 ;;
+        --limit=*) limit="${1#*=}"; shift ;;
+        --include-archived) include_archived=true; shift ;;
+        --write) write_file="${2:?--write requires a value}"; shift 2 ;;
+        --write=*) write_file="${1#*=}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$limit" in ''|*[!0-9]*) echo "--limit must be numeric" >&2; exit 2 ;; esac
+
+json=$(gh repo list "$org" --visibility=public --limit "$limit" \
+    --json nameWithOwner,isArchived,isPrivate 2>/dev/null)
+
+targets=$(jq -r --argjson includeArchived "$include_archived" '
+    arrays[]
+    | select((.isPrivate // false) == false)
+    | select($includeArchived or ((.isArchived // false) == false))
+    | .nameWithOwner
+' <<<"$json" | awk 'NF && !seen[$0]++')
+
+if [[ -n "$write_file" ]]; then
+    mkdir -p "$(dirname "$write_file")"
+    tmp=$(mktemp "${write_file}.tmp.XXXXXX")
+    printf '%s\n' "$targets" | sed '/^$/d' > "$tmp"
+    mv "$tmp" "$write_file"
+fi
+
+printf '%s\n' "$targets" | sed '/^$/d'
