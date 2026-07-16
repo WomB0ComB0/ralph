@@ -97,6 +97,26 @@ printf '%s' "$sg" | grep -q 'item(s) needing attention' && ok "suggest dry-run s
 [[ ! -s "$GHLOG" ]] && ok "suggest dry-run invoked gh ZERO times (no issue created)" || bad "dry-run called gh: $(cat "$GHLOG")"
 unset -f triage_scan_repo gh
 
+# Apply mode must also be safe under `set -u`; a RETURN trap using a local temp-file
+# variable previously crashed after the issue was created.
+GHLOG="$TMP/ghcalls-apply"; : > "$GHLOG"
+(
+    set -u
+    triage_scan_repo() { printf 'high\to/r\tsecret\tAWS key leaked\thttps://x/9\n'; }
+    gh() {
+        echo "gh $*" >> "$GHLOG"
+        case "$*" in
+            issue\ list*) printf '\n' ;;
+            issue\ create*) printf 'https://github.com/o/r/issues/9\n' ;;
+            *) printf '\n' ;;
+        esac
+    }
+    triage_suggest "o/r" 1 >/dev/null
+)
+eq "suggest apply is set -u safe" "0" "$?"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create' && ok "suggest apply creates issue when no marker exists" || bad "suggest apply did not create issue: $(cat "$GHLOG")"
+unset -f triage_scan_repo gh 2>/dev/null || true
+
 echo "== fix-security: code-scanning remediation dry-run =="
 eq "security fix branch is bot-namespaced" "ralph/fix-sec-7" "$(triage_sec_branch_name 7)"
 GITLOG3="$TMP/gitcalls3"; : > "$GITLOG3"
