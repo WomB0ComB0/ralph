@@ -446,8 +446,16 @@ triage_suggest() {
     fi
 
     # Idempotent: reuse an existing open issue carrying the ralph-triage marker.
-    local existing
-    existing=$(gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty' 2>/dev/null || true)
+    local existing issue_list_output
+    if ! issue_list_output=$(gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty' 2>&1); then
+        rm -f "$all"
+        if [[ "$issue_list_output" == *"repository has disabled issues"* || "$issue_list_output" == *"Issues are disabled"* ]]; then
+            log_warning "[$repo] skipped triage issue sync: GitHub issues are disabled ($count current finding(s)); route via alternate destination."
+            return 0
+        fi
+        log_error "[$repo] failed to inspect triage issues: $issue_list_output"; return 1
+    fi
+    existing="$issue_list_output"
 
     if [[ "$count" -eq 0 ]]; then
         rm -f "$all"

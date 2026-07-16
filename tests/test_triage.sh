@@ -117,6 +117,26 @@ eq "suggest apply is set -u safe" "0" "$?"
 printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create' && ok "suggest apply creates issue when no marker exists" || bad "suggest apply did not create issue: $(cat "$GHLOG")"
 unset -f triage_scan_repo gh 2>/dev/null || true
 
+GHLOG="$TMP/ghcalls-disabled"; : > "$GHLOG"
+triage_scan_repo() {
+    printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'
+    printf 'high\to/r\tsecret\tToken leaked\thttps://x/secret\n'
+}
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) echo "the 'o/r' repository has disabled issues" >&2; return 1 ;;
+        issue\ create*) return 42 ;;
+        *) printf '\n' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1)
+eq "suggest apply skips disabled-issues repos" "0" "$?"
+printf '%s' "$sg" | grep -q 'GitHub issues are disabled (2 current finding(s))' && ok "disabled-issues skip reports current finding count" || bad "disabled-issues skip missing count/context: $sg"
+printf '%s' "$sg" | grep -q 'alternate destination' && ok "disabled-issues skip suggests alternate routing" || bad "disabled-issues skip missing routing hint: $sg"
+if printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create'; then bad "disabled-issues repo attempted issue create: $(cat "$GHLOG")"; else ok "disabled-issues repo does not attempt issue create"; fi
+unset -f triage_scan_repo gh
+
 GHLOG="$TMP/ghcalls-update"; : > "$GHLOG"
 triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
 gh() {
