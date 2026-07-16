@@ -226,6 +226,19 @@ It can also prepare opt-in fixes:
 
 Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches. Untrusted GitHub content (PR review comments, CI logs, code-scanning descriptions) is fenced as data before it enters any prompt, and self-triage can never rewrite Ralph's own control surface (`lib/`, `ralph.sh`, `scripts/`, config/allowlist).
 
+
+### Public Org Patrol
+
+For the public `resq-software` repositories, Ralph can run a scheduled local patrol that refreshes the public repo allowlist, checks Synapse, and runs GitHub triage:
+
+```bash
+scripts/resq-public-targets --org resq-software
+scripts/resq-org-patrol --mode report
+scripts/resq-org-install-systemd install --interval 30min
+```
+
+Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/resq-software-patrol.env`; logs live under `~/.local/state/ralph/resq-software/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role.
+
 ## Task Management
 
 Ralph uses Beads through the `bd` CLI for dependency-aware work queues. Dolt is optional for time-travel task history.
