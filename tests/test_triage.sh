@@ -117,6 +117,60 @@ eq "suggest apply is set -u safe" "0" "$?"
 printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create' && ok "suggest apply creates issue when no marker exists" || bad "suggest apply did not create issue: $(cat "$GHLOG")"
 unset -f triage_scan_repo gh 2>/dev/null || true
 
+GHLOG="$TMP/ghcalls-update"; : > "$GHLOG"
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '42\n' ;;
+        issue\ edit*) return 0 ;;
+        issue\ comment*) return 0 ;;
+        *) printf '\n' ;;
+    esac
+}
+triage_suggest "o/r" 1 >/dev/null
+eq "suggest apply updates existing issue" "0" "$?"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue edit 42' && ok "existing suggest issue is edited" || bad "existing issue was not edited: $(cat "$GHLOG")"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q -- '--title Ralph triage: 1 item(s) needing attention' && ok "existing suggest issue title is refreshed" || bad "title not refreshed: $(cat "$GHLOG")"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue comment 42' && ok "existing suggest issue also gets a history comment" || bad "history comment missing: $(cat "$GHLOG")"
+unset -f triage_scan_repo gh
+
+GHLOG="$TMP/ghcalls-current"; : > "$GHLOG"
+CURRENT_BODY=$(printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n' | _triage_suggest_body)
+CURRENT_JSON=$(jq -n --arg title "Ralph triage: 1 item(s) needing attention" --arg body "$CURRENT_BODY" '{title:$title,body:$body}')
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '42\n' ;;
+        issue\ view*) printf '%s\n' "$CURRENT_JSON" ;;
+        *) printf '\n' ;;
+    esac
+}
+triage_suggest "o/r" 1 >/dev/null
+eq "suggest apply skips unchanged issue" "0" "$?"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue view 42' && ok "existing suggest issue is inspected before update" || bad "existing issue was not inspected: $(cat "$GHLOG")"
+if printf '%s\n' "$(cat "$GHLOG")" | grep -Eq 'issue (edit|comment) 42'; then bad "unchanged issue was edited/commented: $(cat "$GHLOG")"; else ok "unchanged suggest issue gets no extra edit/comment"; fi
+unset -f triage_scan_repo gh
+
+GHLOG="$TMP/ghcalls-close"; : > "$GHLOG"
+triage_scan_repo() { :; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '42\n' ;;
+        issue\ close*) return 0 ;;
+        *) printf '\n' ;;
+    esac
+}
+triage_suggest "o/r" 1 >/dev/null
+eq "suggest apply closes clean existing issue" "0" "$?"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue edit 42' && ok "clean repo marks existing triage issue clean before close" || bad "clean edit missing: $(cat "$GHLOG")"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q -- '--title Ralph triage: clean' && ok "clean repo refreshes stale triage title" || bad "clean title missing: $(cat "$GHLOG")"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue close 42' && ok "clean repo closes existing triage issue" || bad "clean close missing: $(cat "$GHLOG")"
+printf '%s\n' "$(cat "$GHLOG")" | grep -q -- '--reason completed' && ok "clean close uses completed reason" || bad "clean close reason missing: $(cat "$GHLOG")"
+unset -f triage_scan_repo gh
+
 echo "== fix-security: code-scanning remediation dry-run =="
 eq "security fix branch is bot-namespaced" "ralph/fix-sec-7" "$(triage_sec_branch_name 7)"
 GITLOG3="$TMP/gitcalls3"; : > "$GITLOG3"
