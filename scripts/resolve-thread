@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016  # $vars in the single-quoted GraphQL queries are GraphQL variables, not shell
-# resolve-thread — reply to (optional) and mark a PR review thread resolved, by thread ID.
-# Pair with `pr-status` (which prints the thread IDs) to close out a review loop cheaply.
-#
-# Usage: scripts/resolve-thread <threadId> [reply text]
+# shellcheck disable=SC2016
+# resolve-thread - reply to (optional) and mark a PR review thread resolved, by thread ID.
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
 id="${1:?usage: resolve-thread <threadId> [reply]}"
 reply="${2:-}"
 if [[ -n "$reply" ]]; then
-  gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' \
-    -f id="$id" -f b="$reply" >/dev/null
+  rc=0
+  out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply") || rc=$?
+  if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit "$rc"; fi
 fi
-gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
-  -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"'
+rc=0
+out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"') || rc=$?
+if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit "$rc"; fi
+printf '%s\n' "$out"

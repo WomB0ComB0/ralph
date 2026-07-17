@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# pr-merge — merge a PR, delete its branch, and (for the current repo) sync the default branch.
-# The close-out dance in one command. Usage: pr-merge <pr> [owner/repo]
+# pr-merge - merge a PR, delete its branch, and (for the current repo) sync the default branch.
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
 pr="${1:?usage: pr-merge <pr> [owner/repo]}"
-repo="${2:-}"; [[ -n "$repo" ]] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "not in a GitHub repo; pass owner/repo" >&2; exit 1; }
-gh pr merge "$pr" --repo "$repo" --merge --delete-branch
-# Only touch the local checkout when the PR is in the repo we're standing in.
-if [[ "$repo" == "$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)" ]]; then
-  def=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo main)
-  # Only pull if we actually switched to the default branch (don't pull into a stale branch).
-  if git checkout "$def" 2>/dev/null; then
-    git pull --ff-only 2>/dev/null || true
+repo="${2:-}"
+if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
+rc=0
+out=$(ralph_gh_capture gh pr merge "$pr" --repo "$repo" --merge --delete-branch) || rc=$?
+if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "merging PR #$pr in $repo" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "merging PR #$pr in $repo" "$out"; exit "$rc"; fi
+current=$(ralph_gh_capture gh repo view --json nameWithOwner -q .nameWithOwner) || current=""
+if [[ "$repo" == "$current" ]]; then
+  def_rc=0
+  def=$(ralph_gh_capture gh repo view --json defaultBranchRef -q .defaultBranchRef.name) || def_rc=$?
+  if [[ "$def_rc" -eq 75 ]]; then
+    ralph_gh_fail_message "reading default branch for local cleanup in $repo" "$def" || true
+  elif [[ "$def_rc" -eq 0 && -n "$def" ]]; then
+    if git checkout "$def" 2>/dev/null; then git pull --ff-only 2>/dev/null || true; fi
+    git fetch --prune 2>/dev/null || true
   fi
-  git fetch --prune 2>/dev/null || true
 fi
 echo "merged #$pr ($repo) and cleaned up."

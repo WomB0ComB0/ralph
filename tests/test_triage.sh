@@ -94,6 +94,21 @@ printf '%s' "$dry" | grep -q 'off renovate/dep-1' && ok "dry-run bases the fix o
 printf '%s' "$dry" | grep -q -- '--base renovate/dep-1' && ok "PR targets the failing branch" || bad "PR base is not the failing branch"
 printf '%s' "$dry" | grep -q 'NEVER push to main' && ok "still NEVER pushes the default branch" || bad "no never-push-default note"
 [[ ! -s "$GITLOG" ]] && ok "dry-run invoked git ZERO times (no writes)" || bad "dry-run touched git: $(cat "$GITLOG")"
+
+
+# Transient GitHub failures in autofix setup should defer without mutating or inventing defaults.
+gh() { case "$*" in run\ list*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+outage=$(triage_autofix_ci "o/r" 0 2>&1); rc=$?
+eq "fix-ci defers transient run-list outage" "0" "$rc"
+printf '%s' "$outage" | grep -q 'transient failure while listing failing CI runs' && ok "fix-ci reports transient run-list outage" || bad "missing run-list outage warning: $outage"
+unset -f gh
+
+gh() { case "$*" in run\ list*) echo '[{"databaseId":777,"url":"https://x/run/777","headBranch":"feature/x"}]' ;; repo\ view*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+outage=$(triage_autofix_ci "o/r" 0 2>&1); rc=$?
+eq "fix-ci defers default-branch outage" "0" "$rc"
+printf '%s' "$outage" | grep -q 'avoiding fallback to main' && ok "fix-ci avoids fallback to main during outage" || bad "missing no-main-fallback warning: $outage"
+unset -f gh
+
 unset -f gh git
 
 echo "== suggest: issue body + dry-run creates nothing =="
@@ -294,6 +309,14 @@ printf '%s' "$sdry" | grep -q 'ralph/fix-sec-7' && ok "dry-run uses the security
 printf '%s' "$sdry" | grep -q -- '--base main' && ok "security PR targets the default branch" || bad "wrong base: $sdry"
 printf '%s' "$sdry" | grep -q 'fix(security): js/sql-injection' && ok "dry-run titles by rule" || bad "no rule title: $sdry"
 [[ ! -s "$GITLOG3" ]] && ok "fix-security dry-run invoked git ZERO times" || bad "dry-run touched git: $(cat "$GITLOG3")"
+
+
+gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+outage=$(triage_autofix_security "o/r" 0 "" 2>&1); rc=$?
+eq "fix-security defers transient code-scanning outage" "0" "$rc"
+printf '%s' "$outage" | grep -q 'transient failure while listing code-scanning alerts' && ok "fix-security reports transient code-scanning outage" || bad "missing code-scanning outage warning: $outage"
+unset -f gh
+
 unset -f gh git
 
 echo "== resolve-reviews: thread parsing + safety + dry-run =="
@@ -304,6 +327,14 @@ eq "parse: skips a thread that has no comments" "T1	gemini	a.ts	5	please fix thi
 # SAFETY: refuse to resolve conversations on a non-ralph/fix branch (e.g. a human's PR)
 gh() { echo '{"data":{"repository":{"pullRequest":{"headRefName":"main","reviewThreads":{"nodes":[]}}}}}'; }
 triage_resolve_reviews "o/r" 5 1 >/dev/null 2>&1 && bad "resolved on a non-ralph branch!" || ok "refuses to resolve conversations on a non-ralph/fix-* PR"
+
+
+gh() { echo "HTTP 503: Service Unavailable" >&2; return 1; }
+outage=$(triage_resolve_reviews "o/r" 5 0 2>&1); rc=$?
+eq "resolve-reviews defers transient GraphQL outage" "0" "$rc"
+printf '%s' "$outage" | grep -q 'transient failure while reading PR review threads' && ok "resolve-reviews reports transient GraphQL outage" || bad "missing GraphQL outage warning: $outage"
+unset -f gh
+
 unset -f gh
 
 # DRY-RUN: lists the conversation; resolves/pushes nothing (git never invoked)
