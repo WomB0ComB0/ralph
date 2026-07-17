@@ -24,8 +24,8 @@ eq()  { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (exp [$2] got [$3])"; 
 # curl runs inside $(...) (a subshell), so count calls via a file that survives the subshell.
 SYN_CALL_LOG=$(mktemp)
 curl() {
-    echo x >> "$SYN_CALL_LOG"
     local url="${!#}" ep; ep="${url##*/}"
+    echo "$ep" >> "$SYN_CALL_LOG"
     case "${SYN_MODE:-}" in
         force401) printf 'unauthorized\n401'; return 0 ;;
         force429) printf 'slow down\n429'; return 0 ;;   # always retriable -> exercises retry/exhaust
@@ -33,6 +33,10 @@ curl() {
     case "$ep" in
         health)
             [[ "${SYN_HEALTH:-ok}" == "bad" ]] && { printf 'down\n503'; return 0; }
+            if [[ "${SYN_HEALTH:-ok}" == "flaky" ]]; then
+                local health_calls; health_calls=$(grep -c '^health$' "$SYN_CALL_LOG" 2>/dev/null || true)
+                [[ "$health_calls" -eq 1 ]] && { printf '\n000'; return 0; }
+            fi
             printf '{"status":"ok"}\n200' ;;
         context.upsert) printf '{"principal_id":"agent:x","status":"upserted"}\n200' ;;
         context.get)    printf '{"principal_id":"agent:x","active_projects":["livetest"],"data_classification":{"contains_pii":false,"special_category":false}}\n200' ;;
@@ -135,6 +139,15 @@ out=$(synapse_live_test claude 2>&1); rc=$?
 eq "live-test PASS -> rc 0" 0 "$rc"
 [[ "$out" == *"[PASS] live-test claude OK"* ]] && ok "prints final PASS line" || bad "no final PASS: $out"
 [[ "$out" == *"[PASS] context.get"* ]] && ok "context round-trip asserted" || bad "no context.get step: $out"
+
+echo "== synapse_live_test retries transient health failures =="
+: > "$SYN_CALL_LOG"
+SYN_HEALTH=flaky
+out=$(synapse_live_test claude 2>&1); rc=$?
+eq "flaky health recovers -> rc 0" 0 "$rc"
+eq "health retried once then continued" 2 "$(grep -c '^health$' "$SYN_CALL_LOG" 2>/dev/null || true)"
+[[ "$out" == *"[PASS] live-test claude OK"* ]] && ok "flaky health prints final PASS line" || bad "flaky health did not pass: $out"
+SYN_HEALTH=ok
 
 echo "== synapse_live_test failure records a signal + fails fast =="
 _td=$(mktemp -d)
