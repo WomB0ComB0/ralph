@@ -6,6 +6,11 @@
 # via `gh`, recording each as a Ralph signal so it compounds across runs. This module writes
 # NOTHING to any repo — the autofix→PR and suggest→issue modes are separate and opt-in.
 
+__ralph_triage_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=github.sh
+# shellcheck disable=SC1091
+source "$__ralph_triage_lib_dir/github.sh"
+
 # Severity ordering for the report (higher = more urgent). Maps GitHub's two scales
 # (critical/high/medium/low and error/warning/note) onto one rank.
 _triage_sev_rank() {
@@ -124,13 +129,7 @@ _triage_parse_alerts() {
     esac
 }
 _triage_is_transient_gh_error() {
-    local msg="${1,,}"
-    case "$msg" in
-        *"http 5"*|*"status 5"*|*"503"*|*"502"*|*"504"*|*"service unavailable"*|*"bad gateway"*|*"gateway timeout"*|*"rate limit"*|*"secondary rate"*|*"timeout"*|*"timed out"*|*"tls"*|*"connection reset"*|*"connection refused"*|*"could not resolve"*|*"network"*|*"eof"*)
-            return 0 ;;
-        *)
-            return 1 ;;
-    esac
+    ralph_github_is_transient_error "$1"
 }
 
 _triage_gh_json_or_incomplete() {
@@ -152,17 +151,31 @@ _triage_gh_json_or_incomplete() {
 _triage_gh_or_transient() {
     local label="$1" repo="$2"
     shift 2
-    local out
-    if out=$("$@" 2>&1); then
+    local out rc=0
+    out=$(ralph_gh_capture "$@") || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
         printf '%s' "$out"
         return 0
     fi
-    if _triage_is_transient_gh_error "$out"; then
+    if [[ "$rc" -eq 75 ]]; then
         log_warning "[$repo] deferred GitHub operation: transient failure while $label: $out"
         return 75
     fi
     printf '%s' "$out"
-    return 1
+    return "$rc"
+}
+
+_triage_default_branch() {
+    local repo="$1" out rc=0
+    out=$(_triage_gh_or_transient "reading default branch" "$repo" gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name') || rc=$?
+    if [[ "$rc" -eq 75 ]]; then
+        log_warning "[$repo] deferred GitHub operation: default branch unavailable; avoiding fallback to main during provider outage."
+        return 75
+    elif [[ "$rc" -ne 0 || -z "$out" ]]; then
+        log_error "[$repo] failed to read default branch: $out"
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 # Read-only scan of ONE repo: failing CI + the three security-alert feeds. Each gh call is
@@ -221,8 +234,9 @@ triage_sec_branch_name() { printf 'ralph/fix-sec-%s\n' "$1"; }
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}"
     # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
-    local default_branch iteration=1
-    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    local default_branch iteration=1 default_rc=0
+    default_branch=$(_triage_default_branch "$repo") || default_rc=$?
+    if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
 
     if [[ "$apply" != "1" ]]; then
         log_info "[$repo] DRY-RUN — $title"
@@ -245,8 +259,13 @@ _triage_apply_fix() {
     log_info "[$repo] cloning $base_branch ..."
     # Clone the base branch directly (--depth 50 is single-branch, so a later checkout of a
     # different branch silently fails and would leave the agent on the wrong code).
-    if ! gh repo clone "$repo" "$work" -- --depth 50 --branch "$base_branch" >/dev/null 2>&1; then
-        log_error "[$repo] clone of branch '$base_branch' failed."; return 1
+    local clone_rc=0 clone_out
+    clone_out=$(_triage_gh_or_transient "cloning branch '$base_branch'" "$repo" gh repo clone "$repo" "$work" -- --depth 50 --branch "$base_branch") || clone_rc=$?
+    if [[ "$clone_rc" -eq 75 ]]; then
+        log_warning "[$repo] deferred autofix: clone unavailable due to transient GitHub failure."
+        return 0
+    elif [[ "$clone_rc" -ne 0 ]]; then
+        log_error "[$repo] clone of branch '$base_branch' failed: $clone_out"; return 1
     fi
     # Default to the tool's OWN model self-selection (opencode) unless a local model / pin is set:
     # run_ai_with_fallback always resolves a concrete model that may not be authenticated.
@@ -283,7 +302,15 @@ _triage_apply_fix() {
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
         log_error "[$repo] commit/push failed."; return 1
     fi
-    gh pr create --repo "$repo" --base "$base_branch" --head "$cur" --title "$title" --body "$body" 2>&1 | tail -1
+    local pr_rc=0 pr_out
+    pr_out=$(_triage_gh_or_transient "creating PR from $cur" "$repo" gh pr create --repo "$repo" --base "$base_branch" --head "$cur" --title "$title" --body "$body") || pr_rc=$?
+    if [[ "$pr_rc" -eq 75 ]]; then
+        log_warning "[$repo] pushed $cur but deferred PR creation due to transient GitHub failure."
+        return 0
+    elif [[ "$pr_rc" -ne 0 ]]; then
+        log_error "[$repo] failed to create PR from $cur: $pr_out"; return 1
+    fi
+    printf '%s\n' "$pr_out" | tail -1
     log_success "[$repo] opened a PR from $cur against $base_branch."
     return 0
 }
@@ -292,26 +319,32 @@ _triage_apply_fix() {
 triage_autofix_ci() {
     local repo="$1" apply="${2:-0}" run_override="${3:-}"
     local run_json run_id run_url default_branch base_branch branch
+    local run_rc=0 default_rc=0
     if [[ -n "$run_override" ]]; then
         run_id="$run_override"
-        run_json=$(gh run view "$run_id" --repo "$repo" --json url,headBranch 2>/dev/null || echo '{}')
+        run_json=$(_triage_gh_or_transient "reading CI run $run_id" "$repo" gh run view "$run_id" --repo "$repo" --json url,headBranch) || run_rc=$?
+        if [[ "$run_rc" -eq 75 ]]; then return 0; elif [[ "$run_rc" -ne 0 ]]; then log_error "[$repo] run $run_id not found or could not be retrieved: $run_json"; return 1; fi
         run_url=$(printf '%s' "$run_json" | jq -r '.url // ""' 2>/dev/null || true)
         base_branch=$(printf '%s' "$run_json" | jq -r '.headBranch // empty' 2>/dev/null || true)
         [[ -z "$run_url" ]] && { log_error "[$repo] run $run_id not found or could not be retrieved."; return 1; }
     else
-        run_json=$(gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch 2>/dev/null || echo '[]')
+        run_json=$(_triage_gh_or_transient "listing failing CI runs" "$repo" gh run list --repo "$repo" --status failure --limit 1 --json databaseId,url,headBranch) || run_rc=$?
+        if [[ "$run_rc" -eq 75 ]]; then return 0; elif [[ "$run_rc" -ne 0 ]]; then log_error "[$repo] failed to list failing CI runs: $run_json"; return 1; fi
         run_id=$(printf '%s' "$run_json" | jq -r 'arrays[0].databaseId // empty' 2>/dev/null || true)
         run_url=$(printf '%s' "$run_json" | jq -r 'arrays[0].url // ""' 2>/dev/null || true)
         base_branch=$(printf '%s' "$run_json" | jq -r 'arrays[0].headBranch // empty' 2>/dev/null || true)
     fi
     [[ -z "$run_id" ]] && { log_info "[$repo] no failing CI run — nothing to fix."; return 0; }
-    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    default_branch=$(_triage_default_branch "$repo") || default_rc=$?
+    if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
     [[ -z "$base_branch" ]] && base_branch="$default_branch"   # fix on the branch that's failing
     branch=$(triage_ci_branch_name "$run_id")
 
     local prompt="" logs full
     if [[ "$apply" == "1" ]]; then
-        full=$(gh run view "$run_id" --repo "$repo" --log-failed 2>/dev/null || true)
+        local logs_rc=0
+        full=$(_triage_gh_or_transient "reading failed CI logs for run $run_id" "$repo" gh run view "$run_id" --repo "$repo" --log-failed) || logs_rc=$?
+        if [[ "$logs_rc" -eq 75 ]]; then return 0; elif [[ "$logs_rc" -ne 0 ]]; then log_error "[$repo] failed to read failing-log output for run $run_id: $full"; return 1; fi
         logs=$(printf '%s\n' "$full" | grep -iE 'error|failed|cannot|expected|undefined|not found|TS[0-9]{3,}' | grep -vE '^[[:space:]]*$' | tail -n 60)
         [[ -z "$logs" ]] && logs=$(printf '%s\n' "$full" | tail -n 80)
         if [[ -z "$logs" ]]; then
@@ -334,15 +367,19 @@ triage_autofix_ci() {
 triage_autofix_security() {
     local repo="$1" apply="${2:-0}" alert_override="${3:-}"
     local default_branch alert_json number rule sev desc help path line branch prompt
-    default_branch=$(gh repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+    local default_rc=0 alert_rc=0
+    default_branch=$(_triage_default_branch "$repo") || default_rc=$?
+    if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
     if [[ -n "$alert_override" ]]; then
-        alert_json=$(gh api "repos/$repo/code-scanning/alerts/$alert_override" 2>/dev/null || echo '{}')
+        alert_json=$(_triage_gh_or_transient "reading code-scanning alert $alert_override" "$repo" gh api "repos/$repo/code-scanning/alerts/$alert_override") || alert_rc=$?
+        if [[ "$alert_rc" -eq 75 ]]; then return 0; elif [[ "$alert_rc" -ne 0 ]]; then log_error "[$repo] code-scanning alert $alert_override not found (or code scanning disabled): $alert_json"; return 1; fi
         number=$(printf '%s' "$alert_json" | jq -r '.number // empty' 2>/dev/null || true)
         [[ -z "$number" ]] && { log_error "[$repo] code-scanning alert $alert_override not found (or code scanning disabled)."; return 1; }
     else
         local alerts_list
-        if ! alerts_list=$(gh api "repos/$repo/code-scanning/alerts?state=open&per_page=50" 2>/dev/null); then
-            log_error "[$repo] failed to retrieve code-scanning alerts (enabled? token scope?)."
+        alerts_list=$(_triage_gh_or_transient "listing code-scanning alerts" "$repo" gh api "repos/$repo/code-scanning/alerts?state=open&per_page=50") || alert_rc=$?
+        if [[ "$alert_rc" -eq 75 ]]; then return 0; elif [[ "$alert_rc" -ne 0 ]]; then
+            log_error "[$repo] failed to retrieve code-scanning alerts (enabled? token scope?): $alerts_list"
             return 1
         fi
         alert_json=$(printf '%s' "$alerts_list" | jq -c 'def rank: {"critical":0,"high":1,"error":1,"medium":2,"warning":2,"low":3,"note":3}[.rule.security_severity_level // .rule.severity // ""] // 4; (arrays | sort_by(rank))[0] // {}' 2>/dev/null || echo '{}')
@@ -384,7 +421,9 @@ triage_resolve_reviews() {
     local repo="$1" pr="$2" apply="${3:-0}" iteration=1
     local owner name; owner="${repo%%/*}"; name="${repo##*/}"
     local q='query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){headRefName reviewThreads(first:50){nodes{id isResolved comments(first:1){nodes{author{login} path line body}}}}}}}'
-    local data; data=$(gh api graphql -f query="$q" -F o="$owner" -F n="$name" -F pr="$pr" 2>/dev/null || echo '{}')
+    local data data_rc=0
+    data=$(_triage_gh_or_transient "reading PR review threads for #$pr" "$repo" gh api graphql -f query="$q" -F o="$owner" -F n="$name" -F pr="$pr") || data_rc=$?
+    if [[ "$data_rc" -eq 75 ]]; then return 0; elif [[ "$data_rc" -ne 0 ]]; then log_error "[$repo#$pr] PR not found / not retrievable: $data"; return 1; fi
     local head; head=$(printf '%s' "$data" | jq -r '.data.repository.pullRequest.headRefName // ""' 2>/dev/null || true)
     if [[ -z "$head" ]]; then log_error "[$repo#$pr] PR not found / not retrievable."; return 1; fi
     # SAFETY: only ever act on Ralph's own fix branches — never resolve a human's conversation.
@@ -411,8 +450,13 @@ triage_resolve_reviews() {
     # shellcheck disable=SC2064
     trap "rm -rf '$work' '$lf' '$of'" RETURN
     log_info "[$repo#$pr] cloning $head to address $n conversation(s) ..."
-    if ! gh repo clone "$repo" "$work" -- --depth 50 --branch "$head" >/dev/null 2>&1; then
-        log_error "[$repo#$pr] clone of '$head' failed."; return 1
+    local clone_rc=0 clone_out
+    clone_out=$(_triage_gh_or_transient "cloning PR branch '$head'" "$repo" gh repo clone "$repo" "$work" -- --depth 50 --branch "$head") || clone_rc=$?
+    if [[ "$clone_rc" -eq 75 ]]; then
+        log_warning "[$repo#$pr] deferred review resolution: clone unavailable due to transient GitHub failure."
+        return 0
+    elif [[ "$clone_rc" -ne 0 ]]; then
+        log_error "[$repo#$pr] clone of '$head' failed: $clone_out"; return 1
     fi
     local prompt comments
     comments=$(printf '%s\n' "$threads" | while IFS=$'\t' read -r id author path line body; do [[ -z "$id" ]] || printf -- '- %s:%s — %s\n' "$path" "$line" "$body"; done)
@@ -446,11 +490,20 @@ triage_resolve_reviews() {
     fi
     local sha; sha=$(cd "$work" && git rev-parse --short HEAD 2>/dev/null || echo "")
     # Only NOW resolve each conversation — and only because we pushed a real change addressing them.
-    printf '%s\n' "$threads" | while IFS=$'\t' read -r id author path line body; do
+    local resolve_deferred=0 resolve_failed=0
+    while IFS=$'	' read -r id author path line body; do
         [[ -z "$id" ]] && continue
-        gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="Addressed in $sha (automated by \`ralph triage --resolve-reviews\`)." >/dev/null 2>&1 || true
-        gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" >/dev/null 2>&1 || true
-    done
+        local reply_rc=0 reply_out resolve_rc=0 resolve_out
+        reply_out=$(_triage_gh_or_transient "replying to review thread $id" "$repo" gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="Addressed in $sha (automated by \`ralph triage --resolve-reviews\`).") || reply_rc=$?
+        if [[ "$reply_rc" -eq 75 ]]; then resolve_deferred=1; continue; elif [[ "$reply_rc" -ne 0 ]]; then log_error "[$repo#$pr] failed to reply to review thread $id: $reply_out"; resolve_failed=1; continue; fi
+        resolve_out=$(_triage_gh_or_transient "resolving review thread $id" "$repo" gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id") || resolve_rc=$?
+        if [[ "$resolve_rc" -eq 75 ]]; then resolve_deferred=1; elif [[ "$resolve_rc" -ne 0 ]]; then log_error "[$repo#$pr] failed to resolve review thread $id: $resolve_out"; resolve_failed=1; fi
+    done <<< "$threads"
+    if [[ "$resolve_deferred" -eq 1 ]]; then
+        log_warning "[$repo#$pr] pushed $sha to $head but deferred some review-thread resolution due to transient GitHub failure."
+        return 0
+    fi
+    [[ "$resolve_failed" -eq 1 ]] && return 1
     log_success "[$repo#$pr] addressed + resolved $n conversation(s) (pushed $sha to $head)."
     return 0
 }
