@@ -45,7 +45,12 @@ cat > "$TMP/ralph.sh" <<'SH'
 printf '%s\n' "$*" >> "$RALPH_CALL_LOG"
 case "$1 $2" in
   "synapse live-test") exit "${RALPH_SYN_RC:-0}" ;;
-  "triage "*) exit 0 ;;
+  "triage "*)
+    if [ "${RALPH_TRIAGE_GITHUB_503:-0}" = "1" ]; then
+      printf 'WARNING: transient GitHub failure during triage: HTTP 503 Service Unavailable\n' >&2
+    fi
+    exit 0
+    ;;
   "triage --suggest") exit 0 ;;
   "triage --fix-ci") exit 0 ;;
   *) exit 0 ;;
@@ -87,6 +92,13 @@ eq "report patrol exits 0" 0 "$rc"
 eq "patrol refreshes targets for requested org" "demo-org/live" "$(cat "$TMP/patrol.targets")"
 grep -qx 'synapse live-test ralph' "$RALPH_CALL_LOG" && ok "patrol runs synapse live-test by default" || bad "missing synapse check"
 grep -qx 'triage' "$RALPH_CALL_LOG" && ok "report mode runs read-only triage" || bad "report mode did not run triage"
+
+: > "$RALPH_CALL_LOG"
+RALPH_TRIAGE_GITHUB_503=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" >"$TMP/patrol-triage-503.out" 2>&1; rc=$?
+eq "patrol survives triage-phase GitHub 503 degradation" 0 "$rc"
+grep -qx 'synapse live-test ralph' "$RALPH_CALL_LOG" && ok "triage 503 scenario runs Synapse check first" || bad "triage 503 scenario skipped Synapse check"
+grep -qx 'triage' "$RALPH_CALL_LOG" && ok "triage 503 scenario still runs triage" || bad "triage 503 scenario skipped triage"
+grep -q 'HTTP 503 Service Unavailable' "$TMP/patrol-triage-503.out" && ok "triage 503 warning is preserved in patrol output" || bad "missing triage 503 warning: $(cat "$TMP/patrol-triage-503.out")"
 
 : > "$RALPH_CALL_LOG"
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode suggest-apply --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1; rc=$?
