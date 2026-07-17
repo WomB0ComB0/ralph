@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# repo-health — one-line health rollup: open PRs / recent failing CI / open security alerts.
+# repo-health - one-line health rollup: open PRs / recent failing CI / open security alerts.
 # Usage: repo-health [owner/repo]   (defaults to the current repo)
 set -uo pipefail
-repo="${1:-}"; [[ -n "$repo" ]] || repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "not in a GitHub repo; pass owner/repo" >&2; exit 1; }
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
+repo="${1:-}"
+if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
 
-# Count an alerts feed, returning "n/a" when the feature/scope is off (403 -> error object).
 count_alerts() {
-  local out
-  out=$(gh api "repos/$repo/$1?state=open&per_page=100" 2>/dev/null) || { printf 'n/a'; return; }
+  local feed="$1" out rc=0
+  out=$(ralph_gh_capture gh api "repos/$repo/$feed?state=open&per_page=100") || rc=$?
+  if [[ "$rc" -eq 75 ]]; then printf 'outage'; return; elif [[ "$rc" -ne 0 ]]; then printf 'n/a'; return; fi
   printf '%s' "$out" | jq -r 'if type=="array" then (length|tostring) else "n/a" end' 2>/dev/null || printf 'n/a'
 }
 
-prs=$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo '?')
-fails=$(gh run list --repo "$repo" --status failure --limit 100 --json databaseId --jq 'length' 2>/dev/null || echo '?')
+gh_count() {
+  local label="$1"; shift
+  local out rc=0
+  out=$(ralph_gh_capture "$@") || rc=$?
+  if [[ "$rc" -eq 75 ]]; then printf 'outage'; return; elif [[ "$rc" -ne 0 ]]; then printf '?'; return; fi
+  printf '%s' "$out"
+}
+
+prs=$(gh_count "open PRs" gh pr list --repo "$repo" --state open --json number --jq 'length')
+fails=$(gh_count "failing CI" gh run list --repo "$repo" --status failure --limit 100 --json databaseId --jq 'length')
 printf '%s  open-PRs=%s  failing-CI(recent)=%s  dependabot=%s  code-scanning=%s  secrets=%s\n' \
   "$repo" "$prs" "$fails" "$(count_alerts dependabot/alerts)" "$(count_alerts code-scanning/alerts)" "$(count_alerts secret-scanning/alerts)"

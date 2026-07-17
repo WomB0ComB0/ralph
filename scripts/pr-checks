@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# pr-checks — CI check rollup for a PR (or the current branch). Thin wrapper over `gh pr checks`.
+# pr-checks - CI check rollup for a PR (or the current branch). Thin wrapper over `gh pr checks`.
 # Usage: scripts/pr-checks [pr] [owner/repo]   (no pr -> the current branch's PR)
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
 pr="${1:-}"
-repo="${2:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-gh pr checks ${pr:+"$pr"} --repo "$repo"
+repo="${2:-}"
+if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
+out=$(ralph_gh_or_exit "reading PR checks for $repo" gh pr checks ${pr:+"$pr"} --repo "$repo")
+printf '%s
+' "$out"

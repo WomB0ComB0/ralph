@@ -1,0 +1,77 @@
+#!/bin/bash
+# List active public repositories for an organization as owner/repo lines.
+set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
+
+org="${RALPH_ORG:-}"
+limit="${RALPH_ORG_REPO_LIMIT:-200}"
+include_archived=false
+write_file=""
+
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/org-public-targets --org ORG [--limit N] [--include-archived] [--write FILE]
+
+Print active public GitHub repositories as owner/repo lines. Requires authenticated gh and jq.
+Set RALPH_ORG instead of --org for scheduled/non-interactive runs.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --org) org="${2:?--org requires a value}"; shift 2 ;;
+        --org=*) org="${1#*=}"; shift ;;
+        --limit) limit="${2:?--limit requires a value}"; shift 2 ;;
+        --limit=*) limit="${1#*=}"; shift ;;
+        --include-archived) include_archived=true; shift ;;
+        --write) write_file="${2:?--write requires a value}"; shift 2 ;;
+        --write=*) write_file="${1#*=}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "$org" ]]; then
+    echo "--org or RALPH_ORG is required" >&2
+    usage >&2
+    exit 2
+fi
+case "$limit" in ''|*[!0-9]*) echo "--limit must be numeric" >&2; exit 2 ;; esac
+
+repo_list_rc=0
+repo_list_output=$(ralph_gh_capture gh repo list "$org" --visibility=public --limit "$limit" \
+    --json nameWithOwner,isArchived,isPrivate) || repo_list_rc=$?
+if [[ "$repo_list_rc" -ne 0 ]]; then
+    if [[ "$repo_list_rc" -eq 75 ]]; then
+        if [[ -n "$write_file" && -s "$write_file" ]]; then
+            printf 'WARNING: transient GitHub failure while discovering %s; reusing cached targets from %s: %s\n' "$org" "$write_file" "$repo_list_output" >&2
+            cat "$write_file"
+            exit 0
+        fi
+        printf 'ERROR: transient GitHub failure while discovering %s and no cached targets are available: %s\n' "$org" "$repo_list_output" >&2
+        exit 75
+    fi
+    printf 'ERROR: failed to discover public repos for %s: %s\n' "$org" "$repo_list_output" >&2
+    exit "$repo_list_rc"
+fi
+json="$repo_list_output"
+
+targets=$(jq -r --argjson includeArchived "$include_archived" '
+    arrays[]
+    | select((.isPrivate // false) == false)
+    | select($includeArchived or ((.isArchived // false) == false))
+    | .nameWithOwner
+' <<<"$json" | awk 'NF && !seen[$0]++')
+
+if [[ -n "$write_file" ]]; then
+    mkdir -p "$(dirname "$write_file")"
+    tmp=$(mktemp "${write_file}.tmp.XXXXXX")
+    printf '%s\n' "$targets" | sed '/^$/d' > "$tmp"
+    mv "$tmp" "$write_file"
+fi
+
+printf '%s\n' "$targets" | sed '/^$/d'

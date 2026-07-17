@@ -22,6 +22,16 @@ as `scripts/<name>`.
 | `pr-resolve-all <pr> [reply] [owner/repo]` | Resolve **every** unresolved thread on a PR (run after you've addressed them) |
 | `pr-merge <pr> [owner/repo]` | Merge the PR, delete its branch, and (for the current repo) sync the local default branch |
 
+
+### Public org automation
+| Script | What it does |
+|--------|--------------|
+| `org-public-targets --org ORG [--write FILE]` | Discover active public org repos through `gh repo list` and emit an `owner/repo` allowlist for Ralph triage |
+| `org-patrol --org ORG [--mode report]` | Refresh the public allowlist, run a Synapse live-test, then run Ralph triage across the org; defaults to read-only report mode |
+| `org-install-systemd install --org ORG [--interval 30min]` | Install/enable a user systemd timer for `org-patrol`; config goes in `~/.config/ralph/<org>-patrol.env` and defaults Synapse checking off until the local DB app role is RLS-safe |
+
+Patrol modes are `report`, `suggest`, `suggest-apply`, `fix-ci`, `fix-ci-apply`, `fix-security`, and `fix-security-apply`. Only the `*-apply` modes write to GitHub, and code-changing modes still use `ralph/fix-*` branches. The `resq-*` script names are compatibility wrappers for the historical resq-software deployment.
+
 ### Dev
 | Script | What it does |
 |--------|--------------|

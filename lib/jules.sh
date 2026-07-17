@@ -41,6 +41,15 @@ jules_state_file() {
     fi
 }
 
+
+jules_cli_state_file() {
+    if [[ -n "${RALPH_JULES_CLI_STATE_FILE:-}" ]]; then
+        printf '%s\n' "$RALPH_JULES_CLI_STATE_FILE"
+    else
+        printf '%s\n' "${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/${RUN_ID:-manual}}/providers/jules-cli.json"
+    fi
+}
+
 jules_prompt_hash() {
     if command -v sha256sum >/dev/null 2>&1; then
         printf '%s' "$1" | sha256sum | awk '{print "sha256:" $1}'
@@ -75,6 +84,104 @@ jules_git_owner_repo() {
     printf '%s %s\n' "$owner" "$repo"
 }
 
+
+jules_cli_repo() {
+    if [[ -n "${RALPH_JULES_CLI_REPO:-}" ]]; then
+        printf '%s\n' "$RALPH_JULES_CLI_REPO"
+        return 0
+    fi
+    local owner repo
+    read -r owner repo < <(jules_git_owner_repo) || true
+    [[ -n "${owner:-}" && -n "${repo:-}" ]] || return 1
+    printf '%s/%s\n' "$owner" "$repo"
+}
+
+jules_cli_extract_session_id() {
+    local output id
+    output=$(cat)
+    if command -v jq >/dev/null 2>&1 && jq -e . >/dev/null 2>&1 <<<"$output"; then
+        id=$(jq -r '
+            .sessionId
+            // .session_id
+            // .id
+            // .name
+            // .session.sessionId
+            // .session.session_id
+            // .session.id
+            // .session.name
+            // empty
+        ' <<<"$output" | head -1)
+        if [[ -n "$id" && "$id" != "null" ]]; then
+            grep -Eo '[0-9]{6,}' <<<"${id#sessions/}" | head -1
+            return 0
+        fi
+    fi
+    grep -Eo '[0-9]{6,}' <<<"$output" | head -1
+}
+
+jules_cli_write_state() {
+    local state_file="$1" session_id="$2" prompt_hash="$3" repo="$4" state="$5" mode="$6"
+    local existing now tmp
+    existing=$(jules_existing_state_json "$state_file")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    mkdir -p "$(dirname "$state_file")"
+    tmp=$(mktemp) || return 1
+    jq -n \
+        --argjson existing "$existing" \
+        --arg provider jules-cli \
+        --arg sessionId "$session_id" \
+        --arg promptHash "$prompt_hash" \
+        --arg repo "$repo" \
+        --arg state "$state" \
+        --arg mode "$mode" \
+        --arg updatedAt "$now" '
+        $existing + {
+          provider: $provider,
+          sessionId: $sessionId,
+          promptHash: $promptHash,
+          repo: (if $repo == "" then null else $repo end),
+          mode: $mode,
+          state: $state,
+          updatedAt: $updatedAt
+        }
+    ' >"$tmp" && mv "$tmp" "$state_file"
+}
+
+jules_cli_waiting_output() {
+    grep -Eiq 'not[[:space:]-]*(complete|done|ready)|still[[:space:]-]*(running|working)|in[[:space:]-]*progress|queued|pending|await'
+}
+
+jules_cli_create_session() {
+    local prompt="$1" log_file="$2" state_file="$3" prompt_hash="$4" mode="$5"
+    local repo output session_id cmd
+    repo=$(jules_cli_repo || true)
+    cmd=(jules new)
+    [[ -n "$repo" ]] && cmd+=(--repo "$repo")
+    printf 'Creating Jules CLI session repo=%s mode=%s\n' "${repo:-current}" "$mode" >>"$log_file"
+    if ! output=$(printf '%s' "$prompt" | "${cmd[@]}" 2>&1); then
+        printf 'Jules CLI create failed:\n%s\n' "$output" >>"$log_file"
+        return 1
+    fi
+    printf 'Jules CLI create output:\n%s\n' "$output" >>"$log_file"
+    session_id=$(jules_cli_extract_session_id <<<"$output")
+    if [[ -z "$session_id" ]]; then
+        log_error "Jules CLI create output did not include a parseable session ID"
+        return 1
+    fi
+    jules_cli_write_state "$state_file" "$session_id" "$prompt_hash" "$repo" "CREATED" "$mode"
+    printf '%s\n' "$session_id"
+}
+
+jules_cli_pull_session() {
+    local session_id="$1" apply="$2" log_file="$3" output rc cmd
+    cmd=(jules remote pull --session "$session_id")
+    [[ "$apply" == "1" ]] && cmd+=(--apply)
+    output=$("${cmd[@]}" 2>&1); rc=$?
+    printf 'Jules CLI pull session=%s apply=%s exit=%s\n%s\n' "$session_id" "$apply" "$rc" "$output" >>"$log_file"
+    printf '%s\n' "$output"
+    return "$rc"
+}
+
 jules_list_sources() {
     jules_api_request GET "/sources?pageSize=100"
 }
@@ -94,6 +201,55 @@ jules_resolve_source() {
         | select((.githubRepo.owner // "") == $owner and (.githubRepo.repo // "") == $repo)
         | .name
     ' <<<"$sources" | head -1
+}
+
+
+jules_source_github_owner_repo() {
+    local source="$1" rest owner repo
+    case "$source" in
+        sources/github/*/*)
+            rest="${source#sources/github/}"
+            owner="${rest%%/*}"
+            repo="${rest#*/}"
+            [[ -n "$owner" && -n "$repo" && "$repo" != "$rest" ]] || return 1
+            printf '%s %s\n' "$owner" "$repo"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+jules_branch_exists() {
+    local source="$1" branch="$2" owner repo rc
+    [[ -n "$branch" ]] || return 2
+    read -r owner repo < <(jules_source_github_owner_repo "$source") || return 2
+    command -v git >/dev/null 2>&1 || return 2
+    git ls-remote --exit-code --heads "https://github.com/${owner}/${repo}.git" "$branch" >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        2) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+jules_preflight_branch() {
+    local source="$1" branch="$2" owner repo rc
+    [[ "${RALPH_JULES_PREFLIGHT_BRANCH:-1}" != "0" ]] || return 0
+    [[ -n "$source" && -n "$branch" ]] || return 0
+    read -r owner repo < <(jules_source_github_owner_repo "$source") || return 0
+
+    jules_branch_exists "$source" "$branch"; rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1)
+            log_error "Jules starting branch '$branch' was not found for ${owner}/${repo}; set RALPH_JULES_STARTING_BRANCH to the source default branch before creating a session."
+            return 1
+            ;;
+        *)
+            log_warning "Could not preflight Jules starting branch '$branch' for ${owner}/${repo}; continuing and relying on Jules clone diagnostics."
+            return 0
+            ;;
+    esac
 }
 
 jules_create_payload() {
@@ -268,6 +424,7 @@ jules_create_or_resume_session() {
     fi
     branch="${RALPH_JULES_STARTING_BRANCH:-$(jules_git_branch)}"
     branch="${branch:-main}"
+    jules_preflight_branch "$source" "$branch" || return 1
     title="${RALPH_JULES_TITLE:-Ralph: $(basename "${PROJECT_DIR:-.}") ${RUN_ID:-manual}}"
     payload=$(jules_create_payload "$prompt" "$title" "$source" "$branch")
     printf 'Creating Jules session title=%s source=%s branch=%s mode=%s\n' "$title" "${source:-repoless}" "$branch" "$mode" >>"$log_file"
@@ -454,6 +611,70 @@ run_jules_remote() {
         printf 'Jules remote session completed in PR mode.\n'
         printf 'Session: %s\nState: COMPLETED\n' "$session_name"
         [[ -n "$pr" ]] && printf 'Pull request: %s\n' "$pr"
+        printf '<promise>COMPLETE</promise>\n'
+    } >"$output_file"
+    return 0
+}
+
+run_jules_cli_remote() {
+    local _tool="$1" _model="$2" prompt="$3" log_file="$4" output_file="$5"
+    local state_file mode prompt_hash existing session_id repo apply pull_output pull_rc
+    state_file=$(jules_cli_state_file)
+    mode="${RALPH_JULES_CLI_MODE:-apply}"
+    case "$mode" in apply|pull) ;; *) log_error "Invalid RALPH_JULES_CLI_MODE '$mode' (expected apply or pull)"; return 1 ;; esac
+    prompt_hash=$(jules_prompt_hash "$prompt")
+
+    if ! command -v jules >/dev/null 2>&1; then
+        log_error "tool=jules-cli requested, but the jules CLI is not installed"
+        return 127
+    fi
+
+    existing=$(jules_existing_state_json "$state_file")
+    session_id=$(jq -r '.sessionId // empty' <<<"$existing")
+    repo=$(jq -r '.repo // empty' <<<"$existing")
+
+    if [[ -z "$session_id" ]]; then
+        session_id=$(jules_cli_create_session "$prompt" "$log_file" "$state_file" "$prompt_hash" "$mode") || return 1
+        jules_remote_progress "CREATED" "jules-cli:$session_id"
+        {
+            printf 'Jules CLI remote session created.\n'
+            printf 'Session: %s\nState: CREATED\n' "$session_id"
+            printf 'Run Ralph again with --resume, or allow another iteration, to pull and apply completed results.\n'
+        } >"$output_file"
+        return 0
+    fi
+
+    [[ "$mode" == "apply" ]] && apply=1 || apply=0
+    pull_rc=0
+    pull_output=$(jules_cli_pull_session "$session_id" "$apply" "$log_file") || pull_rc=$?
+    repo=$(jq -r '.repo // empty' "$state_file" 2>/dev/null)
+
+    if [[ "$pull_rc" -ne 0 ]]; then
+        if jules_cli_waiting_output <<<"$pull_output"; then
+            jules_cli_write_state "$state_file" "$session_id" "$prompt_hash" "$repo" "IN_PROGRESS" "$mode"
+            jules_remote_progress "IN_PROGRESS" "jules-cli:$session_id"
+            {
+                printf 'Jules CLI remote session is still running.\n'
+                printf 'Session: %s\nState: IN_PROGRESS\n' "$session_id"
+                printf '%s\n' "$pull_output" | tail -20
+            } >"$output_file"
+            return 0
+        fi
+        printf '%s\n' "$pull_output" >"$output_file"
+        return "$pull_rc"
+    fi
+
+    jules_cli_write_state "$state_file" "$session_id" "$prompt_hash" "$repo" "COMPLETED" "$mode"
+    if [[ "$mode" == "apply" ]]; then
+        local tmp
+        tmp=$(mktemp) || return 1
+        jq '.patchApplied = true' "$state_file" >"$tmp" && mv "$tmp" "$state_file"
+    fi
+    jules_remote_progress "COMPLETED" "jules-cli:$session_id"
+    {
+        printf 'Jules CLI remote session completed.\n'
+        printf 'Session: %s\nState: COMPLETED\n' "$session_id"
+        printf '%s\n' "$pull_output"
         printf '<promise>COMPLETE</promise>\n'
     } >"$output_file"
     return 0

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016  # $vars in the single-quoted GraphQL queries are GraphQL variables, not shell
-# resolve-thread — reply to (optional) and mark a PR review thread resolved, by thread ID.
-# Pair with `pr-status` (which prints the thread IDs) to close out a review loop cheaply.
-#
-# Usage: scripts/resolve-thread <threadId> [reply text]
+# shellcheck disable=SC2016
+# resolve-thread - reply to (optional) and mark a PR review thread resolved, by thread ID.
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/github.sh
+# shellcheck disable=SC1091
+source "$script_dir/../lib/github.sh"
 id="${1:?usage: resolve-thread <threadId> [reply]}"
 reply="${2:-}"
 if [[ -n "$reply" ]]; then
-  gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' \
-    -f id="$id" -f b="$reply" >/dev/null
+  ralph_gh_or_exit "replying to review thread $id" gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply" >/dev/null
 fi
-gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
-  -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"'
+out=$(ralph_gh_or_exit "resolving review thread $id" gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"')
+printf '%s\n' "$out"

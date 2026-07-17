@@ -1,0 +1,6 @@
+#!/bin/bash
+# Compatibility wrapper for the historical resq-software systemd installer name.
+set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export RALPH_ORG="${RALPH_ORG:-resq-software}"
+exec "$script_dir/org-install-systemd" "$@"

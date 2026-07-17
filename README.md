@@ -6,7 +6,7 @@ Use Ralph when you want an agent to keep working from a persistent plan instead 
 
 ## What Ralph Does
 
-- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, and GitHub Copilot.
+- Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, `jules-cli`, and GitHub Copilot.
 - Grounds each iteration in project instructions, Beads task state, run artifacts, git context, and optional extra context files.
 - Detects lazy/no-op iterations and repeated loop signatures, then injects corrective prompts.
 - Stores recurring problems as signals and promotes proven fixes into guarded skills.
@@ -129,7 +129,8 @@ Each cycle injects both signals in seeded random order, resumes from the prior c
 ./ralph.sh                         # default tool
 ./ralph.sh --tool opencode         # choose a tool
 ./ralph.sh --tool codex            # OpenAI Codex via `codex exec`
-./ralph.sh --tool jules            # Jules remote executor; requires JULES_API_KEY and a connected source
+./ralph.sh --tool jules            # Jules REST remote executor; requires JULES_API_KEY and a connected source
+./ralph.sh --tool jules-cli        # Jules CLI remote executor; uses existing `jules login` OAuth state
 ./ralph.sh --model "provider/id"   # pin a model
 ./ralph.sh --max-iterations 20     # change loop limit
 ./ralph.sh --resume                # resume from checkpoint
@@ -153,6 +154,7 @@ Supported AI tools:
 | `agy` | Google Antigravity CLI. |
 | `codex` | OpenAI Codex CLI, executed in sandboxed mode. |
 | `jules` | Asynchronous Jules REST executor. PR mode creates/records a remote PR; patch mode applies returned diffs locally. |
+| `jules-cli` | Asynchronous Jules CLI executor. Uses the authenticated local `jules` CLI, persists the remote session ID, and pulls/applies completed results. |
 | `copilot` | Available through the Copilot subcommands below. |
 
 ### Copilot
@@ -224,6 +226,19 @@ It can also prepare opt-in fixes:
 
 Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches. Untrusted GitHub content (PR review comments, CI logs, code-scanning descriptions) is fenced as data before it enters any prompt, and self-triage can never rewrite Ralph's own control surface (`lib/`, `ralph.sh`, `scripts/`, config/allowlist).
 
+
+### Public Org Patrol
+
+Ralph can run a scheduled local patrol for any GitHub org that the authenticated `gh` user can read. The patrol refreshes a public repo allowlist, checks Synapse, and runs GitHub triage:
+
+```bash
+scripts/org-public-targets --org <github-org>
+scripts/org-patrol --org <github-org> --mode report
+scripts/org-install-systemd install --org <github-org> --interval 30min
+```
+
+Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Local trusted-header Synapse mode is safe only on loopback (`127.0.0.1`/`::1`); before binding Synapse to `0.0.0.0` or another non-loopback interface, configure `AUTH_JWT_SECRET`, `AUTH_JWT_PUBLIC_KEY`, or `AUTH_JWKS_URL`, set Ralph's `SYNAPSE_TOKEN`, and run `./ralph.sh synapse auth-check`. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
+
 ## Task Management
 
 Ralph uses Beads through the `bd` CLI for dependency-aware work queues. Dolt is optional for time-travel task history.
@@ -262,7 +277,7 @@ Common environment variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, or `jules`. |
+| `TOOL` | AI tool: `opencode`, `claude`, `amp`, `agy`, `codex`, `ollama`, `ollama-agent`, `jules`, or `jules-cli`. |
 | `RALPH_ROLE` | Routing role: `planner`, `engineer`, `tester`, or `thinker`. |
 | `AGENTS_FILE` | Explicit instruction file override. |
 | `SELECTED_MODEL` | Specific model to pin. |
@@ -284,6 +299,9 @@ Common environment variables:
 | `RALPH_MAX_BUDGET_USD` | Claude per-call spend cap. |
 | `RALPH_MODEL_FALLBACKS` | Ordered fallback model list. |
 | `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
+| `RALPH_LOCAL_MODEL_RETRY_ATTEMPTS` | Retry attempts per local model before downshifting, default `1` to avoid repeated long Ollama stalls. |
+| `RALPH_OLLAMA_DOWNSHIFT_MODELS` / `RALPH_OLLAMA_DOWNSHIFT_LIMIT` | Ordered cheaper Ollama fallback models and max automatic downshift candidates, default limit `2`. |
+| `RALPH_OLLAMA_MAX_BYTES` | Optional size cap for automatic Ollama model selection on constrained machines. |
 | `RALPH_PREFER_LOCAL` | Local-first behavior: `auto`, `1`, or `0`. |
 | `LAZY_THRESHOLD` | No-change iterations before a reflexion nudge. |
 | `RALPH_MAX_LAZY_STREAK` | No-progress iterations before the run hard-aborts (stall ceiling), default `5`; `0` disables. Keep `> LAZY_THRESHOLD` so the nudge fires first. |
@@ -306,10 +324,19 @@ Common environment variables:
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
+| `SYNAPSE_ENABLED` | Set to `1` to retrieve bounded Synapse context during each main iteration and inject it into the prompt; failures are fail-open. |
+| `SYNAPSE_URL` / `SYNAPSE_TENANT` / `SYNAPSE_PRINCIPAL` | Synapse endpoint and identity used by the optional grounding hook and `ralph synapse` commands. |
+| `SYNAPSE_TOKEN` | Bearer JWT sent by Ralph callers when Synapse verifies JWT auth. |
+| `BIND_ADDR` / `SYNAPSE_BIND_ADDR` | Synapse bind address for operator checks. Non-loopback binds require verified JWT config. |
+| `AUTH_JWT_SECRET` / `AUTH_JWT_PUBLIC_KEY` / `AUTH_JWKS_URL` | Synapse JWT verification configuration; required before exposing Synapse beyond loopback. |
+| `SYNAPSE_GROUND_TOPK` / `SYNAPSE_GROUND_PROMPT_CHARS` | Bound in-loop Synapse retrieval result count and prompt-instruction excerpt size. |
 | `JULES_API_KEY` | Jules REST API key, required for `TOOL=jules`; keep it in the environment or a secret store. |
+| `RALPH_JULES_CLI_REPO` | Optional `owner/repo` override for `TOOL=jules-cli`; otherwise Ralph derives the GitHub repo from `origin`. |
+| `RALPH_JULES_CLI_MODE` | `apply` (default) runs `jules remote pull --apply`; `pull` records completed output without applying it. |
 | `RALPH_JULES_SOURCE` | Jules source resource such as `sources/github-owner-repo`; if unset, Ralph tries to match the GitHub `origin` against connected Jules sources. |
 | `RALPH_JULES_MODE` | Jules completion mode: `pr` (default, records remote PR output) or `patch` (applies returned `changeSet.gitPatch` locally). |
 | `RALPH_JULES_STARTING_BRANCH` | Branch Jules should start from; defaults to the current Git branch, then `main`. |
+| `RALPH_JULES_PREFLIGHT_BRANCH` | Set to `0` to disable the GitHub branch preflight before creating a Jules REST session; confirmed missing branches fail before session creation. |
 | `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
 | `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |

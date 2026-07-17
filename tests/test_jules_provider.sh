@@ -24,14 +24,35 @@ mkdir -p "$PROJECT_DIR" "$RUN_DIR"
 
 echo "== tool wiring =="
 _ralph_is_valid_tool jules && ok "jules is a valid tool" || bad "jules rejected as tool"
+_ralph_is_valid_tool jules-cli && ok "jules-cli is a valid tool" || bad "jules-cli rejected as tool"
 eq "jules resolves empty model" "" "$(resolve_model_for_tool jules engineer)"
+eq "jules-cli resolves empty model" "" "$(resolve_model_for_tool jules-cli engineer)"
 _build_ai_cmd jules "" >/dev/null 2>&1; eq "jules stays out of local command builder" 1 "$?"
+_build_ai_cmd jules-cli "" >/dev/null 2>&1; eq "jules-cli stays out of local command builder" 1 "$?"
+
+CHECK_LOG="$TMP/dependency-checks.log"; : > "$CHECK_LOG"
+(
+    command_exists() { printf '%s\n' "$1" >> "$CHECK_LOG"; return 0; }
+    TOOL=jules-cli check_dependencies >/dev/null 2>&1
+); rc=$?
+eq "jules-cli dependency check succeeds with stubbed deps" 0 "$rc"
+grep -qx 'jules' "$CHECK_LOG" && ok "jules-cli requires jules binary" || bad "jules-cli did not require jules binary"
+! grep -qx 'jules-cli' "$CHECK_LOG" && ok "jules-cli does not require same-named binary" || bad "jules-cli incorrectly required jules-cli binary"
+
+echo "== Jules CLI session id parsing =="
+eq "jules-cli parses structured sessionId" "515151" "$(printf '{"sessionId":"515151","state":"CREATED"}\n' | jules_cli_extract_session_id)"
+eq "jules-cli parses structured session name" "626262" "$(printf '{"session":{"name":"sessions/626262"}}\n' | jules_cli_extract_session_id)"
+eq "jules-cli falls back to human output" "424242" "$(printf 'Created Jules session 424242 for owner/repo\n' | jules_cli_extract_session_id)"
 
 echo "== run_ai_tool dispatch =="
 run_jules_remote() { printf 'stub remote\n' > "$5"; return 0; }
+run_jules_cli_remote() { printf 'stub cli remote\n' > "$5"; return 0; }
 iteration=1 MAX_ITERATIONS=1 run_ai_tool jules "" "prompt" "$TMP/dispatch.log" "$TMP/dispatch.out"; rc=$?
 eq "run_ai_tool dispatches jules provider" 0 "$rc"
 eq "dispatch writes provider output" "stub remote" "$(tr -d '\n' < "$TMP/dispatch.out")"
+iteration=1 MAX_ITERATIONS=1 run_ai_tool jules-cli "" "prompt" "$TMP/dispatch-cli.log" "$TMP/dispatch-cli.out"; rc=$?
+eq "run_ai_tool dispatches jules-cli provider" 0 "$rc"
+eq "dispatch writes cli provider output" "stub cli remote" "$(tr -d '\n' < "$TMP/dispatch-cli.out")"
 # Restore the real provider functions after the dispatch probe.
 # shellcheck disable=SC1090
 source "$R/lib/jules.sh"
@@ -43,6 +64,25 @@ jq -e '.automationMode == "AUTO_CREATE_PR"' <<<"$payload" >/dev/null && ok "PR m
 export RALPH_JULES_MODE=patch
 payload=$(jules_create_payload "do work" "title" "$RALPH_JULES_SOURCE" main)
 jq -e 'has("automationMode") | not' <<<"$payload" >/dev/null && ok "patch mode omits AUTO_CREATE_PR" || bad "patch mode unexpectedly created PR"
+
+echo "== Jules branch preflight =="
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
+export RALPH_JULES_MODE=pr RALPH_JULES_SOURCE="sources/github/owner/repo" RALPH_JULES_STARTING_BRANCH=missing
+CALL_LOG="$TMP/calls-branch-preflight.log"; : > "$CALL_LOG"
+jules_branch_exists() { printf 'branch-check %s %s\n' "$1" "$2" >> "$CALL_LOG"; return 1; }
+jules_api_request() { printf '%s %s\n' "$1" "$2" >> "$CALL_LOG"; return 9; }
+log="$TMP/preflight.log"; out="$TMP/preflight.out"; err="$TMP/preflight.err"; : > "$log"; : > "$out"; : > "$err"
+run_jules_remote jules "" "branch missing" "$log" "$out" 2>"$err"; rc=$?
+eq "missing Jules branch fails before session creation" 1 "$rc"
+grep -q 'branch-check sources/github/owner/repo missing' "$CALL_LOG" && ok "branch preflight checked source branch" || bad "branch preflight did not run"
+! grep -q '^POST /sessions$' "$CALL_LOG" && ok "missing branch does not create Jules session" || bad "missing branch still created session"
+grep -q "starting branch 'missing'" "$err" && ok "branch mismatch diagnostic is explicit" || bad "branch mismatch diagnostic missing: $(cat "$err")"
+unset -f jules_branch_exists
+# Restore the real provider helpers after the preflight stub.
+# shellcheck disable=SC1090
+source "$R/lib/jules.sh"
+unset RALPH_JULES_STARTING_BRANCH
+export RALPH_JULES_SOURCE="sources/github-owner-repo"
 
 echo "== PR mode creates once and resumes existing session =="
 export RALPH_JULES_MODE=pr
@@ -127,6 +167,79 @@ eq "patch mode run succeeds" 0 "$rc"
 eq "patch changed file locally" "new" "$(tr -d '\n' < "$PROJECT_DIR/app.txt")"
 eq "state marks patch applied" true "$(jq -r '.patchApplied' "$(jules_state_file)")"
 grep -q "Suggested commit: Update app text" "$out" && ok "suggested commit surfaced" || bad "suggested commit missing"
+
+
+echo "== Jules CLI mode creates once, waits, then pulls/apply =="
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR" "$TMP/bin"
+cat > "$TMP/bin/jules" <<'SH'
+#!/bin/sh
+set -eu
+case "$1 $2" in
+  "new --repo")
+    repo="$3"
+    prompt=$(cat)
+    printf 'new repo=%s prompt=%s\n' "$repo" "$prompt" >> "$JULES_STUB_LOG"
+    if [ "${JULES_CREATE_MODE:-human}" = "json" ]; then
+      printf '{"sessionId":"515151","state":"CREATED","repo":"%s"}\n' "$repo"
+    else
+      printf 'Created Jules session 424242 for %s\n' "$repo"
+    fi
+    ;;
+  "remote pull")
+    shift 2
+    session=""; apply=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --session) session="$2"; shift 2 ;;
+        --apply) apply=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    printf 'pull session=%s apply=%s\n' "$session" "$apply" >> "$JULES_STUB_LOG"
+    case "${JULES_STUB_PULL:-success}" in
+      waiting) printf 'Session %s is still running\n' "$session"; exit 1 ;;
+      success) printf 'Applied result for session %s\n' "$session" ;;
+      fail) printf 'authentication failed\n'; exit 2 ;;
+    esac
+    ;;
+  *)
+    printf 'unexpected jules args: %s\n' "$*" >&2
+    exit 9
+    ;;
+esac
+SH
+chmod +x "$TMP/bin/jules"
+export PATH="$TMP/bin:$PATH" JULES_STUB_LOG="$TMP/jules-cli.log" RALPH_JULES_CLI_REPO="owner/repo" RALPH_JULES_CLI_MODE=apply
+: > "$JULES_STUB_LOG"
+log="$TMP/cli.log"; out="$TMP/cli.out"; : > "$log"; : > "$out"
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli create succeeds" 0 "$rc"
+eq "jules-cli state stores session" "424242" "$(jq -r '.sessionId' "$(jules_cli_state_file)")"
+eq "jules-cli state provider" "jules-cli" "$(jq -r '.provider' "$(jules_cli_state_file)")"
+grep -q 'new repo=owner/repo prompt=build via cli' "$JULES_STUB_LOG" && ok "jules-cli pipes prompt to new" || bad "jules-cli new did not receive prompt"
+grep -q 'State: CREATED' "$out" && ok "jules-cli create output marks created" || bad "jules-cli create output missing state"
+eq "jules-cli create remote progress" 1 "${_RALPH_REMOTE_PROGRESS:-0}"
+
+rm -f "$(jules_cli_state_file)"
+export JULES_CREATE_MODE=json
+run_jules_cli_remote jules-cli "" "build via cli json" "$log" "$out"; rc=$?
+eq "jules-cli create parses structured fixture" 0 "$rc"
+eq "jules-cli structured state stores session" "515151" "$(jq -r '.sessionId' "$(jules_cli_state_file)")"
+export JULES_CREATE_MODE=human
+
+export JULES_STUB_PULL=waiting
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli waiting pull returns progress" 0 "$rc"
+eq "jules-cli waiting state" "IN_PROGRESS" "$(jq -r '.state' "$(jules_cli_state_file)")"
+grep -q 'Session 515151 is still running' "$out" && ok "jules-cli waiting output surfaced" || bad "jules-cli waiting output missing"
+
+export JULES_STUB_PULL=success
+run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
+eq "jules-cli completed pull succeeds" 0 "$rc"
+eq "jules-cli completed state" "COMPLETED" "$(jq -r '.state' "$(jules_cli_state_file)")"
+eq "jules-cli apply marks patchApplied" true "$(jq -r '.patchApplied' "$(jules_cli_state_file)")"
+grep -q '<promise>COMPLETE</promise>' "$out" && ok "jules-cli completed emits promise" || bad "jules-cli completion promise missing"
+grep -q 'pull session=515151 apply=1' "$JULES_STUB_LOG" && ok "jules-cli pull uses --apply" || bad "jules-cli pull did not apply"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
