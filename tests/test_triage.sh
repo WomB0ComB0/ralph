@@ -140,6 +140,71 @@ printf '%s' "$sg" | grep -q 'GitHub scan incomplete; preserving existing issue s
 [[ ! -s "$GHLOG" ]] && ok "incomplete suggest does not call gh issue APIs" || bad "incomplete suggest called gh: $(cat "$GHLOG")"
 unset -f triage_scan_repo gh
 
+GHLOG="$TMP/ghcalls-issue-list-503"; : > "$GHLOG"
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;;
+        issue\ create*|issue\ edit*|issue\ comment*) return 42 ;;
+        *) printf '\n' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1); rc=$?
+eq "suggest apply skips transient issue lookup outage" "0" "$rc"
+printf '%s' "$sg" | grep -q 'issue lookup incomplete; preserving existing issue state' && ok "transient issue lookup preserves state" || bad "missing issue lookup warning: $sg"
+if printf '%s\n' "$(cat "$GHLOG")" | grep -Eq 'issue (create|edit|comment|view)'; then bad "issue lookup outage still mutated issue: $(cat "$GHLOG")"; else ok "issue lookup outage does not mutate issues"; fi
+unset -f triage_scan_repo gh
+
+GHLOG="$TMP/ghcalls-issue-view-504"; : > "$GHLOG"
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '42\n' ;;
+        issue\ view*) echo "HTTP 504: Gateway Timeout" >&2; return 1 ;;
+        issue\ edit*|issue\ comment*) return 42 ;;
+        *) printf '\n' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1); rc=$?
+eq "suggest apply skips transient issue view outage" "0" "$rc"
+printf '%s' "$sg" | grep -q 'issue read incomplete; preserving existing issue state' && ok "transient issue view preserves state" || bad "missing issue view warning: $sg"
+if printf '%s\n' "$(cat "$GHLOG")" | grep -Eq 'issue (edit|comment) 42'; then bad "issue view outage still edited/commented: $(cat "$GHLOG")"; else ok "issue view outage does not mutate existing issue"; fi
+unset -f triage_scan_repo gh
+
+GHLOG="$TMP/ghcalls-create-503"; : > "$GHLOG"
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '\n' ;;
+        issue\ create*) echo "connection reset by peer" >&2; return 1 ;;
+        *) printf '\n' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1); rc=$?
+eq "suggest apply defers transient issue create outage" "0" "$rc"
+printf '%s' "$sg" | grep -q 'deferred triage issue create due to transient GitHub failure' && ok "transient issue create is deferred" || bad "missing create defer warning: $sg"
+unset -f triage_scan_repo gh
+
+GHLOG="$TMP/ghcalls-clean-edit-503"; : > "$GHLOG"
+triage_scan_repo() { :; }
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) printf '42\n' ;;
+        issue\ edit*) echo "HTTP 502: Bad Gateway" >&2; return 1 ;;
+        issue\ close*) return 42 ;;
+        *) printf '\n' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1); rc=$?
+eq "suggest apply defers transient clean edit outage" "0" "$rc"
+printf '%s' "$sg" | grep -q 'clean-close sync: GitHub issue edit incomplete; preserving existing issue state' && ok "transient clean edit preserves state" || bad "missing clean edit warning: $sg"
+if printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue close 42'; then bad "clean edit outage still closed issue: $(cat "$GHLOG")"; else ok "clean edit outage does not close issue"; fi
+unset -f triage_scan_repo gh
+
 GHLOG="$TMP/ghcalls-disabled"; : > "$GHLOG"
 triage_scan_repo() {
     printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'

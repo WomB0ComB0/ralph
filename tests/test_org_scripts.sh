@@ -16,6 +16,10 @@ cat > "$TMP/bin/gh" <<'SH'
 #!/bin/sh
 if [ "$1 $2" = "repo list" ]; then
   org="$3"
+  if [ "$org" = "outage-org" ]; then
+    printf 'HTTP 503: Service Unavailable\n' >&2
+    exit 1
+  fi
   case "$org" in demo-org|resq-software|other-org) ;; *) printf 'unexpected org: %s\n' "$org" >&2; exit 9 ;; esac
   cat <<JSON
 [
@@ -55,6 +59,13 @@ eq "filters active public repos and dedupes for any org" "demo-org/live" "$out"
 "$R/scripts/org-public-targets" --org demo-org --include-archived --write "$TMP/targets" >/dev/null
 eq "--write creates target file" $'demo-org/live\ndemo-org/archived' "$(cat "$TMP/targets")"
 "$R/scripts/org-public-targets" --limit nope >/dev/null 2>&1 && bad "invalid limit accepted" || ok "invalid limit rejected"
+printf 'outage-org/cached\n' > "$TMP/cached.targets"
+out=$("$R/scripts/org-public-targets" --org outage-org --write "$TMP/cached.targets" 2>"$TMP/outage.err"); rc=$?
+eq "transient org discovery outage reuses cached targets" 0 "$rc"
+eq "cached targets are printed during discovery outage" "outage-org/cached" "$out"
+eq "cached targets are not overwritten by discovery outage" "outage-org/cached" "$(cat "$TMP/cached.targets")"
+grep -q 'reusing cached targets' "$TMP/outage.err" && ok "discovery outage warns about cached targets" || bad "missing cached-target warning: $(cat "$TMP/outage.err")"
+"$R/scripts/org-public-targets" --org outage-org --write "$TMP/missing.targets" >/dev/null 2>&1 && bad "uncached discovery outage accepted" || ok "uncached discovery outage fails closed"
 RALPH_ORG=other-org "$R/scripts/org-public-targets" >/dev/null 2>&1 && ok "RALPH_ORG can supply org" || bad "RALPH_ORG did not supply org"
 "$R/scripts/org-public-targets" >/dev/null 2>&1 && bad "missing org accepted" || ok "missing org rejected"
 out=$("$R/scripts/resq-public-targets")
