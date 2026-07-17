@@ -203,6 +203,55 @@ jules_resolve_source() {
     ' <<<"$sources" | head -1
 }
 
+
+jules_source_github_owner_repo() {
+    local source="$1" rest owner repo
+    case "$source" in
+        sources/github/*/*)
+            rest="${source#sources/github/}"
+            owner="${rest%%/*}"
+            repo="${rest#*/}"
+            [[ -n "$owner" && -n "$repo" && "$repo" != "$rest" ]] || return 1
+            printf '%s %s\n' "$owner" "$repo"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+jules_branch_exists() {
+    local source="$1" branch="$2" owner repo rc
+    [[ -n "$branch" ]] || return 2
+    read -r owner repo < <(jules_source_github_owner_repo "$source") || return 2
+    command -v git >/dev/null 2>&1 || return 2
+    git ls-remote --exit-code --heads "https://github.com/${owner}/${repo}.git" "$branch" >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        2) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+jules_preflight_branch() {
+    local source="$1" branch="$2" owner repo rc
+    [[ "${RALPH_JULES_PREFLIGHT_BRANCH:-1}" != "0" ]] || return 0
+    [[ -n "$source" && -n "$branch" ]] || return 0
+    read -r owner repo < <(jules_source_github_owner_repo "$source") || return 0
+
+    jules_branch_exists "$source" "$branch"; rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1)
+            log_error "Jules starting branch '$branch' was not found for ${owner}/${repo}; set RALPH_JULES_STARTING_BRANCH to the source default branch before creating a session."
+            return 1
+            ;;
+        *)
+            log_warning "Could not preflight Jules starting branch '$branch' for ${owner}/${repo}; continuing and relying on Jules clone diagnostics."
+            return 0
+            ;;
+    esac
+}
+
 jules_create_payload() {
     local prompt="$1" title="$2" source="$3" branch="$4" mode="${RALPH_JULES_MODE:-pr}"
     local require auto_pr
@@ -375,6 +424,7 @@ jules_create_or_resume_session() {
     fi
     branch="${RALPH_JULES_STARTING_BRANCH:-$(jules_git_branch)}"
     branch="${branch:-main}"
+    jules_preflight_branch "$source" "$branch" || return 1
     title="${RALPH_JULES_TITLE:-Ralph: $(basename "${PROJECT_DIR:-.}") ${RUN_ID:-manual}}"
     payload=$(jules_create_payload "$prompt" "$title" "$source" "$branch")
     printf 'Creating Jules session title=%s source=%s branch=%s mode=%s\n' "$title" "${source:-repoless}" "$branch" "$mode" >>"$log_file"
