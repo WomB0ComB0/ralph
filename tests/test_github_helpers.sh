@@ -18,6 +18,7 @@ source "$R/lib/github.sh"
 echo "== lib/github.sh transient classification =="
 ralph_github_is_transient_error "HTTP 503: Service Unavailable" && ok "503 is transient" || bad "503 not transient"
 ralph_github_is_transient_error "could not resolve host github.com" && ok "DNS failure is transient" || bad "DNS failure not transient"
+ralph_github_is_transient_error "error connecting to api.github.com" && ok "gh connection failure is transient" || bad "gh connection failure not transient"
 if ralph_github_is_transient_error "GraphQL: Field does not exist"; then bad "schema/user error classified as transient"; else ok "schema/user error is not transient"; fi
 non_transient_cmd() { printf 'GraphQL: Field does not exist\n' >&2; return 42; }
 out=$(ralph_gh_capture non_transient_cmd); rc=$?

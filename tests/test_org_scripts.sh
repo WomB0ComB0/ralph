@@ -20,6 +20,10 @@ if [ "$1 $2" = "repo list" ]; then
     printf 'HTTP 503: Service Unavailable\n' >&2
     exit 1
   fi
+  if [ "$org" = "connect-org" ]; then
+    printf 'error connecting to api.github.com\n' >&2
+    exit 1
+  fi
   case "$org" in demo-org|resq-software|other-org) ;; *) printf 'unexpected org: %s\n' "$org" >&2; exit 9 ;; esac
   cat <<JSON
 [
@@ -65,6 +69,11 @@ eq "transient org discovery outage reuses cached targets" 0 "$rc"
 eq "cached targets are printed during discovery outage" "outage-org/cached" "$out"
 eq "cached targets are not overwritten by discovery outage" "outage-org/cached" "$(cat "$TMP/cached.targets")"
 grep -q 'reusing cached targets' "$TMP/outage.err" && ok "discovery outage warns about cached targets" || bad "missing cached-target warning: $(cat "$TMP/outage.err")"
+printf 'connect-org/cached\n' > "$TMP/connect.targets"
+out=$("$R/scripts/org-public-targets" --org connect-org --write "$TMP/connect.targets" 2>"$TMP/connect.err"); rc=$?
+eq "gh connection outage reuses cached targets" 0 "$rc"
+eq "connection outage prints cached targets" "connect-org/cached" "$out"
+grep -q 'reusing cached targets' "$TMP/connect.err" && ok "connection outage warns about cached targets" || bad "missing connection cached warning: $(cat "$TMP/connect.err")"
 "$R/scripts/org-public-targets" --org outage-org --write "$TMP/missing.targets" >/dev/null 2>&1 && bad "uncached discovery outage accepted" || ok "uncached discovery outage fails closed"
 RALPH_ORG=other-org "$R/scripts/org-public-targets" >/dev/null 2>&1 && ok "RALPH_ORG can supply org" || bad "RALPH_ORG did not supply org"
 "$R/scripts/org-public-targets" >/dev/null 2>&1 && bad "missing org accepted" || ok "missing org rejected"

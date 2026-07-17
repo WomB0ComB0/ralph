@@ -4,7 +4,7 @@
 ralph_github_is_transient_error() {
     local msg="${1,,}"
     case "$msg" in
-        *"http 5"*|*"status 5"*|*"503"*|*"502"*|*"504"*|*"service unavailable"*|*"bad gateway"*|*"gateway timeout"*|*"rate limit"*|*"secondary rate"*|*"timeout"*|*"timed out"*|*"tls"*|*"connection reset"*|*"connection refused"*|*"could not resolve"*|*"network"*|*"eof"*)
+        *"http 5"*|*"status 5"*|*"503"*|*"502"*|*"504"*|*"service unavailable"*|*"bad gateway"*|*"gateway timeout"*|*"rate limit"*|*"secondary rate"*|*"timeout"*|*"timed out"*|*"tls"*|*"connection reset"*|*"connection refused"*|*"connection failed"*|*"connection error"*|*"failed to connect"*|*"error connecting to"*|*"could not resolve"*|*"network"*|*"eof"*)
             return 0 ;;
         *)
             return 1 ;;
