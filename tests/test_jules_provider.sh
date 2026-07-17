@@ -65,6 +65,25 @@ export RALPH_JULES_MODE=patch
 payload=$(jules_create_payload "do work" "title" "$RALPH_JULES_SOURCE" main)
 jq -e 'has("automationMode") | not' <<<"$payload" >/dev/null && ok "patch mode omits AUTO_CREATE_PR" || bad "patch mode unexpectedly created PR"
 
+echo "== Jules branch preflight =="
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
+export RALPH_JULES_MODE=pr RALPH_JULES_SOURCE="sources/github/owner/repo" RALPH_JULES_STARTING_BRANCH=missing
+CALL_LOG="$TMP/calls-branch-preflight.log"; : > "$CALL_LOG"
+jules_branch_exists() { printf 'branch-check %s %s\n' "$1" "$2" >> "$CALL_LOG"; return 1; }
+jules_api_request() { printf '%s %s\n' "$1" "$2" >> "$CALL_LOG"; return 9; }
+log="$TMP/preflight.log"; out="$TMP/preflight.out"; err="$TMP/preflight.err"; : > "$log"; : > "$out"; : > "$err"
+run_jules_remote jules "" "branch missing" "$log" "$out" 2>"$err"; rc=$?
+eq "missing Jules branch fails before session creation" 1 "$rc"
+grep -q 'branch-check sources/github/owner/repo missing' "$CALL_LOG" && ok "branch preflight checked source branch" || bad "branch preflight did not run"
+! grep -q '^POST /sessions$' "$CALL_LOG" && ok "missing branch does not create Jules session" || bad "missing branch still created session"
+grep -q "starting branch 'missing'" "$err" && ok "branch mismatch diagnostic is explicit" || bad "branch mismatch diagnostic missing: $(cat "$err")"
+unset -f jules_branch_exists
+# Restore the real provider helpers after the preflight stub.
+# shellcheck disable=SC1090
+source "$R/lib/jules.sh"
+unset RALPH_JULES_STARTING_BRANCH
+export RALPH_JULES_SOURCE="sources/github-owner-repo"
+
 echo "== PR mode creates once and resumes existing session =="
 export RALPH_JULES_MODE=pr
 CALL_LOG="$TMP/calls-pr.log"; CREATE_BODY="$TMP/create-pr.json"; : > "$CALL_LOG"
