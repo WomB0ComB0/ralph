@@ -123,17 +123,51 @@ _triage_parse_alerts() {
                 | "high\t\($r)\tsecret\t\((.secret_type_display_name // .secret_type // "leaked secret"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
     esac
 }
+_triage_is_transient_gh_error() {
+    local msg="${1,,}"
+    case "$msg" in
+        *"http 5"*|*"status 5"*|*"503"*|*"502"*|*"504"*|*"service unavailable"*|*"bad gateway"*|*"gateway timeout"*|*"rate limit"*|*"secondary rate"*|*"timeout"*|*"timed out"*|*"tls"*|*"connection reset"*|*"connection refused"*|*"could not resolve"*|*"network"*|*"eof"*)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+_triage_gh_json_or_incomplete() {
+    local label="$1" repo="$2" fallback="$3"
+    shift 3
+    local out
+    if out=$("$@" 2>&1); then
+        printf '%s' "$out"
+        return 0
+    fi
+    if _triage_is_transient_gh_error "$out"; then
+        log_warning "[$repo] incomplete triage scan: transient GitHub failure while reading $label: $out"
+        return 75
+    fi
+    printf '%s' "$fallback"
+    return 0
+}
 
 # Read-only scan of ONE repo: failing CI + the three security-alert feeds. Each gh call is
 # guarded — a missing scope, disabled feature, or unknown repo just yields no findings.
 triage_scan_repo() {
-    local repo="$1" ci_limit="${RALPH_TRIAGE_CI_LIMIT:-5}"
-    gh run list --repo "$repo" --status failure --limit "$ci_limit" --json name,headBranch,url 2>/dev/null \
-        | _triage_parse_runs "$repo"
-    gh api "repos/$repo/dependabot/alerts?state=open&per_page=30"      2>/dev/null | _triage_parse_alerts "$repo" dependabot
-    gh api "repos/$repo/code-scanning/alerts?state=open&per_page=30"   2>/dev/null | _triage_parse_alerts "$repo" code-scanning
-    gh api "repos/$repo/secret-scanning/alerts?state=open&per_page=30" 2>/dev/null | _triage_parse_alerts "$repo" secret-scanning
-    return 0
+    local repo="$1" ci_limit="${RALPH_TRIAGE_CI_LIMIT:-5}" rc=0 out
+    out=$(_triage_gh_json_or_incomplete "workflow runs" "$repo" "[]"         gh run list --repo "$repo" --status failure --limit "$ci_limit" --json name,headBranch,url) || rc=$?
+    printf '%s' "$out" | _triage_parse_runs "$repo"
+    [[ "$rc" -ne 0 ]] && return "$rc"
+
+    out=$(_triage_gh_json_or_incomplete "Dependabot alerts" "$repo" "[]"         gh api "repos/$repo/dependabot/alerts?state=open&per_page=30") || rc=$?
+    printf '%s' "$out" | _triage_parse_alerts "$repo" dependabot
+    [[ "$rc" -ne 0 ]] && return "$rc"
+
+    out=$(_triage_gh_json_or_incomplete "code-scanning alerts" "$repo" "[]"         gh api "repos/$repo/code-scanning/alerts?state=open&per_page=30") || rc=$?
+    printf '%s' "$out" | _triage_parse_alerts "$repo" code-scanning
+    [[ "$rc" -ne 0 ]] && return "$rc"
+
+    out=$(_triage_gh_json_or_incomplete "secret-scanning alerts" "$repo" "[]"         gh api "repos/$repo/secret-scanning/alerts?state=open&per_page=30") || rc=$?
+    printf '%s' "$out" | _triage_parse_alerts "$repo" secret-scanning
+    return "$rc"
 }
 
 # Print a severity-sorted, grouped report from a TSV findings file.
@@ -430,8 +464,14 @@ triage_suggest() {
     local repo="$1" apply="${2:-0}"
     local all=""
     all=$(mktemp) || { log_error "[$repo] mktemp failed."; return 1; }
-    triage_scan_repo "$repo" > "$all" 2>/dev/null || true
+    local scan_rc=0
+    triage_scan_repo "$repo" > "$all" || scan_rc=$?
     local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
+    if [[ "$scan_rc" -ne 0 ]]; then
+        rm -f "$all"
+        log_warning "[$repo] skipped triage issue sync: GitHub scan incomplete; preserving existing issue state."
+        return 0
+    fi
 
     if [[ "$apply" != "1" ]]; then
         if [[ "$count" -eq 0 ]]; then log_success "[$repo] nothing to suggest."; rm -f "$all"; return 0; fi

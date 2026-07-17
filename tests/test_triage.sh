@@ -47,6 +47,20 @@ eq "empty array -> no findings" "" "$(printf '[]' | _triage_parse_runs "o/r")"
 # gh returns an ERROR OBJECT (not an array) when a feature/repo is unavailable -> no findings, no crash
 eq "error object -> no findings (arrays[] guard)" "" "$(printf '{"message":"Not Found"}' | _triage_parse_runs "o/r")"
 eq "error object -> no dependabot findings" "" "$(printf '{"message":"Dependabot alerts are disabled"}' | _triage_parse_alerts "o/r" dependabot)"
+_triage_is_transient_gh_error "service unavailable" && ok "lower-case service unavailable is transient" || bad "lower-case service unavailable not transient"
+
+GHLOG_SCAN="$TMP/ghcalls-scan-503"; : > "$GHLOG_SCAN"
+gh() {
+    echo "gh $*" >> "$GHLOG_SCAN"
+    case "$*" in
+        run\ list*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;;
+        *) printf '[]\n' ;;
+    esac
+}
+scan_out=$(triage_scan_repo "o/r" 2>&1); scan_rc=$?
+eq "scan transient GitHub failure -> rc 75" "75" "$scan_rc"
+printf '%s' "$scan_out" | grep -q 'incomplete triage scan' && ok "scan logs incomplete transient failure" || bad "missing transient warning: $scan_out"
+unset -f gh
 
 echo "== _triage_parse_alerts: dependabot / code-scanning / secret-scanning =="
 dep='[{"state":"open","security_advisory":{"severity":"high","summary":"RCE in foo"},"dependency":{"package":{"name":"foo"}},"html_url":"https://x/d1"},{"state":"dismissed","security_advisory":{"severity":"low","summary":"old"},"dependency":{"package":{"name":"bar"}},"html_url":"https://x/d2"}]'
@@ -116,6 +130,15 @@ GHLOG="$TMP/ghcalls-apply"; : > "$GHLOG"
 eq "suggest apply is set -u safe" "0" "$?"
 printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create' && ok "suggest apply creates issue when no marker exists" || bad "suggest apply did not create issue: $(cat "$GHLOG")"
 unset -f triage_scan_repo gh 2>/dev/null || true
+
+triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; return 75; }
+gh() { echo "gh $*" >> "$GHLOG"; }
+GHLOG="$TMP/ghcalls-incomplete"; : > "$GHLOG"
+sg=$(triage_suggest "o/r" 1 2>&1); rc=$?
+eq "suggest apply skips incomplete scans" "0" "$rc"
+printf '%s' "$sg" | grep -q 'GitHub scan incomplete; preserving existing issue state' && ok "incomplete suggest preserves existing state" || bad "missing preserve-state warning: $sg"
+[[ ! -s "$GHLOG" ]] && ok "incomplete suggest does not call gh issue APIs" || bad "incomplete suggest called gh: $(cat "$GHLOG")"
+unset -f triage_scan_repo gh
 
 GHLOG="$TMP/ghcalls-disabled"; : > "$GHLOG"
 triage_scan_repo() {
