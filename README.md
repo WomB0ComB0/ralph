@@ -229,15 +229,15 @@ Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use
 
 ### Public Org Patrol
 
-For the public `resq-software` repositories, Ralph can run a scheduled local patrol that refreshes the public repo allowlist, checks Synapse, and runs GitHub triage:
+Ralph can run a scheduled local patrol for any GitHub org that the authenticated `gh` user can read. The patrol refreshes a public repo allowlist, checks Synapse, and runs GitHub triage:
 
 ```bash
-scripts/resq-public-targets --org resq-software
-scripts/resq-org-patrol --mode report
-scripts/resq-org-install-systemd install --interval 30min
+scripts/org-public-targets --org <github-org>
+scripts/org-patrol --org <github-org> --mode report
+scripts/org-install-systemd install --org <github-org> --interval 30min
 ```
 
-Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/resq-software-patrol.env`; logs live under `~/.local/state/ralph/resq-software/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role.
+Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
 
 ## Task Management
 
