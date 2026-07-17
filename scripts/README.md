@@ -26,11 +26,11 @@ as `scripts/<name>`.
 ### Public org automation
 | Script | What it does |
 |--------|--------------|
-| `resq-public-targets [--org resq-software] [--write FILE]` | Discover active public org repos through `gh repo list` and emit an `owner/repo` allowlist for Ralph triage |
-| `resq-org-patrol [--mode report]` | Refresh the public allowlist, run a Synapse live-test, then run Ralph triage across the org; defaults to read-only report mode |
-| `resq-org-install-systemd install [--interval 30min]` | Install/enable a user systemd timer for `resq-org-patrol`; config goes in `~/.config/ralph/resq-software-patrol.env` and defaults Synapse checking off until the local DB app role is RLS-safe |
+| `org-public-targets --org ORG [--write FILE]` | Discover active public org repos through `gh repo list` and emit an `owner/repo` allowlist for Ralph triage |
+| `org-patrol --org ORG [--mode report]` | Refresh the public allowlist, run a Synapse live-test, then run Ralph triage across the org; defaults to read-only report mode |
+| `org-install-systemd install --org ORG [--interval 30min]` | Install/enable a user systemd timer for `org-patrol`; config goes in `~/.config/ralph/<org>-patrol.env` and defaults Synapse checking off until the local DB app role is RLS-safe |
 
-Patrol modes are `report`, `suggest`, `suggest-apply`, `fix-ci`, `fix-ci-apply`, `fix-security`, and `fix-security-apply`. Only the `*-apply` modes write to GitHub, and code-changing modes still use `ralph/fix-*` branches.
+Patrol modes are `report`, `suggest`, `suggest-apply`, `fix-ci`, `fix-ci-apply`, `fix-security`, and `fix-security-apply`. Only the `*-apply` modes write to GitHub, and code-changing modes still use `ralph/fix-*` branches. The `resq-*` script names are compatibility wrappers for the historical resq-software deployment.
 
 ### Dev
 | Script | What it does |
