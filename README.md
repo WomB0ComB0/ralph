@@ -237,7 +237,7 @@ scripts/org-patrol --org <github-org> --mode report
 scripts/org-install-systemd install --org <github-org> --interval 30min
 ```
 
-Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
+Default mode is read-only `report`. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Local trusted-header Synapse mode is safe only on loopback (`127.0.0.1`/`::1`); before binding Synapse to `0.0.0.0` or another non-loopback interface, configure `AUTH_JWT_SECRET`, `AUTH_JWT_PUBLIC_KEY`, or `AUTH_JWKS_URL`, set Ralph's `SYNAPSE_TOKEN`, and run `./ralph.sh synapse auth-check`. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
 
 ## Task Management
 
@@ -299,6 +299,9 @@ Common environment variables:
 | `RALPH_MAX_BUDGET_USD` | Claude per-call spend cap. |
 | `RALPH_MODEL_FALLBACKS` | Ordered fallback model list. |
 | `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
+| `RALPH_LOCAL_MODEL_RETRY_ATTEMPTS` | Retry attempts per local model before downshifting, default `1` to avoid repeated long Ollama stalls. |
+| `RALPH_OLLAMA_DOWNSHIFT_MODELS` / `RALPH_OLLAMA_DOWNSHIFT_LIMIT` | Ordered cheaper Ollama fallback models and max automatic downshift candidates, default limit `2`. |
+| `RALPH_OLLAMA_MAX_BYTES` | Optional size cap for automatic Ollama model selection on constrained machines. |
 | `RALPH_PREFER_LOCAL` | Local-first behavior: `auto`, `1`, or `0`. |
 | `LAZY_THRESHOLD` | No-change iterations before a reflexion nudge. |
 | `RALPH_MAX_LAZY_STREAK` | No-progress iterations before the run hard-aborts (stall ceiling), default `5`; `0` disables. Keep `> LAZY_THRESHOLD` so the nudge fires first. |
@@ -321,6 +324,12 @@ Common environment variables:
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
+| `SYNAPSE_ENABLED` | Set to `1` to retrieve bounded Synapse context during each main iteration and inject it into the prompt; failures are fail-open. |
+| `SYNAPSE_URL` / `SYNAPSE_TENANT` / `SYNAPSE_PRINCIPAL` | Synapse endpoint and identity used by the optional grounding hook and `ralph synapse` commands. |
+| `SYNAPSE_TOKEN` | Bearer JWT sent by Ralph callers when Synapse verifies JWT auth. |
+| `BIND_ADDR` / `SYNAPSE_BIND_ADDR` | Synapse bind address for operator checks. Non-loopback binds require verified JWT config. |
+| `AUTH_JWT_SECRET` / `AUTH_JWT_PUBLIC_KEY` / `AUTH_JWKS_URL` | Synapse JWT verification configuration; required before exposing Synapse beyond loopback. |
+| `SYNAPSE_GROUND_TOPK` / `SYNAPSE_GROUND_PROMPT_CHARS` | Bound in-loop Synapse retrieval result count and prompt-instruction excerpt size. |
 | `JULES_API_KEY` | Jules REST API key, required for `TOOL=jules`; keep it in the environment or a secret store. |
 | `RALPH_JULES_CLI_REPO` | Optional `owner/repo` override for `TOOL=jules-cli`; otherwise Ralph derives the GitHub repo from `origin`. |
 | `RALPH_JULES_CLI_MODE` | `apply` (default) runs `jules remote pull --apply`; `pull` records completed output without applying it. |

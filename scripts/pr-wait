@@ -11,9 +11,7 @@ if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
 maxs="${3:-180}"
 elapsed=0
 while (( elapsed < maxs )); do
-  rc=0
-  revs=$(ralph_gh_capture gh pr view "$pr" --repo "$repo" --json reviews --jq '[.reviews[].author.login]|unique|join(",")') || rc=$?
-  if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "polling PR #$pr reviews for $repo" "$revs"; exit 75; elif [[ "$rc" -ne 0 ]]; then echo "failed to fetch PR #$pr ($repo) - does it exist? $revs" >&2; exit "$rc"; fi
+  revs=$(ralph_gh_or_exit "polling PR #$pr reviews for $repo" gh pr view "$pr" --repo "$repo" --json reviews --jq '[.reviews[].author.login]|unique|join(",")')
   [[ -n "$revs" ]] && break
   sleep 15; elapsed=$((elapsed + 15))
 done

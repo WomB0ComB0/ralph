@@ -9,7 +9,6 @@ source "$script_dir/../lib/github.sh"
 pr="${1:-}"
 repo="${2:-}"
 if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
-rc=0
-out=$(ralph_gh_capture gh pr checks ${pr:+"$pr"} --repo "$repo") || rc=$?
-if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "reading PR checks for $repo" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "reading PR checks for $repo" "$out"; exit "$rc"; fi
-printf '%s\n' "$out"
+out=$(ralph_gh_or_exit "reading PR checks for $repo" gh pr checks ${pr:+"$pr"} --repo "$repo")
+printf '%s
+' "$out"

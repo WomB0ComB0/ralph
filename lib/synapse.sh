@@ -12,6 +12,7 @@
 #   SYNAPSE_TENANT     default ralph-dev            tenant_id / X-Tenant-Id
 #   SYNAPSE_PRINCIPAL  default agent:ralph          default X-Principal-Id when none is passed
 #   SYNAPSE_TOKEN      optional                     Bearer JWT; when set, sent as Authorization (X-* then ignored server-side)
+#   BIND_ADDR / SYNAPSE_BIND_ADDR default 127.0.0.1  startup guard refuses non-loopback without AUTH_JWT_*
 #   SYNAPSE_TIMEOUT    default 10                   per-call seconds
 #   SYNAPSE_RETRIES    default 2                    retries on retriable status (5xx / 429 / network)
 #   SYNAPSE_AGENTS     default "claude codex opencode"   agents `ralph agents test` probes
@@ -30,6 +31,24 @@ _syn_url()       { echo "${SYNAPSE_URL:-http://127.0.0.1:8080}"; }
 _syn_tenant()    { echo "${SYNAPSE_TENANT:-ralph-dev}"; }
 _syn_principal() { echo "${1:-${SYNAPSE_PRINCIPAL:-agent:ralph}}"; }
 _syn_timeout()   { echo "${SYNAPSE_TIMEOUT:-10}"; }
+_syn_bind_addr() { echo "${SYNAPSE_BIND_ADDR:-${BIND_ADDR:-127.0.0.1}}"; }
+_syn_is_loopback_bind() {
+    case "${1:-}" in
+        ""|localhost|127.*|::1|[[]::1[]]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+synapse_auth_guard() {
+    local bind; bind="$(_syn_bind_addr)"
+    if _syn_is_loopback_bind "$bind"; then
+        return 0
+    fi
+    if [[ -n "${AUTH_JWT_SECRET:-}" || -n "${AUTH_JWT_PUBLIC_KEY:-}" || -n "${AUTH_JWKS_URL:-}" ]]; then
+        return 0
+    fi
+    log_error "Refusing non-loopback Synapse bind '$bind' without verified JWT auth (set AUTH_JWT_SECRET, AUTH_JWT_PUBLIC_KEY, or AUTH_JWKS_URL)."
+    return 1
+}
 # Millisecond clock with a portable fallback (GNU date has %N; BSD/macOS does not).
 _syn_ms()        { local n; n=$(date +%s%3N 2>/dev/null); [[ "$n" == *N* || -z "$n" ]] && n=$(( $(date +%s) * 1000 )); echo "$n"; }
 
@@ -264,6 +283,7 @@ handle_synapse_command() {
         retrieve)    synapse_retrieve "$*" ;;
         context-get) synapse_context_get "${1:-}" ;;
         live-test)   synapse_live_test "${1:-ralph}" ;;
-        *) echo "Usage: ralph synapse {ping | retrieve <query> | context-get [principal] | live-test [agent]}"; return 1 ;;
+        auth-check)  synapse_auth_guard && log_success "synapse auth boundary OK (bind=$(_syn_bind_addr))" ;;
+        *) echo "Usage: ralph synapse {ping | retrieve <query> | context-get [principal] | live-test [agent] | auth-check}"; return 1 ;;
     esac
 }

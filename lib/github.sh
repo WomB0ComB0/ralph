@@ -34,6 +34,18 @@ ralph_gh_fail_message() {
     return 1
 }
 
+ralph_gh_or_exit() {
+    local label="$1" out rc=0
+    shift
+    out=$(ralph_gh_capture "$@") || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+        printf '%s' "$out"
+        return 0
+    fi
+    ralph_gh_fail_message "$label" "$out" || true
+    exit "$rc"
+}
+
 ralph_gh_current_repo() {
     local out rc=0
     out=$(ralph_gh_capture gh repo view --json nameWithOwner -q .nameWithOwner) || rc=$?

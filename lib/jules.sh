@@ -97,7 +97,26 @@ jules_cli_repo() {
 }
 
 jules_cli_extract_session_id() {
-    grep -Eo '[0-9]{6,}' | head -1
+    local output id
+    output=$(cat)
+    if command -v jq >/dev/null 2>&1 && jq -e . >/dev/null 2>&1 <<<"$output"; then
+        id=$(jq -r '
+            .sessionId
+            // .session_id
+            // .id
+            // .name
+            // .session.sessionId
+            // .session.session_id
+            // .session.id
+            // .session.name
+            // empty
+        ' <<<"$output" | head -1)
+        if [[ -n "$id" && "$id" != "null" ]]; then
+            grep -Eo '[0-9]{6,}' <<<"${id#sessions/}" | head -1
+            return 0
+        fi
+    fi
+    grep -Eo '[0-9]{6,}' <<<"$output" | head -1
 }
 
 jules_cli_write_state() {

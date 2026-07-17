@@ -63,6 +63,7 @@ if [[ ! -f "$env_file" ]]; then
     cat > "$env_file" <<EOF
 # Ralph public org patrol config. No secrets are required for default read-only mode.
 # Synapse check is off by default for the timer; enable after the local Synapse DB uses a non-RLS-bypassing app role.
+# Trusted-header Synapse mode is localhost-only. For non-loopback BIND_ADDR/SYNAPSE_BIND_ADDR, configure AUTH_JWT_SECRET, AUTH_JWT_PUBLIC_KEY, or AUTH_JWKS_URL and set SYNAPSE_TOKEN for Ralph callers.
 RALPH_ORG=$org
 RALPH_ORG_TRIAGE_MODE=report
 RALPH_ORG_SYNAPSE_CHECK=0

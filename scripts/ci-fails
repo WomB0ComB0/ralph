@@ -9,8 +9,7 @@ source "$script_dir/../lib/github.sh"
 repo="${1:-}"
 if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
 limit="${2:-10}"
-rc=0
-out=$(ralph_gh_capture gh run list --repo "$repo" --status failure --limit "$limit" --json databaseId,name,headBranch,url \
-  --jq '.[]? | "\(.databaseId)  \(.name // "workflow")  [\(.headBranch // "?")]  \(.url // "")"') || rc=$?
-if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "listing failing CI runs for $repo" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "listing failing CI runs for $repo" "$out"; exit "$rc"; fi
-printf '%s\n' "$out"
+out=$(ralph_gh_or_exit "listing failing CI runs for $repo" gh run list --repo "$repo" --status failure --limit "$limit" --json databaseId,name,headBranch,url \
+  --jq '.[]? | "\(.databaseId)  \(.name // "workflow")  [\(.headBranch // "?")]  \(.url // "")"')
+printf '%s
+' "$out"
