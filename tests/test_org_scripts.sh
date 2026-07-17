@@ -96,8 +96,7 @@ grep -qx 'triage' "$RALPH_CALL_LOG" && ok "report mode runs read-only triage" ||
 : > "$RALPH_CALL_LOG"
 RALPH_TRIAGE_GITHUB_503=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" >"$TMP/patrol-triage-503.out" 2>&1; rc=$?
 eq "patrol survives triage-phase GitHub 503 degradation" 0 "$rc"
-grep -qx 'synapse live-test ralph' "$RALPH_CALL_LOG" && ok "triage 503 scenario runs Synapse check first" || bad "triage 503 scenario skipped Synapse check"
-grep -qx 'triage' "$RALPH_CALL_LOG" && ok "triage 503 scenario still runs triage" || bad "triage 503 scenario skipped triage"
+eq "triage 503 scenario runs Synapse before triage" $'synapse live-test ralph\ntriage' "$(cat "$RALPH_CALL_LOG")"
 grep -q 'HTTP 503 Service Unavailable' "$TMP/patrol-triage-503.out" && ok "triage 503 warning is preserved in patrol output" || bad "missing triage 503 warning: $(cat "$TMP/patrol-triage-503.out")"
 
 : > "$RALPH_CALL_LOG"
