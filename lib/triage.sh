@@ -149,6 +149,22 @@ _triage_gh_json_or_incomplete() {
     return 0
 }
 
+_triage_gh_or_transient() {
+    local label="$1" repo="$2"
+    shift 2
+    local out
+    if out=$("$@" 2>&1); then
+        printf '%s' "$out"
+        return 0
+    fi
+    if _triage_is_transient_gh_error "$out"; then
+        log_warning "[$repo] deferred GitHub operation: transient failure while $label: $out"
+        return 75
+    fi
+    printf '%s' "$out"
+    return 1
+}
+
 # Read-only scan of ONE repo: failing CI + the three security-alert feeds. Each gh call is
 # guarded — a missing scope, disabled feature, or unknown repo just yields no findings.
 triage_scan_repo() {
@@ -486,9 +502,14 @@ triage_suggest() {
     fi
 
     # Idempotent: reuse an existing open issue carrying the ralph-triage marker.
-    local existing issue_list_output
-    if ! issue_list_output=$(gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty' 2>&1); then
+    local existing issue_list_output issue_rc=0
+    issue_list_output=$(_triage_gh_or_transient "inspecting triage issues" "$repo" gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty') || issue_rc=$?
+    if [[ "$issue_rc" -ne 0 ]]; then
         rm -f "$all"
+        if [[ "$issue_rc" -eq 75 ]]; then
+            log_warning "[$repo] skipped triage issue sync: GitHub issue lookup incomplete; preserving existing issue state."
+            return 0
+        fi
         if [[ "$issue_list_output" == *"repository has disabled issues"* || "$issue_list_output" == *"Issues are disabled"* ]]; then
             log_warning "[$repo] skipped triage issue sync: GitHub issues are disabled ($count current finding(s)); route via alternate destination."
             return 0
@@ -503,15 +524,22 @@ triage_suggest() {
             local clean_title clean_body
             clean_title="Ralph triage: clean"
             clean_body=$(_triage_clean_body)
-            if gh issue edit "$existing" --repo "$repo" --title "$clean_title" --body "$clean_body" >/dev/null 2>&1; then
-                if gh issue close "$existing" --repo "$repo" --reason completed --comment "Ralph triage is clean on the latest scan; closing this automated tracking issue." >/dev/null 2>&1; then
-                    log_success "[$repo] closed clean triage issue #$existing."
-                else
-                    log_error "[$repo] failed to close clean triage issue #$existing."; return 1
-                fi
-            else
-                log_error "[$repo] failed to mark triage issue #$existing clean."; return 1
+            local clean_rc=0 close_rc=0 clean_out close_out
+            clean_out=$(_triage_gh_or_transient "marking triage issue #$existing clean" "$repo" gh issue edit "$existing" --repo "$repo" --title "$clean_title" --body "$clean_body") || clean_rc=$?
+            if [[ "$clean_rc" -eq 75 ]]; then
+                log_warning "[$repo] skipped clean-close sync: GitHub issue edit incomplete; preserving existing issue state."
+                return 0
+            elif [[ "$clean_rc" -ne 0 ]]; then
+                log_error "[$repo] failed to mark triage issue #$existing clean: $clean_out"; return 1
             fi
+            close_out=$(_triage_gh_or_transient "closing clean triage issue #$existing" "$repo" gh issue close "$existing" --repo "$repo" --reason completed --comment "Ralph triage is clean on the latest scan; closing this automated tracking issue.") || close_rc=$?
+            if [[ "$close_rc" -eq 75 ]]; then
+                log_warning "[$repo] deferred clean triage issue close #$existing due to transient GitHub failure."
+                return 0
+            elif [[ "$close_rc" -ne 0 ]]; then
+                log_error "[$repo] failed to close clean triage issue #$existing: $close_out"; return 1
+            fi
+            log_success "[$repo] closed clean triage issue #$existing."
         else
             log_success "[$repo] nothing to suggest."
         fi
@@ -523,28 +551,46 @@ triage_suggest() {
     rm -f "$all"
 
     if [[ -n "$existing" ]]; then
-        local current current_title current_body
-        current=$(gh issue view "$existing" --repo "$repo" --json title,body 2>/dev/null || true)
+        local current current_title current_body current_rc=0
+        current=$(_triage_gh_or_transient "reading triage issue #$existing" "$repo" gh issue view "$existing" --repo "$repo" --json title,body) || current_rc=$?
+        if [[ "$current_rc" -eq 75 ]]; then
+            log_warning "[$repo] skipped triage issue update: GitHub issue read incomplete; preserving existing issue state."
+            return 0
+        elif [[ "$current_rc" -ne 0 ]]; then
+            log_error "[$repo] failed to read triage issue #$existing: $current"; return 1
+        fi
         current_title=$(printf '%s' "$current" | jq -r '.title // ""' 2>/dev/null || true)
         current_body=$(printf '%s' "$current" | jq -r '.body // ""' 2>/dev/null || true)
         if [[ "$current_title" == "$title" && "$current_body" == "$body" ]]; then
             log_success "[$repo] triage issue #$existing already current."
-        elif gh issue edit "$existing" --repo "$repo" --title "$title" --body "$body" >/dev/null 2>&1; then
-            if gh issue comment "$existing" --repo "$repo" --body "$body" >/dev/null 2>&1; then
-                log_success "[$repo] updated triage issue #$existing."
-            else
-                log_error "[$repo] failed to comment on triage issue #$existing."; return 1
-            fi
         else
-            log_error "[$repo] failed to update triage issue #$existing."; return 1
+            local edit_rc=0 comment_rc=0 edit_out comment_out
+            edit_out=$(_triage_gh_or_transient "updating triage issue #$existing" "$repo" gh issue edit "$existing" --repo "$repo" --title "$title" --body "$body") || edit_rc=$?
+            if [[ "$edit_rc" -eq 75 ]]; then
+                log_warning "[$repo] skipped triage issue update: GitHub issue edit incomplete; preserving existing issue state."
+                return 0
+            elif [[ "$edit_rc" -ne 0 ]]; then
+                log_error "[$repo] failed to update triage issue #$existing: $edit_out"; return 1
+            fi
+            comment_out=$(_triage_gh_or_transient "commenting on triage issue #$existing" "$repo" gh issue comment "$existing" --repo "$repo" --body "$body") || comment_rc=$?
+            if [[ "$comment_rc" -eq 75 ]]; then
+                log_warning "[$repo] deferred triage issue history comment #$existing due to transient GitHub failure."
+                return 0
+            elif [[ "$comment_rc" -ne 0 ]]; then
+                log_error "[$repo] failed to comment on triage issue #$existing: $comment_out"; return 1
+            fi
+            log_success "[$repo] updated triage issue #$existing."
         fi
     else
-        local url
-        if url=$(gh issue create --repo "$repo" --title "$title" --body "$body" 2>/dev/null); then
-            log_success "[$repo] opened a triage issue: $url"
-        else
-            log_error "[$repo] failed to create triage issue."; return 1
+        local url create_rc=0
+        url=$(_triage_gh_or_transient "creating triage issue" "$repo" gh issue create --repo "$repo" --title "$title" --body "$body") || create_rc=$?
+        if [[ "$create_rc" -eq 75 ]]; then
+            log_warning "[$repo] deferred triage issue create due to transient GitHub failure."
+            return 0
+        elif [[ "$create_rc" -ne 0 ]]; then
+            log_error "[$repo] failed to create triage issue: $url"; return 1
         fi
+        log_success "[$repo] opened a triage issue: $url"
     fi
     return 0
 }

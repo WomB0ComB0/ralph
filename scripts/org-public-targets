@@ -7,6 +7,17 @@ limit="${RALPH_ORG_REPO_LIMIT:-200}"
 include_archived=false
 write_file=""
 
+
+is_transient_gh_error() {
+    local msg="${1,,}"
+    case "$msg" in
+        *"http 5"*|*"status 5"*|*"503"*|*"502"*|*"504"*|*"service unavailable"*|*"bad gateway"*|*"gateway timeout"*|*"rate limit"*|*"secondary rate"*|*"timeout"*|*"timed out"*|*"tls"*|*"connection reset"*|*"connection refused"*|*"could not resolve"*|*"network"*|*"eof"*)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 Usage: scripts/org-public-targets --org ORG [--limit N] [--include-archived] [--write FILE]
@@ -37,8 +48,23 @@ if [[ -z "$org" ]]; then
 fi
 case "$limit" in ''|*[!0-9]*) echo "--limit must be numeric" >&2; exit 2 ;; esac
 
-json=$(gh repo list "$org" --visibility=public --limit "$limit" \
-    --json nameWithOwner,isArchived,isPrivate 2>/dev/null)
+repo_list_rc=0
+repo_list_output=$(gh repo list "$org" --visibility=public --limit "$limit" \
+    --json nameWithOwner,isArchived,isPrivate 2>&1) || repo_list_rc=$?
+if [[ "$repo_list_rc" -ne 0 ]]; then
+    if is_transient_gh_error "$repo_list_output"; then
+        if [[ -n "$write_file" && -s "$write_file" ]]; then
+            printf 'WARNING: transient GitHub failure while discovering %s; reusing cached targets from %s: %s\n' "$org" "$write_file" "$repo_list_output" >&2
+            cat "$write_file"
+            exit 0
+        fi
+        printf 'ERROR: transient GitHub failure while discovering %s and no cached targets are available: %s\n' "$org" "$repo_list_output" >&2
+        exit 75
+    fi
+    printf 'ERROR: failed to discover public repos for %s: %s\n' "$org" "$repo_list_output" >&2
+    exit "$repo_list_rc"
+fi
+json="$repo_list_output"
 
 targets=$(jq -r --argjson includeArchived "$include_archived" '
     arrays[]
