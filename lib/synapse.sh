@@ -149,13 +149,25 @@ _syn_lt_step() {
     local name="$1" test="$2" method="$3" path="$4" b="${5:-}"
     local args=(-sS -m "$(_syn_timeout)" -X "$method" "${_SYN_HDR[@]}" -w $'\n%{http_code}')
     [[ -n "$b" ]] && args+=(--data "$b")
+    local retries="${SYNAPSE_LIVETEST_RETRIES:-${SYNAPSE_RETRIES:-2}}" attempt=0 delay=1
     local t0 t1 ms out code
-    t0=$(_syn_ms); out=$(curl "${args[@]}" "${U}${path}" 2>/dev/null); t1=$(_syn_ms); ms=$((t1 - t0))
-    code="${out##*$'\n'}"; out="${out%$'\n'*}"
-    if [[ "$code" =~ ^2 ]] && jq -e "$test" >/dev/null 2>&1 <<<"$out"; then
-        printf '  [PASS] %-16s %sms\n' "$name" "$ms"; return 0
-    fi
-    printf '  [FAIL] %-16s http=%s %sms\n' "$name" "${code:-net}" "$ms"; why="${name}(${code:-net})"; return 1
+    while :; do
+        t0=$(_syn_ms); out=$(curl "${args[@]}" "${U}${path}" 2>/dev/null); t1=$(_syn_ms); ms=$((t1 - t0))
+        code="${out##*$'\n'}"; out="${out%$'\n'*}"
+        if [[ "$code" =~ ^2 ]] && jq -e "$test" >/dev/null 2>&1 <<<"$out"; then
+            printf '  [PASS] %-16s %sms\n' "$name" "$ms"; return 0
+        fi
+        case "$code" in
+            429|5*|000|"")
+                if [[ $attempt -lt $retries ]]; then
+                    attempt=$((attempt + 1))
+                    log_warning "synapse live-test ${name}: ${code:-network} — retry ${attempt}/${retries}"
+                    sleep "$delay"; delay=$((delay * 2)); continue
+                fi
+                ;;
+        esac
+        printf '  [FAIL] %-16s http=%s %sms\n' "$name" "${code:-net}" "$ms"; why="${name}(${code:-net})"; return 1
+    done
 }
 
 _syn_lt_fail() {   # record a durable signal so a recurrence escalates (dedup by theme)
