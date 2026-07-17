@@ -93,6 +93,17 @@ export SELECTED_MODEL="p" SELECTED_MODEL_SOURCE="config" RALPH_MODEL_FALLBACKS="
 eq "empty fallback entries dropped" "p|a|b" "$(build_model_chain opencode engineer | paste -sd'|' -)"
 unset SELECTED_MODEL SELECTED_MODEL_SOURCE RALPH_MODEL_FALLBACKS
 
+# local Ollama tools get a dynamic cheap-model downshift chain.
+ollama_model_list() { printf 'qwen2.5-coder:1.5b\t1500000000\nqwen3:0.6b\t600000000\nllama3:8b\t8000000000\n'; }
+export SELECTED_MODEL="qwen2.5-coder:1.5b" SELECTED_MODEL_SOURCE="config" RALPH_OLLAMA_DOWNSHIFT_LIMIT=1
+chain=$(build_model_chain ollama-agent engineer | paste -sd'|' -)
+eq "ollama-agent adds smallest cheap downshift" "qwen2.5-coder:1.5b|qwen3:0.6b" "$chain"
+export RALPH_OLLAMA_DOWNSHIFT_MODELS="qwen3:0.6b,qwen2.5-coder:1.5b"
+chain=$(build_model_chain ollama-agent engineer | paste -sd'|' -)
+eq "configured downshift skips duplicate primary" "qwen2.5-coder:1.5b|qwen3:0.6b" "$chain"
+unset SELECTED_MODEL SELECTED_MODEL_SOURCE RALPH_OLLAMA_DOWNSHIFT_LIMIT RALPH_OLLAMA_DOWNSHIFT_MODELS
+unset -f ollama_model_list
+
 echo "== run_ai_with_fallback: graceful degradation on capacity failure (stubbed tool) =="
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 export AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0   # no slow backoff in tests
@@ -121,6 +132,26 @@ run_ai_tool() { echo "$2" >> "$TRIED"; echo "ok $2" > "$5"; return 0; }
 run_ai_with_fallback opencode engineer "p" "$TMP/log" "$TMP/out"; rc=$?
 eq "primary success rc" 0 "$rc"
 eq "fallback NOT tried when primary succeeds" "model-a" "$(paste -sd' ' "$TRIED")"
+
+# Local provider timeout: do not burn all retry attempts on the same stalled model.
+run_ai_tool() {
+    echo "$2" >> "$TRIED"
+    if [[ "$2" == "qwen2.5-coder:1.5b" ]]; then
+        echo 'exceeded RALPH_TOOL_TIMEOUT=1s' >> "$4"
+        : > "$5"
+        return 124
+    fi
+    echo "done by $2" > "$5"
+    return 0
+}
+: > "$TRIED"; : > "$TMP/log"
+export AI_RETRY_ATTEMPTS=3 RALPH_LOCAL_MODEL_RETRY_ATTEMPTS=1 SELECTED_MODEL="qwen2.5-coder:1.5b" SELECTED_MODEL_SOURCE="config" RALPH_OLLAMA_DOWNSHIFT_MODELS="qwen3:0.6b"
+run_ai_with_fallback ollama-agent engineer "p" "$TMP/log" "$TMP/out"; rc=$?
+eq "local timeout downshifts to cheaper model" 0 "$rc"
+eq "stalled local primary attempted once, not three times" "qwen2.5-coder:1.5b qwen3:0.6b" "$(paste -sd' ' "$TRIED")"
+grep -q 'done by qwen3:0.6b' "$TMP/out" && ok "local fallback output is from cheaper model" || bad "local fallback output missing"
+grep -q 'downshifting to a cheaper model/settings profile' "$TMP/log" && ok "local timeout recommendation logged" || bad "local timeout recommendation missing: $(cat "$TMP/log")"
+unset RALPH_LOCAL_MODEL_RETRY_ATTEMPTS RALPH_OLLAMA_DOWNSHIFT_MODELS
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

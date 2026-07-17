@@ -9,11 +9,7 @@ source "$script_dir/../lib/github.sh"
 id="${1:?usage: resolve-thread <threadId> [reply]}"
 reply="${2:-}"
 if [[ -n "$reply" ]]; then
-  rc=0
-  out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply") || rc=$?
-  if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit "$rc"; fi
+  ralph_gh_or_exit "replying to review thread $id" gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply" >/dev/null
 fi
-rc=0
-out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"') || rc=$?
-if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit "$rc"; fi
+out=$(ralph_gh_or_exit "resolving review thread $id" gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" --jq '"resolved=\(.data.resolveReviewThread.thread.isResolved)"')
 printf '%s\n' "$out"

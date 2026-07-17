@@ -8,9 +8,7 @@ source "$script_dir/../lib/github.sh"
 pr="${1:?usage: pr-merge <pr> [owner/repo]}"
 repo="${2:-}"
 if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
-rc=0
-out=$(ralph_gh_capture gh pr merge "$pr" --repo "$repo" --merge --delete-branch) || rc=$?
-if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "merging PR #$pr in $repo" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "merging PR #$pr in $repo" "$out"; exit "$rc"; fi
+ralph_gh_or_exit "merging PR #$pr in $repo" gh pr merge "$pr" --repo "$repo" --merge --delete-branch >/dev/null
 current=$(ralph_gh_capture gh repo view --json nameWithOwner -q .nameWithOwner) || current=""
 if [[ "$repo" == "$current" ]]; then
   def_rc=0

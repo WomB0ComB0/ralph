@@ -39,6 +39,11 @@ eq "jules-cli dependency check succeeds with stubbed deps" 0 "$rc"
 grep -qx 'jules' "$CHECK_LOG" && ok "jules-cli requires jules binary" || bad "jules-cli did not require jules binary"
 ! grep -qx 'jules-cli' "$CHECK_LOG" && ok "jules-cli does not require same-named binary" || bad "jules-cli incorrectly required jules-cli binary"
 
+echo "== Jules CLI session id parsing =="
+eq "jules-cli parses structured sessionId" "515151" "$(printf '{"sessionId":"515151","state":"CREATED"}\n' | jules_cli_extract_session_id)"
+eq "jules-cli parses structured session name" "626262" "$(printf '{"session":{"name":"sessions/626262"}}\n' | jules_cli_extract_session_id)"
+eq "jules-cli falls back to human output" "424242" "$(printf 'Created Jules session 424242 for owner/repo\n' | jules_cli_extract_session_id)"
+
 echo "== run_ai_tool dispatch =="
 run_jules_remote() { printf 'stub remote\n' > "$5"; return 0; }
 run_jules_cli_remote() { printf 'stub cli remote\n' > "$5"; return 0; }
@@ -155,7 +160,11 @@ case "$1 $2" in
     repo="$3"
     prompt=$(cat)
     printf 'new repo=%s prompt=%s\n' "$repo" "$prompt" >> "$JULES_STUB_LOG"
-    printf 'Created Jules session 424242 for %s\n' "$repo"
+    if [ "${JULES_CREATE_MODE:-human}" = "json" ]; then
+      printf '{"sessionId":"515151","state":"CREATED","repo":"%s"}\n' "$repo"
+    else
+      printf 'Created Jules session 424242 for %s\n' "$repo"
+    fi
     ;;
   "remote pull")
     shift 2
@@ -192,11 +201,18 @@ grep -q 'new repo=owner/repo prompt=build via cli' "$JULES_STUB_LOG" && ok "jule
 grep -q 'State: CREATED' "$out" && ok "jules-cli create output marks created" || bad "jules-cli create output missing state"
 eq "jules-cli create remote progress" 1 "${_RALPH_REMOTE_PROGRESS:-0}"
 
+rm -f "$(jules_cli_state_file)"
+export JULES_CREATE_MODE=json
+run_jules_cli_remote jules-cli "" "build via cli json" "$log" "$out"; rc=$?
+eq "jules-cli create parses structured fixture" 0 "$rc"
+eq "jules-cli structured state stores session" "515151" "$(jq -r '.sessionId' "$(jules_cli_state_file)")"
+export JULES_CREATE_MODE=human
+
 export JULES_STUB_PULL=waiting
 run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
 eq "jules-cli waiting pull returns progress" 0 "$rc"
 eq "jules-cli waiting state" "IN_PROGRESS" "$(jq -r '.state' "$(jules_cli_state_file)")"
-grep -q 'Session 424242 is still running' "$out" && ok "jules-cli waiting output surfaced" || bad "jules-cli waiting output missing"
+grep -q 'Session 515151 is still running' "$out" && ok "jules-cli waiting output surfaced" || bad "jules-cli waiting output missing"
 
 export JULES_STUB_PULL=success
 run_jules_cli_remote jules-cli "" "build via cli" "$log" "$out"; rc=$?
@@ -204,7 +220,7 @@ eq "jules-cli completed pull succeeds" 0 "$rc"
 eq "jules-cli completed state" "COMPLETED" "$(jq -r '.state' "$(jules_cli_state_file)")"
 eq "jules-cli apply marks patchApplied" true "$(jq -r '.patchApplied' "$(jules_cli_state_file)")"
 grep -q '<promise>COMPLETE</promise>' "$out" && ok "jules-cli completed emits promise" || bad "jules-cli completion promise missing"
-grep -q 'pull session=424242 apply=1' "$JULES_STUB_LOG" && ok "jules-cli pull uses --apply" || bad "jules-cli pull did not apply"
+grep -q 'pull session=515151 apply=1' "$JULES_STUB_LOG" && ok "jules-cli pull uses --apply" || bad "jules-cli pull did not apply"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

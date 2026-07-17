@@ -11,25 +11,19 @@ reply="${2:-}"
 repo="${3:-}"
 if [[ -z "$repo" ]]; then repo=$(ralph_gh_current_repo) || exit $?; fi
 owner="${repo%%/*}"; name="${repo##*/}"
-rc=0
-ids_str=$(ralph_gh_capture gh api graphql \
+ids_str=$(ralph_gh_or_exit "listing unresolved review threads for PR #$pr in $repo" gh api graphql \
   -f query='query($o:String!,$n:String!,$pr:Int!){repository(owner:$o,name:$n){pullRequest(number:$pr){reviewThreads(first:100){nodes{id isResolved}}}}}' \
   -F o="$owner" -F n="$name" -F pr="$pr" \
-  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id') || rc=$?
-if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "listing unresolved review threads for PR #$pr in $repo" "$ids_str"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "listing unresolved review threads for PR #$pr in $repo" "$ids_str"; exit "$rc"; fi
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id')
 mapfile -t ids < <(printf '%s' "$ids_str")
 if [[ ${#ids[@]} -eq 0 || -z "$ids_str" ]]; then echo "no unresolved threads on #$pr"; exit 0; fi
 n=0
 for id in "${ids[@]}"; do
   [[ -z "$id" ]] && continue
   if [[ -n "$reply" ]]; then
-    rc=0
-    out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply") || rc=$?
-    if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "replying to review thread $id" "$out"; exit "$rc"; fi
+    ralph_gh_or_exit "replying to review thread $id" gh api graphql -f query='mutation($id:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$b}){comment{id}}}' -f id="$id" -f b="$reply" >/dev/null
   fi
-  rc=0
-  out=$(ralph_gh_capture gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id") || rc=$?
-  if [[ "$rc" -eq 75 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit 75; elif [[ "$rc" -ne 0 ]]; then ralph_gh_fail_message "resolving review thread $id" "$out"; exit "$rc"; fi
+  ralph_gh_or_exit "resolving review thread $id" gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="$id" >/dev/null
   n=$((n+1))
 done
 echo "resolved $n thread(s) on #$pr"

@@ -289,6 +289,49 @@ resolve_ollama_model_for_role() {
     printf '%s\n' "${RALPH_OLLAMA_DEFAULT_MODEL:-qwen3:0.6b}"
 }
 
+# Cheaper local fallback candidates after an Ollama timeout. Prefer configured names;
+# otherwise choose the smallest locally installed models first. If the daemon is not
+# reachable, return one tiny default candidate.
+ollama_downshift_models() {
+    local primary="${1:-}" role="${2:-engineer}" configured="${RALPH_OLLAMA_DOWNSHIFT_MODELS:-}" list limit count=0 name size
+    limit="${RALPH_OLLAMA_DOWNSHIFT_LIMIT:-2}"
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=2
+    [[ "$limit" -gt 0 ]] || return 0
+
+    if [[ -n "$configured" ]]; then
+        local _oifs="$IFS" c
+        IFS=','; read -ra _configured_downshifts <<< "$configured"; IFS="$_oifs"
+        for c in "${_configured_downshifts[@]+"${_configured_downshifts[@]}"}"; do
+            c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"
+            [[ -z "$c" || "$c" == "$primary" ]] && continue
+            printf '%s\n' "$c"
+            count=$((count + 1)); [[ "$count" -ge "$limit" ]] && return 0
+        done
+        return 0
+    fi
+
+    list=$(ollama_model_list)
+    if [[ -n "$list" ]]; then
+        while IFS=$'\t' read -r name size; do
+            [[ -z "$name" || "$name" == "$primary" ]] && continue
+            printf '%s\n' "$name"
+            count=$((count + 1)); [[ "$count" -ge "$limit" ]] && return 0
+        done < <(printf '%s\n' "$list" | awk 'NF{size=($2 ~ /^[0-9]+$/ ? $2 : 0); print $1 "\t" size}' | sort -k2,2n)
+        return 0
+    fi
+
+    [[ "${RALPH_OLLAMA_DEFAULT_DOWNSHIFT:-qwen3:0.6b}" != "$primary" ]] && printf '%s\n' "${RALPH_OLLAMA_DEFAULT_DOWNSHIFT:-qwen3:0.6b}"
+}
+
+ralph_local_model_attempt() {
+    local tool="$1" model="${2:-}"
+    case "$tool" in
+        ollama|ollama-agent) return 0 ;;
+        opencode) [[ "$model" == ollama/* ]] && return 0 ;;
+    esac
+    return 1
+}
+
 #######################################
 # Resolve a model for the active tool + role, preferring each tool's OWN live source
 # over any pinned string (gemini CLI is deprecated; agy/Antigravity is Google's CLI).
@@ -439,16 +482,22 @@ build_model_chain() {
         [[ -z "$primary" ]] && primary=$(resolve_model_for_tool "$tool" "$role" 2>/dev/null || true)
     fi
     chain+=("$primary")
+    if [[ "$tool" == "ollama" || "$tool" == "ollama-agent" ]]; then
+        mapfile -t fbs < <(ollama_downshift_models "$primary" "$role")
+        chain+=("${fbs[@]+"${fbs[@]}"}")
+        fbs=()
+    fi
     if [[ -n "${RALPH_MODEL_FALLBACKS:-}" ]]; then
         local _oifs="$IFS"; IFS=','; read -ra fbs <<< "$RALPH_MODEL_FALLBACKS"; IFS="$_oifs"
         chain+=("${fbs[@]+"${fbs[@]}"}")
     fi
-    local c prev="__none__"
+    local c
+    local -A seen=()
     for c in "${chain[@]}"; do
         c="${c#"${c%%[![:space:]]*}"}"; c="${c%"${c##*[![:space:]]}"}"   # trim
         [[ -z "$c" ]] && continue        # drop empties (e.g. a trailing comma in fallbacks)
-        [[ "$c" == "$prev" ]] && continue # drop consecutive duplicates
-        printf '%s\n' "$c"; prev="$c"
+        [[ -n "${seen[$c]:-}" ]] && continue
+        printf '%s\n' "$c"; seen[$c]=1
     done
     # NB: a fully-empty result (self-selecting tools like agy/codex/amp) is intentional —
     # run_ai_with_fallback falls back to a single self-select run in that case.
@@ -589,6 +638,33 @@ EOF
 EOF
             ;;
     esac
+}
+
+#######################################
+# Build optional Synapse grounding context for the main iteration prompt.
+# Returns an empty string unless SYNAPSE_ENABLED=1 and Synapse returns results.
+#######################################
+synapse_grounding_context() {
+    [[ "${SYNAPSE_ENABLED:-0}" == "1" ]] || return 0
+    if ! declare -F synapse_ground >/dev/null 2>&1; then
+        log_warning "SYNAPSE_ENABLED=1 but synapse_ground is unavailable; continuing without Synapse context."
+        return 0
+    fi
+
+    local prompt_content="${1:-}" role project_dir project query principal out
+    role="${RALPH_ROLE:-engineer}"
+    project_dir="${PROJECT_DIR:-$(pwd)}"
+    project="$(basename "$project_dir")"
+    principal="${SYNAPSE_PRINCIPAL:-}"
+    query="${SYNAPSE_GROUND_QUERY:-Ralph main iteration grounding for project '$project' as role '$role'. Retrieve relevant prior decisions, constraints, failures, and next-task context.}"
+    if [[ -n "$prompt_content" ]]; then
+        query+=$'\nCurrent agent instructions excerpt:\n'
+        query+="${prompt_content:0:${SYNAPSE_GROUND_PROMPT_CHARS:-800}}"
+    fi
+
+    out=$(synapse_ground "$query" "$principal") || true
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return 0
 }
 
 #######################################
@@ -1289,7 +1365,12 @@ run_ai_with_fallback() {
         # Capture the real exit code via `|| rc=$?` — a bare `if cmd; then return 0; fi`
         # would leave $? as the (false) if's status of 0, masking the failure.
         rc=0
-        retry_with_backoff "$attempts" "$delay" -- run_ai_tool "$tool" "$model" "$prompt" "$log" "$out" || rc=$?
+        local model_attempts="$attempts"
+        if ralph_local_model_attempt "$tool" "$model"; then
+            model_attempts="${RALPH_LOCAL_MODEL_RETRY_ATTEMPTS:-1}"
+            [[ "$model_attempts" =~ ^[0-9]+$ && "$model_attempts" -gt 0 ]] || model_attempts=1
+        fi
+        retry_with_backoff "$model_attempts" "$delay" -- run_ai_tool "$tool" "$model" "$prompt" "$log" "$out" || rc=$?
         [[ $rc -eq 0 ]] && return 0
         [[ $idx -ge $total ]] && break   # chain exhausted -> graceful degradation done
         # Classify on stdout (the result file) PLUS the tail of the log — CLI tools write
@@ -1297,7 +1378,13 @@ run_ai_with_fallback() {
         category=$(classify_tool_failure "$(cat "$out" 2>/dev/null || true)$(printf '\n')$(tail -n 40 "$log" 2>/dev/null || true)" "$rc")
         case "$category" in
             rate_limit|overloaded|quota|timeout)
-                log_warning "Model '${model:-<self-select>}' hit '$category' — degrading to the next model" ;;
+                if [[ "$category" == "timeout" ]] && ralph_local_model_attempt "$tool" "$model"; then
+                    local local_timeout_msg="Local model '${model:-<self-select>}' timed out after ${model_attempts:-$attempts} attempt(s); downshifting to a cheaper model/settings profile. Consider RALPH_OLLAMA_DOWNSHIFT_MODELS, RALPH_OLLAMA_MAX_BYTES, or lowering RALPH_OLLAMA_AGENT_NUM_PREDICT."
+                    log_warning "$local_timeout_msg"
+                    printf '%s\n' "$local_timeout_msg" >> "$log" 2>/dev/null || true
+                else
+                    log_warning "Model '${model:-<self-select>}' hit '$category' — degrading to the next model"
+                fi ;;
             *)
                 log_warning "Model '${model:-<self-select>}' failed ('$category'); not a capacity issue — keeping it"
                 break ;;
@@ -1627,6 +1714,11 @@ execute_iteration() {
     user_provided_context+="$(recall_signals)"
     user_provided_context+="$(recall_log)"
     declare -F recall_skills >/dev/null && user_provided_context+="$(recall_skills)" || true
+
+    # Optional in-loop Synapse grounding: fail-open retrieval from the agent backplane.
+    local synapse_context
+    synapse_context=$(synapse_grounding_context "$prompt_content") || true
+    [[ -n "$synapse_context" ]] && printf -v user_provided_context '%s\n%s' "$user_provided_context" "$synapse_context"
 
     # Detect available opencode skills
     local available_skills=""

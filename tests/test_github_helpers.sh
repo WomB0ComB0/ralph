@@ -25,6 +25,12 @@ eq "ralph_gh_capture preserves non-transient rc" "42" "$rc"
 eq "ralph_gh_capture returns non-transient output" "GraphQL: Field does not exist" "$out"
 unset -f non_transient_cmd
 
+transient_cmd() { printf 'HTTP 503: Service Unavailable\n' >&2; return 1; }
+wrap_out=$(bash -c "source '$R/lib/github.sh'; transient_cmd() { printf 'HTTP 503: Service Unavailable\\n' >&2; return 1; }; ralph_gh_or_exit 'wrapper smoke' transient_cmd" 2>&1); wrap_rc=$?
+eq "ralph_gh_or_exit exits EX_TEMPFAIL for transient failures" "75" "$wrap_rc"
+printf '%s' "$wrap_out" | grep -q 'transient GitHub failure while wrapper smoke' && ok "ralph_gh_or_exit prints shared failure message" || bad "wrapper message missing: $wrap_out"
+unset -f transient_cmd
+
 cat > "$TMP/bin/gh" <<'SH'
 #!/bin/sh
 if [ "$1 $2" = "run list" ]; then
