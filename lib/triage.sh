@@ -249,13 +249,25 @@ _triage_apply_fix() {
     fi
 
     command_exists git || { log_error "git is required for --apply."; return 1; }
-    # Set the cleanup trap (single-quoted -> evaluated at RETURN, empty-guarded) BEFORE creating the
-    # temp files, and validate each mktemp, so a mktemp failure can't leak or act on an empty path.
+    # Keep temp cleanup explicit: RETURN traps outlive local scope in bash, so every
+    # early-return path must clear the trap before the locals disappear under set -u.
     local work="" lf="" of=""
-    trap '[[ -n "$work" ]] && rm -rf "$work"; [[ -n "$lf" ]] && rm -f "$lf"; [[ -n "$of" ]] && rm -f "$of"' RETURN
-    work=$(mktemp -d) || { log_error "[$repo] mktemp -d failed."; return 1; }
-    lf=$(mktemp)     || { log_error "[$repo] mktemp failed.";    return 1; }
-    of=$(mktemp)     || { log_error "[$repo] mktemp failed.";    return 1; }
+    _triage_apply_fix_cleanup() {
+        [[ -n "${work:-}" ]] && rm -rf "$work"
+        [[ -n "${lf:-}" ]] && rm -f "$lf"
+        [[ -n "${of:-}" ]] && rm -f "$of"
+        work=""; lf=""; of=""
+    }
+    _triage_apply_fix_return() {
+        local rc="${1:-0}"
+        _triage_apply_fix_cleanup
+        trap - RETURN
+        return "$rc"
+    }
+    trap '_triage_apply_fix_cleanup' RETURN
+    work=$(mktemp -d) || { log_error "[$repo] mktemp -d failed."; _triage_apply_fix_return 1; return $?; }
+    lf=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
+    of=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
     log_info "[$repo] cloning $base_branch ..."
     # Clone the base branch directly (--depth 50 is single-branch, so a later checkout of a
     # different branch silently fails and would leave the agent on the wrong code).
@@ -263,9 +275,9 @@ _triage_apply_fix() {
     clone_out=$(_triage_gh_or_transient "cloning branch '$base_branch'" "$repo" gh repo clone "$repo" "$work" -- --depth 50 --branch "$base_branch") || clone_rc=$?
     if [[ "$clone_rc" -eq 75 ]]; then
         log_warning "[$repo] deferred autofix: clone unavailable due to transient GitHub failure."
-        return 0
+        _triage_apply_fix_return 0; return $?
     elif [[ "$clone_rc" -ne 0 ]]; then
-        log_error "[$repo] clone of branch '$base_branch' failed: $clone_out"; return 1
+        log_error "[$repo] clone of branch '$base_branch' failed: $clone_out"; _triage_apply_fix_return 1; return $?
     fi
     # Default to the tool's OWN model self-selection (opencode) unless a local model / pin is set:
     # run_ai_with_fallback always resolves a concrete model that may not be authenticated.
@@ -289,30 +301,30 @@ _triage_apply_fix() {
 
     if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
         log_warning "[$repo] fix attempt produced no changes — no PR opened."
-        return 0
+        _triage_apply_fix_return 0; return $?
     fi
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
         log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-* branch off '$default_branch'."
-        return 1
+        _triage_apply_fix_return 1; return $?
     fi
     if ! ( cd "$work" \
             && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
             && git add -A && git commit -q -m "$title" \
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
-        log_error "[$repo] commit/push failed."; return 1
+        log_error "[$repo] commit/push failed."; _triage_apply_fix_return 1; return $?
     fi
     local pr_rc=0 pr_out
     pr_out=$(_triage_gh_or_transient "creating PR from $cur" "$repo" gh pr create --repo "$repo" --base "$base_branch" --head "$cur" --title "$title" --body "$body") || pr_rc=$?
     if [[ "$pr_rc" -eq 75 ]]; then
         log_warning "[$repo] pushed $cur but deferred PR creation due to transient GitHub failure."
-        return 0
+        _triage_apply_fix_return 0; return $?
     elif [[ "$pr_rc" -ne 0 ]]; then
-        log_error "[$repo] failed to create PR from $cur: $pr_out"; return 1
+        log_error "[$repo] failed to create PR from $cur: $pr_out"; _triage_apply_fix_return 1; return $?
     fi
     printf '%s\n' "$pr_out" | tail -1
     log_success "[$repo] opened a PR from $cur against $base_branch."
-    return 0
+    _triage_apply_fix_return 0; return $?
 }
 
 # Fix the latest (or --run) failing CI run -> PR against the failing branch.
