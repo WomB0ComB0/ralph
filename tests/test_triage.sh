@@ -309,6 +309,44 @@ printf '%s' "$sdry" | grep -q 'ralph/fix-sec-7' && ok "dry-run uses the security
 printf '%s' "$sdry" | grep -q -- '--base main' && ok "security PR targets the default branch" || bad "wrong base: $sdry"
 printf '%s' "$sdry" | grep -q 'fix(security): js/sql-injection' && ok "dry-run titles by rule" || bad "no rule title: $sdry"
 [[ ! -s "$GITLOG3" ]] && ok "fix-security dry-run invoked git ZERO times" || bad "dry-run touched git: $(cat "$GITLOG3")"
+unset -f git
+
+# APPLY with an agent that makes no edits must return cleanly under `set -u`.
+# A lingering RETURN trap previously fired after local temp vars went out of scope.
+SEC_REMOTE="$TMP/sec-remote.git"
+SEC_SRC="$TMP/sec-src"
+mkdir -p "$SEC_SRC"
+git init -q --bare "$SEC_REMOTE"
+git -C "$SEC_SRC" init -q
+git -C "$SEC_SRC" checkout -q -b main
+git -C "$SEC_SRC" config user.name test
+git -C "$SEC_SRC" config user.email test@example.com
+mkdir -p "$SEC_SRC/src"
+printf 'const query = req.query.id;\n' > "$SEC_SRC/src/db.js"
+git -C "$SEC_SRC" add src/db.js
+git -C "$SEC_SRC" commit -q -m init
+git -C "$SEC_SRC" remote add origin "$SEC_REMOTE"
+git -C "$SEC_SRC" push -q origin main
+GHLOG_SEC_APPLY="$TMP/ghcalls-sec-apply"; : > "$GHLOG_SEC_APPLY"
+SEC_ALERT_JSON='{"number":8,"rule":{"id":"js/sql-injection","security_severity_level":"high","full_description":"SQL injection via req.query","help":"Use parameterized queries"},"most_recent_instance":{"location":{"path":"src/db.js","start_line":1}}}'
+(
+    set -u
+    TOOL=opencode AI_RETRY_ATTEMPTS=1
+    gh() {
+        echo "gh $*" >> "$GHLOG_SEC_APPLY"
+        case "$*" in
+            repo\ view*) printf 'main\n' ;;
+            api\ repos/o/r/code-scanning/alerts/8*) printf '%s\n' "$SEC_ALERT_JSON" ;;
+            repo\ clone*) command git clone -q --branch main "$SEC_REMOTE" "$4" ;;
+            *) echo "unexpected gh args: $*" >&2; return 9 ;;
+        esac
+    }
+    run_ai_tool() { printf 'no changes requested\n' > "$5"; return 0; }
+    triage_autofix_security "o/r" 1 8 >/dev/null
+)
+eq "fix-security apply no-change is set -u safe" "0" "$?"
+if printf '%s\n' "$(cat "$GHLOG_SEC_APPLY")" | grep -q 'pr create'; then bad "fix-security no-change opened PR: $(cat "$GHLOG_SEC_APPLY")"; else ok "fix-security no-change opens no PR"; fi
+unset -f gh run_ai_tool 2>/dev/null || true
 
 
 gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
