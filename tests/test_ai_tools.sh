@@ -171,6 +171,29 @@ tb=$(_timeout_bin)
 { [[ -z "$tb" ]] || command -v "$tb" >/dev/null; } && ok "_timeout_bin names an installed binary (or none)" || bad "_timeout_bin named a missing binary: $tb"
 
 
+echo "== executor startup failure classification: sandbox failures are not valid AI responses =="
+exmsg='bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.'
+eq "bwrap namespace failure -> executor" "executor" "$(classify_tool_failure "$exmsg" 0)"
+eq "startup classifier gives concrete reason" "executor sandbox startup failure" "$(classify_executor_startup_failure "$exmsg" 0)"
+eq "command-not-found rc -> executor" "executor" "$(classify_tool_failure "" 127)"
+
+edir=$(mktemp -d); estub="$edir/bin"; mkdir -p "$estub" "$edir/project"
+cat >"$estub/opencode" <<'SH'
+#!/bin/bash
+printf 'bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.\n' >&2
+exit 0
+SH
+chmod +x "$estub/opencode"
+lf="$edir/log"; of="$edir/out"; : > "$lf"; : > "$of"
+PATH="$estub:$PATH" RALPH_TOOL_TIMEOUT=5 PROJECT_DIR="$edir/project" RALPH_OPENCODE_JSON=0 LOG_FILE="$lf"
+iteration=1 MAX_ITERATIONS=1
+run_ai_tool opencode "" "prompt" "$lf" "$of"; executor_rc=$?
+eq "zero-exit sandbox startup failure is promoted to executor rc" 70 "$executor_rc"
+grep -q 'executor_failure: executor sandbox startup failure' "$lf" && ok "executor failure reason recorded" || bad "executor failure reason missing: $(cat "$lf")"
+if grep -q 'AI Response Received' "$lf"; then bad "executor failure logged as AI response"; else ok "executor failure does not log AI response"; fi
+unset LOG_FILE RALPH_OPENCODE_JSON RALPH_TOOL_TIMEOUT PROJECT_DIR
+rm -rf "$edir"
+
 echo "== run_ai_tool watchdog: internal timeout kills a hung CLI even without coreutils timeout =="
 wdir=$(mktemp -d); stub="$wdir/bin"; mkdir -p "$stub"
 cat >"$stub/opencode" <<'SH'

@@ -404,6 +404,10 @@ determine_model() {
 classify_tool_failure() {
     local out="$1" rc="${2:-1}" lc
     [[ "$rc" =~ ^[0-9]+$ ]] || rc=1   # guard the arithmetic below against a non-numeric exit code
+    if classify_executor_startup_failure "$out" "$rc" >/dev/null 2>&1; then
+        echo executor
+        return 0
+    fi
     # Deterministic process exit/signal codes take precedence over text (providers reword their
     # messages; exit codes don't). A process killed by signal N exits with code 128+N; we map by
     # the signal's SEMANTICS (ref: WomB0ComB0/bash-testing process-signal signal table):
@@ -420,7 +424,7 @@ classify_tool_failure() {
     fi
     case "$rc" in
         124)     echo timeout; return 0 ;;   # GNU `timeout`'s own "timed out" exit code
-        126|127) echo other;   return 0 ;;   # not executable / command not found -> no model helps
+        126|127) echo executor; return 0 ;;  # not executable / command not found -> no model helps
     esac
     lc="${out,,}"   # Bash 4 native lowercase
     case "$lc" in
@@ -442,6 +446,30 @@ classify_tool_failure() {
         *unauthorized*|*authentication*|*"invalid api key"*|*"api key not valid"*|*"missing bearer"*|*forbidden*|*permission_denied*|*"permission denied"*|*permission_error*|*unauthenticated*) echo auth ;;
         *) echo other ;;
     esac
+}
+
+# Classify failures that mean the executor never actually reached useful agent
+# execution. These must not be counted as "AI Response Received" or no-op work.
+classify_executor_startup_failure() {
+    local out="${1:-}" rc="${2:-0}" lc
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=0
+    case "$rc" in
+        126) printf 'executor command is not executable'; return 0 ;;
+        127) printf 'executor command was not found'; return 0 ;;
+    esac
+    lc="${out,,}"
+    case "$lc" in
+        *"bwrap:"*"no permissions to create a new namespace"*|\
+        *"bubblewrap:"*"no permissions to create a new namespace"*|\
+        *"unprivileged_userns_clone"*|\
+        *"failed to create"*namespace*|\
+        *"cannot create"*namespace*|\
+        *"operation not permitted"*namespace*)
+            printf 'executor sandbox startup failure'
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 # A local model to prefer when no model is pinned — "use local unless specified". Only
@@ -1329,6 +1357,12 @@ run_ai_tool() {
         normalize_opencode_json_output "$output_file" "$log_file"
     fi
 
+    local executor_failure_reason=""
+    if executor_failure_reason=$(classify_executor_startup_failure "$(cat "$output_file" 2>/dev/null || true)$(printf '\n')$(tail -n 80 "$log_file" 2>/dev/null || true)" "$exit_code"); then
+        [[ "$exit_code" -eq 0 ]] && exit_code=70
+        printf 'executor_failure: %s\n' "$executor_failure_reason" >> "$log_file" 2>/dev/null || true
+    fi
+
     # Clear line and show final success/fail
     printf "\r\033[K"
 
@@ -1337,6 +1371,8 @@ run_ai_tool() {
         # A successful call establishes a session the next iteration can --continue.
         # Plain global (run_ai_tool runs in-process across iterations); no need to export.
         [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] && _RALPH_SESSION_ESTABLISHED=1
+    elif [[ -n "$executor_failure_reason" ]]; then
+        log_error "Iteration $iteration: AI Tool Failed (executor_failure: $executor_failure_reason; Exit $exit_code)"
     else
         log_error "Iteration $iteration: AI Tool Failed (Exit $exit_code)"
     fi

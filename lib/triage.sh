@@ -295,6 +295,47 @@ _triage_write_autofix_nochange_diag() {
     log_warning "[$repo] autofix evidence: $dir"
 }
 
+_triage_autofix_failure_reason() {
+    local log_file="$1" output_file="$2" rc="${3:-1}" combined="" reason=""
+    combined=$( { cat "$output_file" 2>/dev/null; tail -n 80 "$log_file" 2>/dev/null; } | tr '\n' ' ' )
+    if declare -F classify_executor_startup_failure >/dev/null 2>&1 && reason=$(classify_executor_startup_failure "$combined" "$rc"); then
+        printf 'executor_failure: %s' "$reason"
+        return 0
+    fi
+    case "$rc" in
+        124) printf 'provider_failure: tool timed out' ;;
+        *)   printf 'provider_failure: tool exited %s' "$rc" ;;
+    esac
+}
+
+_triage_write_autofix_failure_diag() {
+    local repo="$1" base_branch="$2" branch="$3" log_file="$4" output_file="$5" rc="${6:-1}" filter_context="${7:-}"
+    local dir reason
+    dir=$(_triage_autofix_diag_dir "$repo" "$branch")
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        log_warning "[$repo] could not write autofix failure diagnostics."
+        return 0
+    fi
+    chmod 700 "$dir" 2>/dev/null || true
+    [[ -f "$log_file" ]] && cp "$log_file" "$dir/tool.log" 2>/dev/null || :
+    [[ -f "$output_file" ]] && cp "$output_file" "$dir/tool.out" 2>/dev/null || :
+    reason=$(_triage_autofix_failure_reason "$log_file" "$output_file" "$rc")
+    {
+        printf 'reason: %s\n' "$reason"
+        printf 'repo: %s\n' "$repo"
+        printf 'base_branch: %s\n' "$base_branch"
+        printf 'fix_branch: %s\n' "$branch"
+        printf 'tool: %s\n' "${TOOL:-opencode}"
+        printf 'model: %s\n' "${SELECTED_MODEL:-${RALPH_LOCAL_MODEL:-<self-select>}}"
+        printf 'tool_exit_code: %s\n' "$rc"
+        [[ -n "$filter_context" ]] && printf 'filter_context: %s\n' "$filter_context"
+        printf 'tool_log: %s\n' "$dir/tool.log"
+        printf 'tool_output: %s\n' "$dir/tool.out"
+    } > "$dir/diagnostic.txt" 2>/dev/null || true
+    log_error "[$repo] autofix failed before producing a usable agent result: $reason"
+    log_warning "[$repo] autofix evidence: $dir"
+}
+
 
 _triage_alert_workflow_path() {
     local alert_json="$1" path="$2" analysis_key tool
@@ -376,13 +417,18 @@ _triage_apply_fix() {
     # run_ai_with_fallback always resolves a concrete model that may not be authenticated.
     local fix_model_source="fallback"
     [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]] && fix_model_source="selfselect"
+    local ai_rc=0
     ( cd "$work" && export PROJECT_DIR="$work"
       git checkout -b "$branch" >/dev/null 2>&1   # already on $base_branch from the clone
       if [[ "$fix_model_source" == "selfselect" ]]; then
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool "${TOOL:-opencode}" "" "$prompt" "$lf" "$of"
       else
           RALPH_ROLE=engineer run_ai_with_fallback "${TOOL:-opencode}" engineer "$prompt" "$lf" "$of"
-      fi ) || true
+      fi ) || ai_rc=$?
+    if [[ "$ai_rc" -ne 0 ]]; then
+        _triage_write_autofix_failure_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$ai_rc" "$filter_context"
+        _triage_apply_fix_return 1; return $?
+    fi
 
     # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
     # opens only on a real source change.

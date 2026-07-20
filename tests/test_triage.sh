@@ -368,6 +368,41 @@ grep -q 'I cannot safely identify' "$SEC_DIAG_PATH/tool.out" && ok "diagnostic a
 grep -q 'insufficient context' "$SEC_DIAG_PATH/tool.log" && ok "diagnostic artifact preserves tool log" || bad "tool log not preserved"
 unset -f gh run_ai_tool 2>/dev/null || true
 
+GHLOG_SEC_FAIL="$TMP/ghcalls-sec-fail"; : > "$GHLOG_SEC_FAIL"
+SEC_FAIL_OUT="$TMP/sec-fail.out"
+SEC_FAIL_DIAG_DIR="$TMP/sec-fail-diags"
+(
+    set -u
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 RALPH_AUTOFIX_DIAG_DIR="$SEC_FAIL_DIAG_DIR"
+    gh() {
+        echo "gh $*" >> "$GHLOG_SEC_FAIL"
+        case "$*" in
+            repo\ view*) printf 'main\n' ;;
+            api\ repos/o/r/code-scanning/alerts/8*) printf '%s\n' "$SEC_ALERT_JSON" ;;
+            repo\ clone*) command git clone -q --branch main "$SEC_REMOTE" "$4" ;;
+            *) echo "unexpected gh args: $*" >&2; return 9 ;;
+        esac
+    }
+    classify_executor_startup_failure() {
+        case "$1" in *"No permissions to create a new namespace"*) printf 'executor sandbox startup failure'; return 0 ;; esac
+        return 1
+    }
+    run_ai_tool() {
+        printf 'bwrap: No permissions to create a new namespace\n' > "$4"
+        : > "$5"
+        return 70
+    }
+    triage_autofix_security "o/r" 1 8
+) >"$SEC_FAIL_OUT" 2>&1
+eq "fix-security executor failure returns nonzero" "1" "$?"
+if printf '%s\n' "$(cat "$GHLOG_SEC_FAIL")" | grep -q 'pr create'; then bad "executor failure opened PR: $(cat "$GHLOG_SEC_FAIL")"; else ok "executor failure opens no PR"; fi
+grep -q 'autofix failed before producing a usable agent result: executor_failure: executor sandbox startup failure' "$SEC_FAIL_OUT" && ok "executor failure emits explicit diagnostic reason" || bad "missing executor failure reason: $(cat "$SEC_FAIL_OUT")"
+SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
+[[ -n "$SEC_FAIL_DIAG_PATH" && -f "$SEC_FAIL_DIAG_PATH/diagnostic.txt" ]] && ok "executor failure writes diagnostic artifact" || bad "missing executor diagnostic artifact under $SEC_FAIL_DIAG_DIR"
+grep -q 'reason: executor_failure: executor sandbox startup failure' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records reason" || bad "executor diagnostic reason missing: $(cat "$SEC_FAIL_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
+grep -q 'tool_exit_code: 70' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records exit code" || bad "executor diagnostic exit code missing"
+unset -f gh run_ai_tool classify_executor_startup_failure 2>/dev/null || true
+
 WF_REMOTE="$TMP/wf-remote.git"
 WF_SRC="$TMP/wf-src"
 mkdir -p "$WF_SRC/.github/workflows"

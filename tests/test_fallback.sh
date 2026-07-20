@@ -31,7 +31,7 @@ eq "exit 124 (timeout wrapper) -> timeout"  "timeout" "$(classify_tool_failure '
 eq "exit 137 (SIGKILL / --kill-after / OOM) -> timeout" "timeout" "$(classify_tool_failure 'Killed' 137)"
 eq "exit 130 (SIGINT / Ctrl-C) -> other (no fallback)"  "other"   "$(classify_tool_failure '' 130)"
 eq "exit 143 (SIGTERM) -> other"            "other"   "$(classify_tool_failure '' 143)"
-eq "exit 127 (binary not found) -> other"   "other"   "$(classify_tool_failure 'opencode: command not found' 127)"
+eq "exit 127 (binary not found) -> executor" "executor" "$(classify_tool_failure 'opencode: command not found' 127)"
 # 128+N signal-exit range, mapped by signal semantics:
 eq "exit 152 (128+24 SIGXCPU, CPU limit) -> timeout"  "timeout" "$(classify_tool_failure '' 152)"
 eq "exit 153 (128+25 SIGXFSZ, file limit) -> timeout" "timeout" "$(classify_tool_failure '' 153)"
