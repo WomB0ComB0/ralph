@@ -73,6 +73,7 @@ Ralph revolves around a few durable files and stores:
 | `.ralph/runs/<run-id>/` | Per-run traces and recovery data. |
 | `.ralph/runs/<run-id>/run.json` | Atomic lifecycle manifest with monotonic heartbeat sequence, progress, limits, resume lineage, and terminal outcome. |
 | `.ralph/runs/<run-id>/process-cleanup.json` | Bounded, sanitized, allowlisted provider/live-smoke cleanup latency and escalation evidence. |
+| `.ralph/runs/<run-id>/autofix/` | No-change autofix diagnostics with the local tool log/output path and source-filter status. |
 | `.ralph/runs/<run-id>/providers/` | Provider state such as normalized opencode JSON events or Jules session metadata. |
 | `.ralph/artifacts/verification.json` | Ralph-owned evidence for declared verification commands, exit codes, timeouts, and output tails. |
 | `.ralph/artifacts/live-smoke.json` | Opt-in live app smoke evidence: command, port, probes, diagnostics, and server log tail. |

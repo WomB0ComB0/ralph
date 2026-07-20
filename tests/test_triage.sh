@@ -328,10 +328,12 @@ git -C "$SEC_SRC" commit -q -m init
 git -C "$SEC_SRC" remote add origin "$SEC_REMOTE"
 git -C "$SEC_SRC" push -q origin main
 GHLOG_SEC_APPLY="$TMP/ghcalls-sec-apply"; : > "$GHLOG_SEC_APPLY"
+SEC_APPLY_OUT="$TMP/sec-apply.out"
+SEC_DIAG_DIR="$TMP/sec-diags"
 SEC_ALERT_JSON='{"number":8,"rule":{"id":"js/sql-injection","security_severity_level":"high","full_description":"SQL injection via req.query","help":"Use parameterized queries"},"most_recent_instance":{"location":{"path":"src/db.js","start_line":1}}}'
 (
     set -u
-    TOOL=opencode AI_RETRY_ATTEMPTS=1
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 RALPH_AUTOFIX_DIAG_DIR="$SEC_DIAG_DIR"
     gh() {
         echo "gh $*" >> "$GHLOG_SEC_APPLY"
         case "$*" in
@@ -341,11 +343,22 @@ SEC_ALERT_JSON='{"number":8,"rule":{"id":"js/sql-injection","security_severity_l
             *) echo "unexpected gh args: $*" >&2; return 9 ;;
         esac
     }
-    run_ai_tool() { printf 'no changes requested\n' > "$5"; return 0; }
-    triage_autofix_security "o/r" 1 8 >/dev/null
-)
+    run_ai_tool() {
+        printf 'model: insufficient context to safely patch this alert\n' > "$4"
+        printf 'I cannot safely identify the vulnerable code path from the prompt.\n' > "$5"
+        return 0
+    }
+    triage_autofix_security "o/r" 1 8
+) >"$SEC_APPLY_OUT" 2>&1
 eq "fix-security apply no-change is set -u safe" "0" "$?"
 if printf '%s\n' "$(cat "$GHLOG_SEC_APPLY")" | grep -q 'pr create'; then bad "fix-security no-change opened PR: $(cat "$GHLOG_SEC_APPLY")"; else ok "fix-security no-change opens no PR"; fi
+grep -q 'no-change diagnostic: agent reported it could not safely produce a fix' "$SEC_APPLY_OUT" && ok "fix-security no-change emits a reason" || bad "missing no-change reason: $(cat "$SEC_APPLY_OUT")"
+grep -q 'autofix evidence:' "$SEC_APPLY_OUT" && ok "fix-security no-change prints evidence path" || bad "missing evidence path: $(cat "$SEC_APPLY_OUT")"
+SEC_DIAG_PATH=$(find "$SEC_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
+[[ -n "$SEC_DIAG_PATH" && -f "$SEC_DIAG_PATH/diagnostic.txt" ]] && ok "fix-security no-change writes diagnostic artifact" || bad "missing diagnostic artifact under $SEC_DIAG_DIR"
+grep -q 'reason: agent reported it could not safely produce a fix' "$SEC_DIAG_PATH/diagnostic.txt" && ok "diagnostic artifact records reason" || bad "diagnostic reason missing: $(cat "$SEC_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
+grep -q 'I cannot safely identify' "$SEC_DIAG_PATH/tool.out" && ok "diagnostic artifact preserves tool output" || bad "tool output not preserved"
+grep -q 'insufficient context' "$SEC_DIAG_PATH/tool.log" && ok "diagnostic artifact preserves tool log" || bad "tool log not preserved"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 
