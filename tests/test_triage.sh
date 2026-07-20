@@ -309,6 +309,13 @@ printf '%s' "$sdry" | grep -q 'ralph/fix-sec-7' && ok "dry-run uses the security
 printf '%s' "$sdry" | grep -q -- '--base main' && ok "security PR targets the default branch" || bad "wrong base: $sdry"
 printf '%s' "$sdry" | grep -q 'fix(security): js/sql-injection' && ok "dry-run titles by rule" || bad "no rule title: $sdry"
 [[ ! -s "$GITLOG3" ]] && ok "fix-security dry-run invoked git ZERO times" || bad "dry-run touched git: $(cat "$GITLOG3")"
+
+WF_ALERT_JSON='{"number":9,"tool":{"name":"zizmor"},"rule":{"id":"zizmor/unpinned-uses","severity":"error","help":"pin actions"},"most_recent_instance":{"analysis_key":".github/workflows/security.yml:zizmor","location":{"path":"security.yml","start_line":24}}}'
+gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts/9*) printf '%s\n' "$WF_ALERT_JSON" ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+wdry=$(triage_autofix_security "o/r" 0 9 2>&1)
+printf '%s' "$wdry" | grep -q 'appears workflow-backed (.github/workflows/security.yml)' && ok "fix-security dry-run flags workflow-backed alert" || bad "workflow-backed warning missing: $wdry"
+printf '%s' "$wdry" | grep -q 'likely workflow-backed alert (.github/workflows/security.yml)' && ok "fix-security dry-run plan labels workflow-backed alert" || bad "workflow-backed plan note missing: $wdry"
+[[ ! -s "$GITLOG3" ]] && ok "workflow-backed dry-run still invoked git ZERO times" || bad "workflow-backed dry-run touched git: $(cat "$GITLOG3")"
 unset -f git
 
 # APPLY with an agent that makes no edits must return cleanly under `set -u`.
@@ -359,6 +366,58 @@ SEC_DIAG_PATH=$(find "$SEC_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
 grep -q 'reason: agent reported it could not safely produce a fix' "$SEC_DIAG_PATH/diagnostic.txt" && ok "diagnostic artifact records reason" || bad "diagnostic reason missing: $(cat "$SEC_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q 'I cannot safely identify' "$SEC_DIAG_PATH/tool.out" && ok "diagnostic artifact preserves tool output" || bad "tool output not preserved"
 grep -q 'insufficient context' "$SEC_DIAG_PATH/tool.log" && ok "diagnostic artifact preserves tool log" || bad "tool log not preserved"
+unset -f gh run_ai_tool 2>/dev/null || true
+
+WF_REMOTE="$TMP/wf-remote.git"
+WF_SRC="$TMP/wf-src"
+mkdir -p "$WF_SRC/.github/workflows"
+git init -q --bare "$WF_REMOTE"
+git -C "$WF_SRC" init -q
+git -C "$WF_SRC" checkout -q -b main
+git -C "$WF_SRC" config user.name test
+git -C "$WF_SRC" config user.email test@example.com
+printf 'name: security
+on: [push]
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+' > "$WF_SRC/.github/workflows/security.yml"
+git -C "$WF_SRC" add .github/workflows/security.yml
+git -C "$WF_SRC" commit -q -m init
+git -C "$WF_SRC" remote add origin "$WF_REMOTE"
+git -C "$WF_SRC" push -q origin main
+GHLOG_WF_APPLY="$TMP/ghcalls-wf-apply"; : > "$GHLOG_WF_APPLY"
+WF_APPLY_OUT="$TMP/wf-apply.out"
+WF_DIAG_DIR="$TMP/wf-diags"
+(
+    set -u
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 RALPH_AUTOFIX_DIAG_DIR="$WF_DIAG_DIR"
+    gh() {
+        echo "gh $*" >> "$GHLOG_WF_APPLY"
+        case "$*" in
+            repo\ view*) printf 'main\n' ;;
+            api\ repos/o/r/code-scanning/alerts/9*) printf '%s\n' "$WF_ALERT_JSON" ;;
+            repo\ clone*) command git clone -q --branch main "$WF_REMOTE" "$4" ;;
+            *) echo "unexpected gh args: $*" >&2; return 9 ;;
+        esac
+    }
+    run_ai_tool() {
+        printf 'pinning workflow action only\n' > "$4"
+        sed -i 's/actions\/checkout@v4/actions\/checkout@0123456789abcdef0123456789abcdef01234567/' .github/workflows/security.yml
+        printf 'Pinned workflow action.\n' > "$5"
+        return 0
+    }
+    triage_autofix_security "o/r" 1 9
+) >"$WF_APPLY_OUT" 2>&1
+eq "workflow-backed apply no-change is set -u safe" "0" "$?"
+if printf '%s\n' "$(cat "$GHLOG_WF_APPLY")" | grep -q 'pr create'; then bad "workflow-backed no-change opened PR: $(cat "$GHLOG_WF_APPLY")"; else ok "workflow-backed no-change opens no PR"; fi
+grep -q 'no-change diagnostic: workflow-backed alert changed only files that source-only autofix excludes' "$WF_APPLY_OUT" && ok "workflow-backed no-change emits explicit reason" || bad "missing workflow-backed reason: $(cat "$WF_APPLY_OUT")"
+WF_DIAG_PATH=$(find "$WF_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
+[[ -n "$WF_DIAG_PATH" && -f "$WF_DIAG_PATH/diagnostic.txt" ]] && ok "workflow-backed no-change writes diagnostic artifact" || bad "missing workflow diagnostic artifact under $WF_DIAG_DIR"
+grep -q 'filter_context: workflow:.github/workflows/security.yml' "$WF_DIAG_PATH/diagnostic.txt" && ok "workflow diagnostic records filter context" || bad "workflow filter context missing: $(cat "$WF_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
+grep -q '^ M .github/workflows/security.yml' "$WF_DIAG_PATH/status-before-source-filter.txt" && ok "workflow diagnostic records stripped workflow diff" || bad "workflow pre-filter status missing: $(cat "$WF_DIAG_PATH/status-before-source-filter.txt" 2>/dev/null)"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 
