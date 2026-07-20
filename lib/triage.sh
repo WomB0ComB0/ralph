@@ -227,6 +227,65 @@ _triage_safe_push_branch() {
 # default branch, and never touches the default branch itself.
 triage_sec_branch_name() { printf 'ralph/fix-sec-%s\n' "$1"; }
 
+_triage_autofix_diag_dir() {
+    local repo="$1" branch="$2" root slug ts
+    root="${RALPH_AUTOFIX_DIAG_DIR:-${RUN_DIR:-${PROJECT_DIR:-.}/.ralph/runs/manual}/autofix}"
+    slug=$(printf '%s-%s' "$repo" "$branch" | tr '/ :' '---' | tr -cs 'A-Za-z0-9._-' '-')
+    ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+    printf '%s/%s-%s\n' "$root" "$ts" "$slug"
+}
+
+_triage_autofix_nochange_reason() {
+    local log_file="$1" output_file="$2" pre_filter_status="$3" combined=""
+    if [[ -n "$pre_filter_status" ]]; then
+        printf 'agent changed only files that Ralph excludes from autofix PRs'
+        return 0
+    fi
+    combined=$( { tail -n 80 "$output_file" 2>/dev/null; tail -n 80 "$log_file" 2>/dev/null; } | tr '\n' ' ' )
+    if [[ -z "${combined//[[:space:]]/}" ]]; then
+        printf 'agent produced no transcript output'
+    elif printf '%s' "$combined" | grep -qiE 'cannot|can.t|unable|refus|permission|auth|not enough|insufficient|missing context'; then
+        printf 'agent reported it could not safely produce a fix'
+    elif printf '%s' "$combined" | grep -qiE 'no changes|nothing to change|already fixed|already secure|no fix needed|not necessary|cannot reproduce'; then
+        printf 'agent reported no applicable change'
+    else
+        printf 'agent returned successfully but produced no tracked source diff'
+    fi
+}
+
+_triage_write_autofix_nochange_diag() {
+    local repo="$1" base_branch="$2" branch="$3" log_file="$4" output_file="$5" pre_filter_status="$6" post_filter_status="$7"
+    local dir reason before_count after_count
+    dir=$(_triage_autofix_diag_dir "$repo" "$branch")
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        log_warning "[$repo] could not write autofix no-change diagnostics."
+        return 0
+    fi
+    chmod 700 "$dir" 2>/dev/null || true
+    [[ -f "$log_file" ]] && cp "$log_file" "$dir/tool.log" 2>/dev/null || :
+    [[ -f "$output_file" ]] && cp "$output_file" "$dir/tool.out" 2>/dev/null || :
+    printf '%s\n' "$pre_filter_status" > "$dir/status-before-source-filter.txt" 2>/dev/null || true
+    printf '%s\n' "$post_filter_status" > "$dir/status-after-source-filter.txt" 2>/dev/null || true
+    reason=$(_triage_autofix_nochange_reason "$log_file" "$output_file" "$pre_filter_status")
+    before_count=$(printf '%s\n' "$pre_filter_status" | grep -c . 2>/dev/null || true)
+    after_count=$(printf '%s\n' "$post_filter_status" | grep -c . 2>/dev/null || true)
+    {
+        printf 'reason: %s\n' "$reason"
+        printf 'repo: %s\n' "$repo"
+        printf 'base_branch: %s\n' "$base_branch"
+        printf 'fix_branch: %s\n' "$branch"
+        printf 'tool: %s\n' "${TOOL:-opencode}"
+        printf 'model: %s\n' "${SELECTED_MODEL:-${RALPH_LOCAL_MODEL:-<self-select>}}"
+        printf 'status_before_source_filter_count: %s\n' "$before_count"
+        printf 'status_after_source_filter_count: %s\n' "$after_count"
+        printf 'tool_log: %s\n' "$dir/tool.log"
+        printf 'tool_output: %s\n' "$dir/tool.out"
+    } > "$dir/diagnostic.txt" 2>/dev/null || true
+    # Small improvement: when providers expose structured stop reasons, record that enum here too.
+    log_warning "[$repo] no-change diagnostic: $reason"
+    log_warning "[$repo] autofix evidence: $dir"
+}
+
 # Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
@@ -293,14 +352,18 @@ _triage_apply_fix() {
 
     # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
     # opens only on a real source change.
+    local pre_filter_status="" post_filter_status=""
+    pre_filter_status=$(cd "$work" && git status --porcelain 2>/dev/null || true)
     ( cd "$work" \
         && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
         git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
         git checkout -- .github 2>/dev/null; git clean -fd -- .github 2>/dev/null ) || true
     _triage_strip_self_control_surface "$work" "$repo"
+    post_filter_status=$(cd "$work" && git status --porcelain 2>/dev/null || true)
 
-    if [[ -z "$(cd "$work" && git status --porcelain 2>/dev/null)" ]]; then
+    if [[ -z "$post_filter_status" ]]; then
         log_warning "[$repo] fix attempt produced no changes — no PR opened."
+        _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status"
         _triage_apply_fix_return 0; return $?
     fi
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
@@ -444,7 +507,7 @@ triage_resolve_reviews() {
         return 1
     fi
     local threads n; threads=$(printf '%s' "$data" | _triage_parse_threads)
-    n=$(printf '%s' "$threads" | grep -c . 2>/dev/null || echo 0)
+    n=$(printf '%s' "$threads" | grep -c . 2>/dev/null || true)
     if [[ "$n" -eq 0 ]]; then log_success "[$repo#$pr] no unresolved review conversations."; return 0; fi
 
     if [[ "$apply" != "1" ]]; then
