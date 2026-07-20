@@ -235,6 +235,28 @@ _triage_autofix_diag_dir() {
     printf '%s/%s-%s\n' "$root" "$ts" "$slug"
 }
 
+_triage_write_autofix_outcome_json() {
+    local dir="$1" outcome="$2" reason="$3" repo="$4" base_branch="$5" branch="$6" filter_context="${7:-}" extra_json="${8:-}"
+    local out="$dir/outcome.json" generated_at
+    [[ -n "$extra_json" ]] || extra_json='{}'
+    command_exists jq || return 0
+    generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    jq -n \
+        --arg outcome "$outcome" \
+        --arg reason "$reason" \
+        --arg repo "$repo" \
+        --arg base_branch "$base_branch" \
+        --arg fix_branch "$branch" \
+        --arg tool "${TOOL:-opencode}" \
+        --arg model "${SELECTED_MODEL:-${RALPH_LOCAL_MODEL:-<self-select>}}" \
+        --arg filter_context "$filter_context" \
+        --arg generated_at "$generated_at" \
+        --argjson extra "$extra_json" \
+        '{outcome:$outcome, reason:$reason, repo:$repo, base_branch:$base_branch, fix_branch:$fix_branch, tool:$tool, model:$model, generated_at:$generated_at}
+         + (if $filter_context != "" then {filter_context:$filter_context} else {} end)
+         + $extra' > "$out.tmp" 2>/dev/null && mv "$out.tmp" "$out" 2>/dev/null || rm -f "$out.tmp" 2>/dev/null || true
+}
+
 _triage_autofix_nochange_reason() {
     local log_file="$1" output_file="$2" pre_filter_status="$3" filter_context="${4:-}" combined=""
     if [[ "$filter_context" == workflow:* && -n "$pre_filter_status" ]]; then
@@ -290,7 +312,9 @@ _triage_write_autofix_nochange_diag() {
         printf 'tool_log: %s\n' "$dir/tool.log"
         printf 'tool_output: %s\n' "$dir/tool.out"
     } > "$dir/diagnostic.txt" 2>/dev/null || true
-    # Small improvement: when providers expose structured stop reasons, record that enum here too.
+    local outcome_extra
+    outcome_extra=$(jq -n --argjson before "$before_count" --argjson after "$after_count" '{status_before_source_filter_count:$before,status_after_source_filter_count:$after}' 2>/dev/null || printf '{}')
+    _triage_write_autofix_outcome_json "$dir" "no_source_change" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
     log_warning "[$repo] no-change diagnostic: $reason"
     log_warning "[$repo] autofix evidence: $dir"
 }
@@ -332,6 +356,10 @@ _triage_write_autofix_failure_diag() {
         printf 'tool_log: %s\n' "$dir/tool.log"
         printf 'tool_output: %s\n' "$dir/tool.out"
     } > "$dir/diagnostic.txt" 2>/dev/null || true
+    local outcome="provider_failure" outcome_extra
+    [[ "$reason" == executor_failure:* ]] && outcome="executor_failure"
+    outcome_extra=$(jq -n --argjson rc "$rc" '{tool_exit_code:$rc}' 2>/dev/null || printf '{}')
+    _triage_write_autofix_outcome_json "$dir" "$outcome" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
     log_error "[$repo] autofix failed before producing a usable agent result: $reason"
     log_warning "[$repo] autofix evidence: $dir"
 }
@@ -521,7 +549,7 @@ triage_autofix_ci() {
 # (Dependabot dependency bumps are intentionally left to Dependabot/renovate.)
 triage_autofix_security() {
     local repo="$1" apply="${2:-0}" alert_override="${3:-}"
-    local default_branch alert_json number rule sev desc help path line branch prompt workflow_context workflow_path
+    local default_branch alert_json number rule sev desc help path line branch prompt workflow_context workflow_path prompt_path workflow_note
     local default_rc=0 alert_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
     if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
@@ -549,14 +577,18 @@ triage_autofix_security() {
     line=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.start_line // 0' 2>/dev/null || true)
     branch=$(triage_sec_branch_name "$number")
     workflow_context=$(_triage_alert_workflow_context "$alert_json" "$path" 2>/dev/null || true)
+    prompt_path="$path"
+    workflow_note=""
     if [[ -n "$workflow_context" ]]; then
         workflow_path="${workflow_context#workflow:}"
+        prompt_path="$workflow_path"
+        workflow_note=$(printf '\nResolved workflow-backed alert path: %s. Ralph is running in source-only autofix mode, so workflow/CI file edits are discarded unless workflow autofix mode is explicitly enabled.' "$workflow_path")
         log_warning "[$repo] code-scanning alert #$number appears workflow-backed ($workflow_path); source-only autofix will not open workflow-only PRs."
     fi
     # Alert description/guidance is tool-authored text — fence it before it enters the prompt.
     desc=$(_triage_sanitize_untrusted "scan-description" "$desc")
     help=$(_triage_sanitize_untrusted "scan-guidance" "$help")
-    prompt=$(printf 'GitHub code scanning flagged a %s-severity issue (%s) in %s at %s:%s.\n\nDescription: %s\n\nGuidance: %s\n\nFix the vulnerability with a MINIMAL source-code change at that location. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$sev" "$rule" "$repo" "$path" "$line" "$desc" "$help")
+    prompt=$(printf 'GitHub code scanning flagged a %s-severity issue (%s) in %s at %s:%s.\nOriginal alert path: %s:%s.%s\n\nDescription: %s\n\nGuidance: %s\n\nFix the vulnerability with a MINIMAL source-code change at that location. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$sev" "$rule" "$repo" "$prompt_path" "$line" "$path" "$line" "$workflow_note" "$desc" "$help")
     _triage_apply_fix "$repo" "$default_branch" "$branch" "$prompt" \
         "fix(security): $rule ($sev) in $path" \
         "Automated remediation of code-scanning alert #$number ($rule, $sev) at \`$path:$line\` by \`ralph triage --fix-security\`.

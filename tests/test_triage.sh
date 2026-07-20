@@ -315,6 +315,16 @@ gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/ale
 wdry=$(triage_autofix_security "o/r" 0 9 2>&1)
 printf '%s' "$wdry" | grep -q 'appears workflow-backed (.github/workflows/security.yml)' && ok "fix-security dry-run flags workflow-backed alert" || bad "workflow-backed warning missing: $wdry"
 printf '%s' "$wdry" | grep -q 'likely workflow-backed alert (.github/workflows/security.yml)' && ok "fix-security dry-run plan labels workflow-backed alert" || bad "workflow-backed plan note missing: $wdry"
+PROMPT_CAPTURE="$TMP/wf-prompt.txt"
+(
+    gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts/9*) printf '%s
+' "$WF_ALERT_JSON" ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+    _triage_apply_fix() { printf '%s' "$4" > "$PROMPT_CAPTURE"; return 0; }
+    triage_autofix_security "o/r" 0 9 >/dev/null 2>&1
+)
+grep -q 'at .github/workflows/security.yml:24' "$PROMPT_CAPTURE" && ok "workflow-backed prompt uses resolved workflow path" || bad "resolved workflow path missing from prompt: $(cat "$PROMPT_CAPTURE")"
+grep -q 'Original alert path: security.yml:24' "$PROMPT_CAPTURE" && ok "workflow-backed prompt preserves original alert path" || bad "original alert path missing from prompt: $(cat "$PROMPT_CAPTURE")"
+grep -q 'source-only autofix mode' "$PROMPT_CAPTURE" && ok "workflow-backed prompt names source-only policy" || bad "source-only policy missing from prompt: $(cat "$PROMPT_CAPTURE")"
 [[ ! -s "$GITLOG3" ]] && ok "workflow-backed dry-run still invoked git ZERO times" || bad "workflow-backed dry-run touched git: $(cat "$GITLOG3")"
 unset -f git
 
@@ -366,6 +376,7 @@ SEC_DIAG_PATH=$(find "$SEC_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null
 grep -q 'reason: agent reported it could not safely produce a fix' "$SEC_DIAG_PATH/diagnostic.txt" && ok "diagnostic artifact records reason" || bad "diagnostic reason missing: $(cat "$SEC_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q 'I cannot safely identify' "$SEC_DIAG_PATH/tool.out" && ok "diagnostic artifact preserves tool output" || bad "tool output not preserved"
 grep -q 'insufficient context' "$SEC_DIAG_PATH/tool.log" && ok "diagnostic artifact preserves tool log" || bad "tool log not preserved"
+jq -e '.outcome=="no_source_change" and .reason=="agent reported it could not safely produce a fix" and .status_before_source_filter_count==0 and .status_after_source_filter_count==0' "$SEC_DIAG_PATH/outcome.json" >/dev/null     && ok "no-change outcome.json records structured status" || bad "no-change outcome.json invalid: $(cat "$SEC_DIAG_PATH/outcome.json" 2>/dev/null)"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 GHLOG_SEC_FAIL="$TMP/ghcalls-sec-fail"; : > "$GHLOG_SEC_FAIL"
@@ -401,6 +412,7 @@ SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2
 [[ -n "$SEC_FAIL_DIAG_PATH" && -f "$SEC_FAIL_DIAG_PATH/diagnostic.txt" ]] && ok "executor failure writes diagnostic artifact" || bad "missing executor diagnostic artifact under $SEC_FAIL_DIAG_DIR"
 grep -q 'reason: executor_failure: executor sandbox startup failure' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records reason" || bad "executor diagnostic reason missing: $(cat "$SEC_FAIL_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q 'tool_exit_code: 70' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records exit code" || bad "executor diagnostic exit code missing"
+jq -e '.outcome=="executor_failure" and .reason=="executor_failure: executor sandbox startup failure" and .tool_exit_code==70' "$SEC_FAIL_DIAG_PATH/outcome.json" >/dev/null     && ok "executor failure outcome.json records structured failure" || bad "executor failure outcome.json invalid: $(cat "$SEC_FAIL_DIAG_PATH/outcome.json" 2>/dev/null)"
 unset -f gh run_ai_tool classify_executor_startup_failure 2>/dev/null || true
 
 WF_REMOTE="$TMP/wf-remote.git"
@@ -453,6 +465,7 @@ WF_DIAG_PATH=$(find "$WF_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
 [[ -n "$WF_DIAG_PATH" && -f "$WF_DIAG_PATH/diagnostic.txt" ]] && ok "workflow-backed no-change writes diagnostic artifact" || bad "missing workflow diagnostic artifact under $WF_DIAG_DIR"
 grep -q 'filter_context: workflow:.github/workflows/security.yml' "$WF_DIAG_PATH/diagnostic.txt" && ok "workflow diagnostic records filter context" || bad "workflow filter context missing: $(cat "$WF_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q '^ M .github/workflows/security.yml' "$WF_DIAG_PATH/status-before-source-filter.txt" && ok "workflow diagnostic records stripped workflow diff" || bad "workflow pre-filter status missing: $(cat "$WF_DIAG_PATH/status-before-source-filter.txt" 2>/dev/null)"
+jq -e '.outcome=="no_source_change" and .filter_context=="workflow:.github/workflows/security.yml" and .status_before_source_filter_count==1 and .status_after_source_filter_count==0' "$WF_DIAG_PATH/outcome.json" >/dev/null     && ok "workflow no-change outcome.json records filter context and counts" || bad "workflow outcome.json invalid: $(cat "$WF_DIAG_PATH/outcome.json" 2>/dev/null)"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 
