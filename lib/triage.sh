@@ -257,6 +257,106 @@ _triage_write_autofix_outcome_json() {
          + $extra' > "$out.tmp" 2>/dev/null && mv "$out.tmp" "$out" 2>/dev/null || rm -f "$out.tmp" 2>/dev/null || true
 }
 
+_triage_redact_provider_transcript() {
+    sed -E \
+        -e 's/([A-Za-z_][A-Za-z0-9_]*(TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<redacted>/gI' \
+        -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=:-]+/\1<redacted>/gI' \
+        -e 's/(ghp_|github_pat_|sk-)[A-Za-z0-9_:-]+/<redacted>/g'
+}
+
+_triage_autofix_operator_action() {
+    local outcome="$1" reason="$2" filter_context="${3:-}"
+    if [[ "$filter_context" == workflow:* ]]; then
+        printf 'inspect_source_only_policy'
+    elif [[ "$outcome" == "executor_failure" ]]; then
+        printf 'fix_executor_environment_then_retry'
+    elif [[ "$reason" == *"could not safely"* || "$reason" == *"missing context"* || "$reason" == *"insufficient"* ]]; then
+        printf 'add_context_or_escalate_for_review'
+    elif [[ "$outcome" == "provider_failure" ]]; then
+        printf 'inspect_provider_failure_then_retry'
+    elif [[ "$outcome" == "no_source_change" ]]; then
+        printf 'inspect_transcript_before_retry'
+    else
+        printf 'review_evidence'
+    fi
+}
+
+_triage_write_autofix_summary_json() {
+    local dir="$1" outcome="$2" reason="$3" repo="$4" base_branch="$5" branch="$6" filter_context="${7:-}" extra_json="${8:-}"
+    local out="$dir/summary.json" generated_at action max_lines output_lines log_lines output_tail log_tail combined signals_json
+    [[ -n "$extra_json" ]] || extra_json='{}'
+    command_exists jq || return 0
+    generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    action=$(_triage_autofix_operator_action "$outcome" "$reason" "$filter_context")
+    max_lines="${RALPH_AUTOFIX_SUMMARY_TAIL_LINES:-12}"
+    case "$max_lines" in ''|*[!0-9]*) max_lines=12 ;; esac
+    [[ "$max_lines" -gt 40 ]] && max_lines=40
+    output_lines=0; log_lines=0
+    [[ -f "$dir/tool.out" ]] && output_lines=$(wc -l < "$dir/tool.out" 2>/dev/null | tr -d '[:space:]')
+    [[ -f "$dir/tool.log" ]] && log_lines=$(wc -l < "$dir/tool.log" 2>/dev/null | tr -d '[:space:]')
+    output_tail="$dir/.summary-tool-out.tmp"
+    log_tail="$dir/.summary-tool-log.tmp"
+    tail -n "$max_lines" "$dir/tool.out" 2>/dev/null | _triage_redact_provider_transcript > "$output_tail" 2>/dev/null || : > "$output_tail"
+    tail -n "$max_lines" "$dir/tool.log" 2>/dev/null | _triage_redact_provider_transcript > "$log_tail" 2>/dev/null || : > "$log_tail"
+    combined=$( { cat "$dir/tool.out" 2>/dev/null; tail -n 120 "$dir/tool.log" 2>/dev/null; } | tr '\n' ' ' )
+    signals_json=$(jq -n \
+        --arg text "$combined" \
+        '($text | ascii_downcase) as $t
+         | {
+             mentions_auth: ($t | test("auth|permission|credential|forbidden|unauthorized")),
+             mentions_timeout: ($t | test("timeout|timed out|deadline")),
+             mentions_no_change: ($t | test("no changes|nothing to change|already fixed|no fix needed")),
+             mentions_insufficient_context: ($t | test("insufficient|missing context|cannot safely|unable to identify"))
+           }' 2>/dev/null || printf '{}')
+    jq -n \
+        --arg generated_at "$generated_at" \
+        --arg outcome "$outcome" \
+        --arg reason "$reason" \
+        --arg repo "$repo" \
+        --arg base_branch "$base_branch" \
+        --arg fix_branch "$branch" \
+        --arg tool "${TOOL:-opencode}" \
+        --arg model "${SELECTED_MODEL:-${RALPH_LOCAL_MODEL:-<self-select>}}" \
+        --arg filter_context "$filter_context" \
+        --arg action "$action" \
+        --argjson output_lines "${output_lines:-0}" \
+        --argjson log_lines "${log_lines:-0}" \
+        --rawfile output_tail "$output_tail" \
+        --rawfile log_tail "$log_tail" \
+        --argjson signals "$signals_json" \
+        --argjson extra "$extra_json" \
+        '{
+           schema_version: 1,
+           kind: "autofix_provider_summary",
+           generated_at: $generated_at,
+           outcome: $outcome,
+           reason: $reason,
+           operator_action: $action,
+           repo: $repo,
+           base_branch: $base_branch,
+           fix_branch: $fix_branch,
+           tool: $tool,
+           model: $model,
+           evidence: {
+             diagnostic: "diagnostic.txt",
+             outcome: "outcome.json",
+             tool_log: "tool.log",
+             tool_output: "tool.out"
+           },
+           transcript: {
+             output_line_count: $output_lines,
+             log_line_count: $log_lines,
+             output_tail: ($output_tail | split("\n") | map(select(length > 0))),
+             log_tail: ($log_tail | split("\n") | map(select(length > 0))),
+             signals: $signals
+           }
+         }
+         + (if $filter_context != "" then {filter_context:$filter_context} else {} end)
+         + $extra' > "$out.tmp" 2>/dev/null && mv "$out.tmp" "$out" 2>/dev/null || rm -f "$out.tmp" 2>/dev/null || true
+    rm -f "$output_tail" "$log_tail" 2>/dev/null || true
+}
+
+
 _triage_autofix_nochange_reason() {
     local log_file="$1" output_file="$2" pre_filter_status="$3" filter_context="${4:-}" combined=""
     if [[ "$filter_context" == workflow:* && -n "$pre_filter_status" ]]; then
@@ -315,6 +415,7 @@ _triage_write_autofix_nochange_diag() {
     local outcome_extra
     outcome_extra=$(jq -n --argjson before "$before_count" --argjson after "$after_count" '{status_before_source_filter_count:$before,status_after_source_filter_count:$after}' 2>/dev/null || printf '{}')
     _triage_write_autofix_outcome_json "$dir" "no_source_change" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
+    _triage_write_autofix_summary_json "$dir" "no_source_change" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
     log_warning "[$repo] no-change diagnostic: $reason"
     log_warning "[$repo] autofix evidence: $dir"
 }
@@ -360,6 +461,7 @@ _triage_write_autofix_failure_diag() {
     [[ "$reason" == executor_failure:* ]] && outcome="executor_failure"
     outcome_extra=$(jq -n --argjson rc "$rc" '{tool_exit_code:$rc}' 2>/dev/null || printf '{}')
     _triage_write_autofix_outcome_json "$dir" "$outcome" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
+    _triage_write_autofix_summary_json "$dir" "$outcome" "$reason" "$repo" "$base_branch" "$branch" "$filter_context" "$outcome_extra"
     log_error "[$repo] autofix failed before producing a usable agent result: $reason"
     log_warning "[$repo] autofix evidence: $dir"
 }

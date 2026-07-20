@@ -361,8 +361,8 @@ SEC_ALERT_JSON='{"number":8,"rule":{"id":"js/sql-injection","security_severity_l
         esac
     }
     run_ai_tool() {
-        printf 'model: insufficient context to safely patch this alert\n' > "$4"
-        printf 'I cannot safely identify the vulnerable code path from the prompt.\n' > "$5"
+        printf 'model: insufficient context to safely patch this alert with API_KEY=super-secret-value\n' > "$4"
+        printf 'I cannot safely identify the vulnerable code path from the prompt. Bearer abc.def.ghi\n' > "$5"
         return 0
     }
     triage_autofix_security "o/r" 1 8
@@ -377,6 +377,8 @@ grep -q 'reason: agent reported it could not safely produce a fix' "$SEC_DIAG_PA
 grep -q 'I cannot safely identify' "$SEC_DIAG_PATH/tool.out" && ok "diagnostic artifact preserves tool output" || bad "tool output not preserved"
 grep -q 'insufficient context' "$SEC_DIAG_PATH/tool.log" && ok "diagnostic artifact preserves tool log" || bad "tool log not preserved"
 jq -e '.outcome=="no_source_change" and .reason=="agent reported it could not safely produce a fix" and .status_before_source_filter_count==0 and .status_after_source_filter_count==0' "$SEC_DIAG_PATH/outcome.json" >/dev/null     && ok "no-change outcome.json records structured status" || bad "no-change outcome.json invalid: $(cat "$SEC_DIAG_PATH/outcome.json" 2>/dev/null)"
+jq -e '.kind=="autofix_provider_summary" and .operator_action=="add_context_or_escalate_for_review" and .transcript.signals.mentions_insufficient_context==true and .status_before_source_filter_count==0' "$SEC_DIAG_PATH/summary.json" >/dev/null     && ok "no-change summary.json records operator-ready summary" || bad "no-change summary.json invalid: $(cat "$SEC_DIAG_PATH/summary.json" 2>/dev/null)"
+grep -q 'super-secret-value\|abc.def.ghi' "$SEC_DIAG_PATH/summary.json" && bad "summary.json leaked sensitive transcript token: $(cat "$SEC_DIAG_PATH/summary.json")" || ok "summary.json redacts transcript tails"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 GHLOG_SEC_FAIL="$TMP/ghcalls-sec-fail"; : > "$GHLOG_SEC_FAIL"
@@ -413,6 +415,7 @@ SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2
 grep -q 'reason: executor_failure: executor sandbox startup failure' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records reason" || bad "executor diagnostic reason missing: $(cat "$SEC_FAIL_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q 'tool_exit_code: 70' "$SEC_FAIL_DIAG_PATH/diagnostic.txt" && ok "executor diagnostic records exit code" || bad "executor diagnostic exit code missing"
 jq -e '.outcome=="executor_failure" and .reason=="executor_failure: executor sandbox startup failure" and .tool_exit_code==70' "$SEC_FAIL_DIAG_PATH/outcome.json" >/dev/null     && ok "executor failure outcome.json records structured failure" || bad "executor failure outcome.json invalid: $(cat "$SEC_FAIL_DIAG_PATH/outcome.json" 2>/dev/null)"
+jq -e '.kind=="autofix_provider_summary" and .operator_action=="fix_executor_environment_then_retry" and .tool_exit_code==70 and .transcript.signals.mentions_auth==true' "$SEC_FAIL_DIAG_PATH/summary.json" >/dev/null     && ok "executor failure summary.json records retry guidance" || bad "executor failure summary.json invalid: $(cat "$SEC_FAIL_DIAG_PATH/summary.json" 2>/dev/null)"
 unset -f gh run_ai_tool classify_executor_startup_failure 2>/dev/null || true
 
 WF_REMOTE="$TMP/wf-remote.git"
@@ -466,6 +469,7 @@ WF_DIAG_PATH=$(find "$WF_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null |
 grep -q 'filter_context: workflow:.github/workflows/security.yml' "$WF_DIAG_PATH/diagnostic.txt" && ok "workflow diagnostic records filter context" || bad "workflow filter context missing: $(cat "$WF_DIAG_PATH/diagnostic.txt" 2>/dev/null)"
 grep -q '^ M .github/workflows/security.yml' "$WF_DIAG_PATH/status-before-source-filter.txt" && ok "workflow diagnostic records stripped workflow diff" || bad "workflow pre-filter status missing: $(cat "$WF_DIAG_PATH/status-before-source-filter.txt" 2>/dev/null)"
 jq -e '.outcome=="no_source_change" and .filter_context=="workflow:.github/workflows/security.yml" and .status_before_source_filter_count==1 and .status_after_source_filter_count==0' "$WF_DIAG_PATH/outcome.json" >/dev/null     && ok "workflow no-change outcome.json records filter context and counts" || bad "workflow outcome.json invalid: $(cat "$WF_DIAG_PATH/outcome.json" 2>/dev/null)"
+jq -e '.kind=="autofix_provider_summary" and .operator_action=="inspect_source_only_policy" and .filter_context=="workflow:.github/workflows/security.yml" and .transcript.output_tail[] == "Pinned workflow action."' "$WF_DIAG_PATH/summary.json" >/dev/null     && ok "workflow no-change summary.json records source-only guidance" || bad "workflow summary.json invalid: $(cat "$WF_DIAG_PATH/summary.json" 2>/dev/null)"
 unset -f gh run_ai_tool 2>/dev/null || true
 
 
