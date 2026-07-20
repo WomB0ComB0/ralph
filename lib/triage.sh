@@ -236,7 +236,15 @@ _triage_autofix_diag_dir() {
 }
 
 _triage_autofix_nochange_reason() {
-    local log_file="$1" output_file="$2" pre_filter_status="$3" combined=""
+    local log_file="$1" output_file="$2" pre_filter_status="$3" filter_context="${4:-}" combined=""
+    if [[ "$filter_context" == workflow:* && -n "$pre_filter_status" ]]; then
+        printf 'workflow-backed alert changed only files that source-only autofix excludes'
+        return 0
+    fi
+    if [[ "$filter_context" == workflow:* ]]; then
+        printf 'workflow-backed alert produced no source diff in source-only autofix mode'
+        return 0
+    fi
     if [[ -n "$pre_filter_status" ]]; then
         printf 'agent changed only files that Ralph excludes from autofix PRs'
         return 0
@@ -254,7 +262,7 @@ _triage_autofix_nochange_reason() {
 }
 
 _triage_write_autofix_nochange_diag() {
-    local repo="$1" base_branch="$2" branch="$3" log_file="$4" output_file="$5" pre_filter_status="$6" post_filter_status="$7"
+    local repo="$1" base_branch="$2" branch="$3" log_file="$4" output_file="$5" pre_filter_status="$6" post_filter_status="$7" filter_context="${8:-}"
     local dir reason before_count after_count
     dir=$(_triage_autofix_diag_dir "$repo" "$branch")
     if ! mkdir -p "$dir" 2>/dev/null; then
@@ -266,7 +274,7 @@ _triage_write_autofix_nochange_diag() {
     [[ -f "$output_file" ]] && cp "$output_file" "$dir/tool.out" 2>/dev/null || :
     printf '%s\n' "$pre_filter_status" > "$dir/status-before-source-filter.txt" 2>/dev/null || true
     printf '%s\n' "$post_filter_status" > "$dir/status-after-source-filter.txt" 2>/dev/null || true
-    reason=$(_triage_autofix_nochange_reason "$log_file" "$output_file" "$pre_filter_status")
+    reason=$(_triage_autofix_nochange_reason "$log_file" "$output_file" "$pre_filter_status" "$filter_context")
     before_count=$(printf '%s\n' "$pre_filter_status" | grep -c . 2>/dev/null || true)
     after_count=$(printf '%s\n' "$post_filter_status" | grep -c . 2>/dev/null || true)
     {
@@ -278,6 +286,7 @@ _triage_write_autofix_nochange_diag() {
         printf 'model: %s\n' "${SELECTED_MODEL:-${RALPH_LOCAL_MODEL:-<self-select>}}"
         printf 'status_before_source_filter_count: %s\n' "$before_count"
         printf 'status_after_source_filter_count: %s\n' "$after_count"
+        [[ -n "$filter_context" ]] && printf 'filter_context: %s\n' "$filter_context"
         printf 'tool_log: %s\n' "$dir/tool.log"
         printf 'tool_output: %s\n' "$dir/tool.out"
     } > "$dir/diagnostic.txt" 2>/dev/null || true
@@ -286,12 +295,34 @@ _triage_write_autofix_nochange_diag() {
     log_warning "[$repo] autofix evidence: $dir"
 }
 
+
+_triage_alert_workflow_path() {
+    local alert_json="$1" path="$2" analysis_key tool
+    analysis_key=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.analysis_key // .analysis_key // ""' 2>/dev/null || true)
+    tool=$(printf '%s' "$alert_json" | jq -r '.tool.name // ""' 2>/dev/null || true)
+    if [[ "$analysis_key" == .github/workflows/* ]]; then
+        printf '%s\n' "${analysis_key%%:*}"
+        return 0
+    fi
+    if [[ "$path" != */* && "$tool" == "zizmor" ]]; then
+        printf '.github/workflows/%s\n' "$path"
+        return 0
+    fi
+    return 1
+}
+
+_triage_alert_workflow_context() {
+    local alert_json="$1" path="$2" workflow_path
+    workflow_path=$(_triage_alert_workflow_path "$alert_json" "$path") || return 1
+    printf 'workflow:%s\n' "$workflow_path"
+}
+
 # Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
 _triage_apply_fix() {
-    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}"
+    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}"
     # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
     local default_branch iteration=1 default_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
@@ -303,6 +334,9 @@ _triage_apply_fix() {
         printf '    branch  %s (off %s)\n' "$branch" "$base_branch"
         printf '    model   %s\n' "${RALPH_LOCAL_MODEL:-<resolved at run; local-first if configured>}"
         printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$base_branch" "$branch"
+        if [[ "$filter_context" == workflow:* ]]; then
+            printf '    note    likely workflow-backed alert (%s); source-only apply may produce a no-change diagnostic\n' "${filter_context#workflow:}"
+        fi
         printf '    will NEVER push to %s. Re-run with --apply to execute.\n' "$default_branch"
         return 0
     fi
@@ -363,7 +397,7 @@ _triage_apply_fix() {
 
     if [[ -z "$post_filter_status" ]]; then
         log_warning "[$repo] fix attempt produced no changes — no PR opened."
-        _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status"
+        _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status" "$filter_context"
         _triage_apply_fix_return 0; return $?
     fi
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
@@ -441,7 +475,7 @@ triage_autofix_ci() {
 # (Dependabot dependency bumps are intentionally left to Dependabot/renovate.)
 triage_autofix_security() {
     local repo="$1" apply="${2:-0}" alert_override="${3:-}"
-    local default_branch alert_json number rule sev desc help path line branch prompt
+    local default_branch alert_json number rule sev desc help path line branch prompt workflow_context workflow_path
     local default_rc=0 alert_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
     if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
@@ -468,6 +502,11 @@ triage_autofix_security() {
     path=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.path // ""' 2>/dev/null || true)
     line=$(printf '%s' "$alert_json" | jq -r '.most_recent_instance.location.start_line // 0' 2>/dev/null || true)
     branch=$(triage_sec_branch_name "$number")
+    workflow_context=$(_triage_alert_workflow_context "$alert_json" "$path" 2>/dev/null || true)
+    if [[ -n "$workflow_context" ]]; then
+        workflow_path="${workflow_context#workflow:}"
+        log_warning "[$repo] code-scanning alert #$number appears workflow-backed ($workflow_path); source-only autofix will not open workflow-only PRs."
+    fi
     # Alert description/guidance is tool-authored text — fence it before it enters the prompt.
     desc=$(_triage_sanitize_untrusted "scan-description" "$desc")
     help=$(_triage_sanitize_untrusted "scan-guidance" "$help")
@@ -476,7 +515,7 @@ triage_autofix_security() {
         "fix(security): $rule ($sev) in $path" \
         "Automated remediation of code-scanning alert #$number ($rule, $sev) at \`$path:$line\` by \`ralph triage --fix-security\`.
 
-⚠️ Agent-generated security fix — review carefully before merging." "$apply"
+⚠️ Agent-generated security fix — review carefully before merging." "$apply" "$workflow_context"
 }
 
 # Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
