@@ -195,6 +195,16 @@ Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that c
 
 `cleanup-stats` is a read-only pass over retained `process-cleanup.json` artifacts. It prints an allowlisted JSON summary — per-kind (`provider`, `live_smoke`) sample count, nearest-rank p50/p95 and maximum duration, and TERM/KILL counts and rates — plus the number of runs scanned and malformed artifacts skipped. It never emits commands, PIDs, prompts, logs, environment values, event timestamps, run ids, or paths outside the run root, and never follows a symlinked run directory or artifact. Override the scanned root with `RALPH_RUN_ROOT`.
 
+### Resource Report
+
+```bash
+./ralph.sh resource report
+./ralph.sh resource report --max-load1 4 --max-memory-used-pct 80 --max-ralph-bytes 2G --max-run-dirs 500
+./ralph.sh resource report --max-run-dirs 500 --fail-on-warning
+```
+
+`resource report` is a read-only JSON snapshot of Ralph disk footprint, retained run/signal counts, latest patrol log size, system load, memory, Ralph timers, and local Synapse process usage. Optional budgets populate `budgets`, append structured entries to `warnings`, and set `ok=false` when exceeded. `--fail-on-warning` still prints the report, then exits `3` when any warning is present.
+
 ### Swarm
 
 ```bash
@@ -346,6 +356,8 @@ Common environment variables:
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
 | `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |
 | `RALPH_ORG_CPU_QUOTA` / `RALPH_ORG_MEMORY_MAX` / `RALPH_ORG_IO_WEIGHT` | Optional defaults used by `scripts/org-install-systemd` for systemd `CPUQuota=`, `MemoryMax=`, and `IOWeight=`. |
+| `RALPH_RESOURCE_MAX_LOAD1` / `RALPH_RESOURCE_MAX_MEMORY_USED_PCT` / `RALPH_RESOURCE_MAX_RALPH_BYTES` / `RALPH_RESOURCE_MAX_RUN_DIRS` | Optional default warning budgets for `ralph resource report`. Disk budgets accept byte values or `K`, `M`, `G`, `T` suffixes. |
+| `RALPH_RESOURCE_FAIL_ON_WARNING` | Set to `1` for `ralph resource report` to exit `3` after printing JSON when any budget warning is present. |
 
 ## Dependencies
 
