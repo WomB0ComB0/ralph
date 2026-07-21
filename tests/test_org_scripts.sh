@@ -40,6 +40,14 @@ exit 9
 SH
 chmod +x "$TMP/bin/gh"
 
+cat > "$TMP/bin/systemctl" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SYSTEMCTL_CALL_LOG"
+exit 0
+SH
+chmod +x "$TMP/bin/systemctl"
+export SYSTEMCTL_CALL_LOG="$TMP/systemctl-calls.log"
+
 cat > "$TMP/ralph.sh" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$RALPH_CALL_LOG"
@@ -107,6 +115,17 @@ grep -qx 'triage --suggest --apply' "$RALPH_CALL_LOG" && ok "suggest-apply maps 
 
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1 && bad "invalid patrol mode accepted" || ok "invalid patrol mode rejected"
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1 && bad "missing patrol org accepted" || ok "missing patrol org rejected"
+
+
+"$R/scripts/org-install-systemd" install --org demo-org --interval 45min --cpu-quota 25% --memory-max 1G --io-weight 100 >/dev/null 2>&1; rc=$?
+eq "org installer with resource limits exits 0" 0 "$rc"
+svc="$XDG_CONFIG_HOME/systemd/user/ralph-demo-org-patrol.service"
+timer="$XDG_CONFIG_HOME/systemd/user/ralph-demo-org-patrol.timer"
+grep -q '^CPUQuota=25%$' "$svc" && ok "installer writes CPUQuota" || bad "CPUQuota missing: $(cat "$svc" 2>/dev/null)"
+grep -q '^MemoryMax=1G$' "$svc" && ok "installer writes MemoryMax" || bad "MemoryMax missing: $(cat "$svc" 2>/dev/null)"
+grep -q '^IOWeight=100$' "$svc" && ok "installer writes IOWeight" || bad "IOWeight missing: $(cat "$svc" 2>/dev/null)"
+grep -q '^OnUnitActiveSec=45min$' "$timer" && ok "installer preserves custom interval" || bad "custom interval missing: $(cat "$timer" 2>/dev/null)"
+grep -q 'enable --now ralph-demo-org-patrol.timer' "$SYSTEMCTL_CALL_LOG" && ok "installer enables timer" || bad "timer enable not called: $(cat "$SYSTEMCTL_CALL_LOG")"
 
 : > "$RALPH_CALL_LOG"
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/resq-org-patrol" --mode report --targets-file "$TMP/resq-patrol.targets" --no-synapse-check >/dev/null 2>&1; rc=$?

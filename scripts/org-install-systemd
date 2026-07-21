@@ -6,6 +6,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ralph_home="${RALPH_HOME:-$(cd "$script_dir/.." && pwd)}"
 org="${RALPH_ORG:-}"
 interval="${RALPH_ORG_TIMER_INTERVAL:-30min}"
+cpu_quota="${RALPH_ORG_CPU_QUOTA:-}"
+memory_max="${RALPH_ORG_MEMORY_MAX:-}"
+io_weight="${RALPH_ORG_IO_WEIGHT:-}"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 systemd_dir="$config_home/systemd/user"
@@ -14,10 +17,11 @@ cmd="install"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/org-install-systemd [install|uninstall|status] --org ORG [--interval DURATION]
+Usage: scripts/org-install-systemd [install|uninstall|status] --org ORG [--interval DURATION] [--cpu-quota PCT] [--memory-max SIZE] [--io-weight N]
 
 Installs a user systemd timer that runs scripts/org-patrol periodically.
 Default interval: 30min. Set RALPH_ORG instead of --org for non-interactive installs.
+Optional service limits map to systemd CPUQuota=, MemoryMax=, and IOWeight=.
 EOF
 }
 
@@ -28,6 +32,12 @@ while [[ $# -gt 0 ]]; do
         --org=*) org="${1#*=}"; shift ;;
         --interval) interval="${2:?--interval requires a value}"; shift 2 ;;
         --interval=*) interval="${1#*=}"; shift ;;
+        --cpu-quota) cpu_quota="${2:?--cpu-quota requires a value}"; shift 2 ;;
+        --cpu-quota=*) cpu_quota="${1#*=}"; shift ;;
+        --memory-max) memory_max="${2:?--memory-max requires a value}"; shift 2 ;;
+        --memory-max=*) memory_max="${1#*=}"; shift ;;
+        --io-weight) io_weight="${2:?--io-weight requires a value}"; shift 2 ;;
+        --io-weight=*) io_weight="${1#*=}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -90,6 +100,11 @@ Environment=RALPH_HOME=$ralph_home
 EnvironmentFile=$env_file
 ExecStart=$ralph_home/scripts/org-patrol
 EOF
+{
+    [[ -n "$cpu_quota" ]] && printf 'CPUQuota=%s\n' "$cpu_quota"
+    [[ -n "$memory_max" ]] && printf 'MemoryMax=%s\n' "$memory_max"
+    [[ -n "$io_weight" ]] && printf 'IOWeight=%s\n' "$io_weight"
+} >> "$service_file"
 
 cat > "$timer_file" <<EOF
 [Unit]

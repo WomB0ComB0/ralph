@@ -2192,6 +2192,11 @@ main() {
         handle_triage_command "$@"
         exit $?
     fi
+    if [[ "${1:-}" == "resource" ]]; then
+        shift
+        handle_resource_command "$@"
+        exit $?
+    fi
     # Synapse (agent-backplane) client + per-agent live-test CLIs. Defined in lib/synapse.sh.
     if [[ "${1:-}" == "agents" ]]; then
         shift
