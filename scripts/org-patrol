@@ -12,12 +12,13 @@ targets_file="${RALPH_ORG_TARGETS_FILE:-}"
 log_dir="${RALPH_ORG_LOG_DIR:-}"
 mode="${RALPH_ORG_TRIAGE_MODE:-report}"
 synapse_check="${RALPH_ORG_SYNAPSE_CHECK:-1}"
+resource_history="${RALPH_ORG_RESOURCE_HISTORY:-1}"
 log_retention="${RALPH_ORG_LOG_RETENTION:-48}"
 discover_args=()
 
 usage() {
     cat <<'EOF'
-Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check]
+Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check] [--no-resource-history]
 
 MODE values:
   report              read-only triage report (default)
@@ -30,6 +31,7 @@ MODE values:
 
 The target allowlist is refreshed from public, non-archived org repos before triage.
 Set RALPH_ORG instead of --org for scheduled/non-interactive runs.
+Resource history is recorded to the patrol log directory by default; set RALPH_ORG_RESOURCE_HISTORY=0 or pass --no-resource-history to disable it.
 EOF
 }
 
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --targets-file=*) targets_file="${1#*=}"; shift ;;
         --include-archived) discover_args+=(--include-archived); shift ;;
         --no-synapse-check) synapse_check=0; shift ;;
+        --no-resource-history) resource_history=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -97,4 +100,21 @@ esac
 export RALPH_TARGETS_FILE="$targets_file"
 export RALPH_SIGNAL_REWRITE_MIN_SECONDS="${RALPH_SIGNAL_REWRITE_MIN_SECONDS:-3600}"
 "$ralph_bin" "${triage_args[@]}"
+if [[ "$resource_history" == "1" ]]; then
+    resource_history_file="${RALPH_RESOURCE_HISTORY_FILE:-$log_dir/resource-history.jsonl}"
+    resource_rc=0
+    resource_output=$("$ralph_bin" resource report --record-history "$resource_history_file" 2>&1) || resource_rc=$?
+    if [[ "$resource_rc" -eq 0 || "$resource_rc" -eq 3 ]]; then
+        if command -v jq >/dev/null 2>&1 && jq -e type >/dev/null 2>&1 <<<"$resource_output"; then
+            resource_ok=$(jq -r '.ok' <<<"$resource_output")
+            resource_warnings=$(jq -r '.warnings | length' <<<"$resource_output")
+            printf 'resource report recorded: ok=%s warnings=%s history=%s\n' "$resource_ok" "$resource_warnings" "$resource_history_file"
+        else
+            printf 'resource report recorded: history=%s\n' "$resource_history_file"
+        fi
+    else
+        printf 'WARNING: resource report history failed with rc=%s\n%s\n' "$resource_rc" "$resource_output" >&2
+    fi
+fi
+
 printf '[%s] Ralph public-org patrol complete\n' "$(date -u +%FT%TZ)"

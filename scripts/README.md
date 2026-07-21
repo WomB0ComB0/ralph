@@ -27,10 +27,10 @@ as `scripts/<name>`.
 | Script | What it does |
 |--------|--------------|
 | `org-public-targets --org ORG [--write FILE]` | Discover active public org repos through `gh repo list` and emit an `owner/repo` allowlist for Ralph triage |
-| `org-patrol --org ORG [--mode report]` | Refresh the public allowlist, run a Synapse live-test, then run Ralph triage across the org; defaults to read-only report mode |
+| `org-patrol --org ORG [--mode report]` | Refresh the public allowlist, run a Synapse live-test, run Ralph triage, and record compact resource history across the org; defaults to read-only report mode |
 | `org-install-systemd install --org ORG [--interval 30min] [--cpu-quota 25%] [--memory-max 1G] [--io-weight 100]` | Install/enable a user systemd timer for `org-patrol`; config goes in `~/.config/ralph/<org>-patrol.env`, optional limits write systemd CPU/memory/IO controls, and Synapse checking defaults off until the local DB app role is RLS-safe |
 
-Patrol modes are `report`, `suggest`, `suggest-apply`, `fix-ci`, `fix-ci-apply`, `fix-security`, and `fix-security-apply`. Only the `*-apply` modes write to GitHub, and code-changing modes still use `ralph/fix-*` branches. The `resq-*` script names are compatibility wrappers for the historical resq-software deployment.
+Patrol modes are `report`, `suggest`, `suggest-apply`, `fix-ci`, `fix-ci-apply`, `fix-security`, and `fix-security-apply`. Only the `*-apply` modes write to GitHub, and code-changing modes still use `ralph/fix-*` branches. Resource history is local JSONL under the patrol log directory by default and can be disabled with `--no-resource-history` or `RALPH_ORG_RESOURCE_HISTORY=0`. The `resq-*` script names are compatibility wrappers for the historical resq-software deployment.
 
 ### Dev
 | Script | What it does |

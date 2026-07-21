@@ -200,10 +200,11 @@ Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that c
 ```bash
 ./ralph.sh resource report
 ./ralph.sh resource report --max-load1 4 --max-memory-used-pct 80 --max-ralph-bytes 2G --max-run-dirs 500
+./ralph.sh resource report --record-history ~/.local/state/ralph/resource-history.jsonl --max-growth-pct 15
 ./ralph.sh resource report --max-run-dirs 500 --fail-on-warning
 ```
 
-`resource report` is a read-only JSON snapshot of Ralph disk footprint, retained run/signal counts, latest patrol log size, system load, memory, Ralph timers, and local Synapse process usage. Optional budgets populate `budgets`, append structured entries to `warnings`, and set `ok=false` when exceeded. `--fail-on-warning` still prints the report, then exits `3` when any warning is present.
+`resource report` is a JSON snapshot of Ralph disk footprint, retained run/signal counts, latest patrol log size, system load, memory, Ralph timers, and local Synapse process usage. It is read-only unless `--record-history` or `RALPH_RESOURCE_HISTORY_FILE` is set. Optional budgets populate `budgets`, append structured entries to `warnings`, and set `ok=false` when exceeded. History mode appends compact mode-`600` JSONL snapshots, keeps a bounded retention window, and adds previous-snapshot deltas under `trend`; `--max-growth-pct` turns sudden growth into warnings. `--fail-on-warning` still prints the report, then exits `3` when any warning is present.
 
 ### Swarm
 
@@ -250,7 +251,7 @@ scripts/org-install-systemd install --org <github-org> --interval 30min
 scripts/org-install-systemd install --org <github-org> --interval 30min --cpu-quota 25% --memory-max 1G --io-weight 100
 ```
 
-Default mode is read-only `report`. Optional `org-install-systemd` limits write `CPUQuota=`, `MemoryMax=`, and `IOWeight=` into the user service. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Local trusted-header Synapse mode is safe only on loopback (`127.0.0.1`/`::1`); before binding Synapse to `0.0.0.0` or another non-loopback interface, configure `AUTH_JWT_SECRET`, `AUTH_JWT_PUBLIC_KEY`, or `AUTH_JWKS_URL`, set Ralph's `SYNAPSE_TOKEN`, and run `./ralph.sh synapse auth-check`. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
+Default mode is read-only `report`. Patrols also record compact resource history to `~/.local/state/ralph/<github-org>/resource-history.jsonl` unless `RALPH_ORG_RESOURCE_HISTORY=0` or `--no-resource-history` is used. Optional `org-install-systemd` limits write `CPUQuota=`, `MemoryMax=`, and `IOWeight=` into the user service. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Local trusted-header Synapse mode is safe only on loopback (`127.0.0.1`/`::1`); before binding Synapse to `0.0.0.0` or another non-loopback interface, configure `AUTH_JWT_SECRET`, `AUTH_JWT_PUBLIC_KEY`, or `AUTH_JWKS_URL`, set Ralph's `SYNAPSE_TOKEN`, and run `./ralph.sh synapse auth-check`. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
 
 ## Task Management
 
@@ -355,8 +356,10 @@ Common environment variables:
 | `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
 | `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |
+| `RALPH_ORG_RESOURCE_HISTORY` | Set to `0` to stop scheduled org patrols from recording compact resource-history snapshots. |
 | `RALPH_ORG_CPU_QUOTA` / `RALPH_ORG_MEMORY_MAX` / `RALPH_ORG_IO_WEIGHT` | Optional defaults used by `scripts/org-install-systemd` for systemd `CPUQuota=`, `MemoryMax=`, and `IOWeight=`. |
-| `RALPH_RESOURCE_MAX_LOAD1` / `RALPH_RESOURCE_MAX_MEMORY_USED_PCT` / `RALPH_RESOURCE_MAX_RALPH_BYTES` / `RALPH_RESOURCE_MAX_RUN_DIRS` | Optional default warning budgets for `ralph resource report`. Disk budgets accept byte values or `K`, `M`, `G`, `T` suffixes. |
+| `RALPH_RESOURCE_MAX_LOAD1` / `RALPH_RESOURCE_MAX_MEMORY_USED_PCT` / `RALPH_RESOURCE_MAX_RALPH_BYTES` / `RALPH_RESOURCE_MAX_RUN_DIRS` / `RALPH_RESOURCE_MAX_GROWTH_PCT` | Optional default warning budgets for `ralph resource report`. Disk budgets accept byte values or `K`, `M`, `G`, `T` suffixes. Growth budgets compare against the previous history snapshot. |
+| `RALPH_RESOURCE_HISTORY_FILE` / `RALPH_RESOURCE_HISTORY_RETENTION` | Optional resource-history JSONL path and max retained snapshots for `ralph resource report`, default retention `96`; set retention `0` to keep all. |
 | `RALPH_RESOURCE_FAIL_ON_WARNING` | Set to `1` for `ralph resource report` to exit `3` after printing JSON when any budget warning is present. |
 
 ## Dependencies

@@ -55,5 +55,16 @@ jq -e '.ok == false and (.warnings | length) == 1' <<<"$out" >/dev/null && ok "f
 handle_resource_command report --max-run-dirs nope >/dev/null 2>&1 && bad "invalid run budget accepted" || ok "invalid run budget rejected"
 handle_resource_command report --max-ralph-bytes nope >/dev/null 2>&1 && bad "invalid disk budget accepted" || ok "invalid disk budget rejected"
 
+history="$TMP/resource-history.jsonl"
+printf '%s
+' '{"schema_version":1,"artifact":"ralph_resource_snapshot","generated_at":"2026-07-21T00:00:00Z","disk":{"ralph_bytes":1,"run_dirs":1},"system":{"load1":1,"memory_used_percent":10}}' > "$history"
+out=$(handle_resource_command report --record-history "$history" --history-retention 2 --max-growth-pct 10); rc=$?
+eq "history resource report exits 0" 0 "$rc"
+jq -e '.history.recorded == true and .history.retention == 2 and .trend.previous_at == "2026-07-21T00:00:00Z"' <<<"$out" >/dev/null && ok "history report records previous snapshot trend" || bad "history trend missing: $out"
+jq -e '.warnings[] | select(.kind == "trend")' <<<"$out" >/dev/null && ok "trend budget warning present" || bad "missing trend warning: $out"
+eq "history retention keeps two snapshots" 2 "$(wc -l < "$history" | tr -d '[:space:]')"
+jq -e 'select(.artifact == "ralph_resource_snapshot") and .disk.ralph_bytes > 0 and .warning_count >= 1' <<<"$(tail -n 1 "$history")" >/dev/null && ok "history file stores compact snapshot" || bad "bad history snapshot: $(cat "$history")"
+handle_resource_command report --history-retention nope >/dev/null 2>&1 && bad "invalid history retention accepted" || ok "invalid history retention rejected"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
