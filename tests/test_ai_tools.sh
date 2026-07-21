@@ -171,6 +171,21 @@ tb=$(_timeout_bin)
 { [[ -z "$tb" ]] || command -v "$tb" >/dev/null; } && ok "_timeout_bin names an installed binary (or none)" || bad "_timeout_bin named a missing binary: $tb"
 
 
+
+echo "== iteration provider summary: redacted operator artifact =="
+if command -v jq >/dev/null 2>&1; then
+    psdir=$(mktemp -d)
+    printf 'Implemented nothing yet. API_KEY=super-secret-value\n<promise>COMPLETE</promise>\n' > "$psdir/out"
+    printf 'provider log Bearer abc.def.ghi says no files modified\n' > "$psdir/log"
+    RUN_ID=run-123 TOOL=opencode SELECTED_MODEL=provider/model LAZY_STREAK=2 _write_iteration_provider_summary_json "$psdir/step" 4 no_project_change 'provider completed without local file changes' "$psdir/out" "$psdir/log" false true 1.25 99
+    jq -e '.kind=="iteration_provider_summary" and .iteration==4 and .outcome=="no_project_change" and .operator_action=="inspect_transcript_before_retry" and .changed==false and .verify_ok==true and .latency_seconds==1.25 and .estimated_tokens==99 and .lazy_streak==2 and .transcript.signals.mentions_completion==true and .transcript.signals.mentions_no_change==true' "$psdir/step/provider-summary.json" >/dev/null \
+        && ok "iteration summary records operator-ready state" || bad "iteration summary invalid: $(cat "$psdir/step/provider-summary.json" 2>/dev/null)"
+    grep -q 'super-secret-value\|abc.def.ghi' "$psdir/step/provider-summary.json" && bad "iteration summary leaked sensitive transcript token: $(cat "$psdir/step/provider-summary.json")" || ok "iteration summary redacts transcript tails"
+    rm -rf "$psdir"
+else
+    ok "jq unavailable; skipped iteration provider summary fixture"
+fi
+
 echo "== executor startup failure classification: sandbox failures are not valid AI responses =="
 exmsg='bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.'
 eq "bwrap namespace failure -> executor" "executor" "$(classify_tool_failure "$exmsg" 0)"

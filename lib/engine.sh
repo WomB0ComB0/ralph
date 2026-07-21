@@ -1385,6 +1385,116 @@ run_ai_tool() {
 # timeout) degrade to the next model; on auth/other failures don't burn the chain. Sets
 # SELECTED_MODEL to the model actually used (so logs/metrics/failure events are accurate).
 # Falls through to identical single-model behaviour when no fallbacks are configured.
+
+# Self-benchmarking: next, share this redactor with autofix summaries to avoid drift.
+_ralph_redact_provider_transcript() {
+    sed -E \
+        -e 's/([A-Za-z_][A-Za-z0-9_]*(TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL)[A-Za-z0-9_]*[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<redacted>/gI' \
+        -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=:-]+/\1<redacted>/gI' \
+        -e 's/(ghp_|github_pat_|sk-)[A-Za-z0-9_:-]+/<redacted>/g'
+}
+
+_iteration_provider_operator_action() {
+    local outcome="$1"
+    case "$outcome" in
+        provider_failure) printf 'inspect_provider_failure_then_retry' ;;
+        verification_failed) printf 'fix_verification_errors_next_iteration' ;;
+        no_project_change) printf 'inspect_transcript_before_retry' ;;
+        remote_progress) printf 'poll_remote_provider_or_continue' ;;
+        project_changed) printf 'run_verification_or_continue' ;;
+        *) printf 'review_evidence' ;;
+    esac
+}
+
+_write_iteration_provider_summary_json() {
+    local step_dir="$1" iteration_num="$2" outcome="$3" reason="$4" output_file="$5" log_file="$6" changed_json="${7:-false}" verify_json="${8:-true}" latency="${9:-0}" tokens="${10:-0}"
+    local out="$step_dir/provider-summary.json" generated_at action max_lines output_lines log_lines output_tail log_tail combined signals_json remote_json=false
+    [[ -n "$step_dir" ]] || return 0
+    command_exists jq || return 0
+    mkdir -p "$step_dir" 2>/dev/null || return 0
+    generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    action=$(_iteration_provider_operator_action "$outcome")
+    max_lines="${RALPH_PROVIDER_SUMMARY_TAIL_LINES:-12}"
+    case "$max_lines" in ''|*[!0-9]*) max_lines=12 ;; esac
+    [[ "$max_lines" -gt 40 ]] && max_lines=40
+    output_lines=0; log_lines=0
+    [[ -f "$output_file" ]] && output_lines=$(wc -l < "$output_file" 2>/dev/null | tr -d '[:space:]')
+    [[ -f "$log_file" ]] && log_lines=$(wc -l < "$log_file" 2>/dev/null | tr -d '[:space:]')
+    output_tail="$step_dir/.provider-summary-output.tmp"
+    log_tail="$step_dir/.provider-summary-log.tmp"
+    tail -n "$max_lines" "$output_file" 2>/dev/null | _ralph_redact_provider_transcript > "$output_tail" 2>/dev/null || : > "$output_tail"
+    tail -n "$max_lines" "$log_file" 2>/dev/null | _ralph_redact_provider_transcript > "$log_tail" 2>/dev/null || : > "$log_tail"
+    combined=$( { cat "$output_file" 2>/dev/null; tail -n 120 "$log_file" 2>/dev/null; } | tr '\n' ' ' )
+    signals_json=$(jq -n \
+        --arg text "$combined" \
+        '($text | ascii_downcase) as $t
+         | {
+             mentions_auth: ($t | test("auth|permission|credential|forbidden|unauthorized")),
+             mentions_timeout: ($t | test("timeout|timed out|deadline")),
+             mentions_no_change: ($t | test("no changes|nothing to change|no files modified|already fixed|no fix needed")),
+             mentions_insufficient_context: ($t | test("insufficient|missing context|cannot safely|unable to identify")),
+             mentions_completion: ($text | test("<promise>COMPLETE</promise>"))
+           }' 2>/dev/null || printf '{}')
+    [[ "${_RALPH_REMOTE_PROGRESS:-0}" == "1" ]] && remote_json=true
+    [[ "$latency" =~ ^[0-9]+(\.[0-9]+)?$ ]] || latency=0
+    [[ "$tokens" =~ ^[0-9]+$ ]] || tokens=0
+    jq -n \
+        --arg generated_at "$generated_at" \
+        --arg run_id "${RUN_ID:-}" \
+        --argjson iteration "${iteration_num:-0}" \
+        --arg outcome "$outcome" \
+        --arg reason "$reason" \
+        --arg action "$action" \
+        --arg tool "${TOOL:-opencode}" \
+        --arg model "${_RALPH_ACTIVE_MODEL:-${SELECTED_MODEL:-}}" \
+        --argjson changed "$changed_json" \
+        --argjson verify_ok "$verify_json" \
+        --argjson latency "$latency" \
+        --argjson tokens "$tokens" \
+        --argjson lazy_streak "${LAZY_STREAK:-0}" \
+        --argjson remote_progress "$remote_json" \
+        --arg remote_session "${_RALPH_REMOTE_SESSION:-}" \
+        --arg remote_state "${_RALPH_REMOTE_STATE:-}" \
+        --argjson output_lines "${output_lines:-0}" \
+        --argjson log_lines "${log_lines:-0}" \
+        --rawfile output_tail "$output_tail" \
+        --rawfile log_tail "$log_tail" \
+        --argjson signals "$signals_json" \
+        '{
+           schema_version: 1,
+           kind: "iteration_provider_summary",
+           generated_at: $generated_at,
+           run_id: $run_id,
+           iteration: $iteration,
+           outcome: $outcome,
+           reason: $reason,
+           operator_action: $action,
+           tool: $tool,
+           model: $model,
+           changed: $changed,
+           verify_ok: $verify_ok,
+           latency_seconds: $latency,
+           estimated_tokens: $tokens,
+           lazy_streak: $lazy_streak,
+           remote_progress: $remote_progress,
+           evidence: {
+             prompt: "prompt.txt",
+             output: "output.txt",
+             provider_summary: "provider-summary.json",
+             run_log: "../../ralph.log"
+           },
+           transcript: {
+             output_line_count: $output_lines,
+             log_line_count: $log_lines,
+             output_tail: ($output_tail | split("\n") | map(select(length > 0))),
+             log_tail: ($log_tail | split("\n") | map(select(length > 0))),
+             signals: $signals
+           }
+         }
+         + (if $remote_session != "" or $remote_state != "" then {remote:{session:$remote_session,state:$remote_state}} else {} end)' > "$out.tmp" 2>/dev/null && mv "$out.tmp" "$out" 2>/dev/null || rm -f "$out.tmp" 2>/dev/null || true
+    rm -f "$output_tail" "$log_tail" 2>/dev/null || true
+}
+
 run_ai_with_fallback() {
     local tool="$1" role="$2" prompt="$3" log="$4" out="$5"
     local attempts="${AI_RETRY_ATTEMPTS:-3}" delay="${AI_RETRY_BASE_DELAY:-5}"
@@ -1646,6 +1756,7 @@ backlog_exit_allowed() {
 execute_iteration() {
     local iteration=$1
     local temp_output gitdiff_exclude_args
+    local step_dir=""
     local plan_context prd_context diagram_context
     local reflection_instruction=""
     local recent_changes=""
@@ -1662,6 +1773,7 @@ execute_iteration() {
         log_error "Failed to create temporary file"
         return 1
     }
+    [[ -n "${RUN_DIR:-}" ]] && step_dir="$RUN_DIR/steps/iter-$iteration"
 
     # Build git diff exclusions
     mapfile -t gitdiff_exclude_args < <(build_gitdiff_exclude_args)
@@ -1824,6 +1936,13 @@ execute_iteration() {
         emit_event "iteration_failed" "$fail_payload"
         store_lesson "Iteration $iteration failed: tool '$TOOL' did not complete after ${ai_attempts} attempts (model $used_model)."
         record_signal task_repeat_failure "AI tool failed to complete the iteration" "tool $TOOL model $used_model did not complete after retries" "investigate tool/model/connectivity failure" "run_ai_tool" "high" >/dev/null 2>&1 || true
+        if [[ -n "$step_dir" ]] && mkdir -p "$step_dir" 2>/dev/null; then
+            printf '%s' "$structured_prompt" > "$step_dir/prompt.txt" 2>/dev/null || true
+            cat "$temp_output" > "$step_dir/output.txt" 2>/dev/null || true
+            end_ts=$(get_high_res_time)
+            iteration_latency=$(echo "$end_ts - $start_ts" | bc 2>/dev/null || echo "0")
+            _write_iteration_provider_summary_json "$step_dir" "$iteration" "provider_failure" "model chain exhausted; last model: $used_model" "$temp_output" "$LOG_FILE" false false "${iteration_latency:-0}" "${est_tokens:-0}"
+        fi
         _run_manifest_heartbeat_safe provider_failed "$iteration" 1
         return 2
     fi
@@ -1843,8 +1962,7 @@ execute_iteration() {
     extract_and_store_memories "$output"
 
     # Persist a per-step trace (prompt in, output out) for post-hoc observability.
-    if [[ -n "${RUN_DIR:-}" ]]; then
-        local step_dir="$RUN_DIR/steps/iter-$iteration"
+    if [[ -n "$step_dir" ]]; then
         if mkdir -p "$step_dir" 2>/dev/null; then
             printf '%s' "$structured_prompt" > "$step_dir/prompt.txt" 2>/dev/null || true
             printf '%s' "$output" > "$step_dir/output.txt" 2>/dev/null || true
@@ -1904,7 +2022,7 @@ execute_iteration() {
 
     # Log metrics (JSONL). Build with jq so special chars in TOOL/SELECTED_MODEL
     # can't emit malformed JSON that would later break review_run's parsing.
-    local timestamp metrics_payload
+    local timestamp metrics_payload provider_outcome provider_reason
     timestamp=$(date +%Y-%m-%dT%H:%M:%S)
     # Normalize numerics (bc can emit ".5" without a leading zero -> invalid JSON).
     [[ "$iteration_latency" =~ ^[0-9]+(\.[0-9]+)?$ ]] || iteration_latency=0
@@ -1917,6 +2035,20 @@ execute_iteration() {
     local changed_json=false verify_json="${verify_ok:-true}"
     [[ "$project_hash_before" != "$project_hash_after" ]] && changed_json=true
     [[ "${_RALPH_REMOTE_PROGRESS:-0}" == "1" ]] && changed_json=true
+    if [[ "$verify_json" != "true" ]]; then
+        provider_outcome="verification_failed"
+        provider_reason="provider completed but verification failed"
+    elif [[ "${_RALPH_REMOTE_PROGRESS:-0}" == "1" ]]; then
+        provider_outcome="remote_progress"
+        provider_reason="remote provider made progress"
+    elif [[ "$project_hash_before" != "$project_hash_after" ]]; then
+        provider_outcome="project_changed"
+        provider_reason="provider changed project files"
+    else
+        provider_outcome="no_project_change"
+        provider_reason="provider completed without local file changes"
+    fi
+    _write_iteration_provider_summary_json "$step_dir" "$iteration" "$provider_outcome" "$provider_reason" "$temp_output" "$LOG_FILE" "$changed_json" "$verify_json" "${iteration_latency:-0}" "${est_tokens:-0}"
     metrics_payload=""
     if command_exists jq; then
         metrics_payload=$(jq -nc \
