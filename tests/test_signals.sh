@@ -55,6 +55,21 @@ jq empty "$SIGNAL_DIR/$key.json" 2>/dev/null && ok "signal is valid JSON" || bad
 record_signal runtime_failure "go vet fails" "vet error" "fix vet" >/dev/null
 eq "different theme -> 2 files" 2 "$(find "$SIGNAL_DIR" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')"
 
+_saved_SIGNAL_DIR="$SIGNAL_DIR"
+export SIGNAL_DIR="$TMP/throttle-signals"
+rm -rf "$SIGNAL_DIR"
+export RALPH_NOW="2026-07-21T00:00:00Z" RALPH_SIGNAL_REWRITE_MIN_SECONDS=3600
+throttle_key=$(record_signal runtime_failure "poll failed" "same evidence" "retry")
+export RALPH_NOW="2026-07-21T00:30:00Z"
+record_signal runtime_failure "poll failed" "same evidence" "retry" >/dev/null
+eq "rewrite throttle skips immediate duplicate frequency bump" 1 "$(jq -r .frequency "$SIGNAL_DIR/$throttle_key.json")"
+eq "rewrite throttle preserves last_seen while skipped" "2026-07-21T00:00:00Z" "$(jq -r .last_seen "$SIGNAL_DIR/$throttle_key.json")"
+export RALPH_NOW="2026-07-21T02:00:00Z"
+record_signal runtime_failure "poll failed" "same evidence" "retry" >/dev/null
+eq "rewrite throttle allows update after window" 2 "$(jq -r .frequency "$SIGNAL_DIR/$throttle_key.json")"
+export SIGNAL_DIR="$_saved_SIGNAL_DIR"
+unset RALPH_NOW RALPH_SIGNAL_REWRITE_MIN_SECONDS _saved_SIGNAL_DIR
+
 echo "== lifecycle: resolve then recurrence reopens with regressed =="
 signal_resolve "$key" "fixed it"
 eq "resolved status" resolved "$(jq -r .status "$SIGNAL_DIR/$key.json")"

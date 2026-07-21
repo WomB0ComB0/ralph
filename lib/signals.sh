@@ -158,10 +158,26 @@ record_signal() {
     tmp=$(mktemp "$dir/.sig.XXXXXX" 2>/dev/null) || tmp=$(mktemp) || return 1
 
     if [[ -f "$file" ]]; then
-        local cur_sev cur_status new_sev set_status regressed freq
+        local cur_sev cur_status new_sev set_status regressed freq min_rewrite last_seen last_epoch now_epoch age_seconds existing_evidence existing_action
         cur_sev=$(jq -r '.severity // "low"' "$file" 2>/dev/null)
         cur_status=$(jq -r '.status // "open"' "$file" 2>/dev/null)
         freq=$(jq -r '.frequency // 0' "$file" 2>/dev/null)
+        min_rewrite="${RALPH_SIGNAL_REWRITE_MIN_SECONDS:-0}"
+        [[ "$min_rewrite" =~ ^[0-9]+$ ]] || min_rewrite=0
+        if [[ "$min_rewrite" -gt 0 && "$cur_status" != "resolved" ]]; then
+            last_seen=$(jq -r '.last_seen // ""' "$file" 2>/dev/null)
+            existing_evidence=$(jq -r '.evidence // ""' "$file" 2>/dev/null)
+            existing_action=$(jq -r '.suggested_action // ""' "$file" 2>/dev/null)
+            last_epoch=$(_signal_epoch "$last_seen")
+            now_epoch=$(_signal_epoch "$now")
+            age_seconds=$(( now_epoch - last_epoch ))
+            # Self-benchmarking: next, track skipped rewrites in a compact counter for patrol resource reports.
+            if [[ "$last_epoch" -gt 0 && "$now_epoch" -gt 0 && "$age_seconds" -ge 0 && "$age_seconds" -lt "$min_rewrite" && "$existing_evidence" == "$evidence" && "$existing_action" == "$action" ]]; then
+                rm -f "$tmp" 2>/dev/null
+                printf '%s\n' "$key"
+                return 0
+            fi
+        fi
         if [[ -n "$severity" ]]; then
             new_sev="$severity"
         else

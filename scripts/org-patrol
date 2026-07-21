@@ -12,6 +12,7 @@ targets_file="${RALPH_ORG_TARGETS_FILE:-}"
 log_dir="${RALPH_ORG_LOG_DIR:-}"
 mode="${RALPH_ORG_TRIAGE_MODE:-report}"
 synapse_check="${RALPH_ORG_SYNAPSE_CHECK:-1}"
+log_retention="${RALPH_ORG_LOG_RETENTION:-48}"
 discover_args=()
 
 usage() {
@@ -56,6 +57,12 @@ fi
 : "${log_dir:=$state_home/ralph/${org}}"
 
 mkdir -p "$log_dir" "$(dirname "$targets_file")"
+if [[ "$log_retention" =~ ^[0-9]+$ && "$log_retention" -gt 0 ]]; then
+    mapfile -t _old_logs < <(find "$log_dir" -maxdepth 1 -type f -name 'patrol-*.log' -printf '%f\n' 2>/dev/null | sort | head -n -"$log_retention" 2>/dev/null || true)
+    for _old_log in "${_old_logs[@]}"; do
+        rm -f "$log_dir/$_old_log" 2>/dev/null || true
+    done
+fi
 log_file="$log_dir/patrol-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$log_file") 2>&1
 
@@ -88,5 +95,6 @@ case "$mode" in
 esac
 
 export RALPH_TARGETS_FILE="$targets_file"
+export RALPH_SIGNAL_REWRITE_MIN_SECONDS="${RALPH_SIGNAL_REWRITE_MIN_SECONDS:-3600}"
 "$ralph_bin" "${triage_args[@]}"
 printf '[%s] Ralph public-org patrol complete\n' "$(date -u +%FT%TZ)"

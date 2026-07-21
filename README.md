@@ -324,6 +324,7 @@ Common environment variables:
 | `RALPH_HASH_EXCLUDES` | Extra names excluded from project hashing. |
 | `GITDIFF_EXCLUDE` | Diff-exclude file for `--diff-context`. |
 | `RALPH_SIGNAL_RECALL` | Signal digest size surfaced into prompts. |
+| `RALPH_SIGNAL_REWRITE_MIN_SECONDS` | Optional minimum seconds before an identical recurring signal rewrites its JSON; scheduled org patrol defaults to `3600` to reduce SSD churn. |
 | `RALPH_GLOBAL_SKILL_DIR` | Cross-project skill directory. |
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
 | `SYNAPSE_ENABLED` | Set to `1` to retrieve bounded Synapse context during each main iteration and inject it into the prompt; failures are fail-open. |
@@ -342,6 +343,7 @@ Common environment variables:
 | `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
 | `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
+| `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |
 
 ## Dependencies
 

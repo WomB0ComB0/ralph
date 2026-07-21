@@ -211,6 +211,48 @@ _triage_report() {
     done
 }
 
+
+_triage_signal_type() {
+    local cat="$1" repo="$2"
+    printf 'triage_%s_%s\n' "$cat" "${repo//[^a-zA-Z0-9]/_}"
+}
+
+_triage_signal_key() {
+    local sev="$1" repo="$2" cat="$3" summary="$4" url="$5" type evidence
+    declare -F _signal_theme_key >/dev/null 2>&1 || return 1
+    type=$(_triage_signal_type "$cat" "$repo")
+    evidence="$summary${url:+ ($url)}"
+    _signal_theme_key "$type" "$evidence"
+}
+
+_triage_reconcile_signals() {
+    local key_file="$1"; shift
+    command_exists jq || return 0
+    declare -F signal_resolve >/dev/null 2>&1 || return 0
+    local dir="${SIGNAL_DIR:-.ralph/artifacts/signals}"
+    [[ -d "$dir" ]] || return 0
+    local f status type key repo repo_norm matched resolved=0
+    for f in "$dir"/*.json; do
+        [[ -f "$f" ]] || continue
+        status=$(jq -r '.status // ""' "$f" 2>/dev/null) || continue
+        [[ "$status" == "open" || "$status" == "ack" ]] || continue
+        type=$(jq -r '.type // ""' "$f" 2>/dev/null) || continue
+        [[ "$type" == triage_* ]] || continue
+        matched=0
+        for repo in "$@"; do
+            repo_norm="${repo//[^a-zA-Z0-9]/_}"
+            case "$type" in triage_*_"$repo_norm") matched=1; break ;; esac
+        done
+        [[ "$matched" == "1" ]] || continue
+        key=$(basename "$f" .json)
+        if [[ ! -f "$key_file" ]] || ! grep -Fxq "$key" "$key_file" 2>/dev/null; then
+            signal_resolve "$key" "auto-resolved: absent from latest complete triage scan" >/dev/null 2>&1 || true
+            resolved=$((resolved + 1))
+        fi
+    done
+    [[ "$resolved" -gt 0 ]] && log_info "Auto-resolved $resolved stale triage signal(s) absent from the latest complete scan."
+}
+
 # Deterministic, clearly bot-namespaced fix branch (so a human PR can never collide / be mistaken).
 triage_ci_branch_name() { printf 'ralph/fix-ci-%s\n' "$1"; }
 
@@ -993,28 +1035,44 @@ handle_triage_command() {
         return 0
     fi
     log_info "Triaging ${#targets[@]} repo(s), read-only: ${targets[*]}"
-    local all repo; all=$(mktemp)
+    local all repo scan_rc=0 incomplete=0 current_keys=""
+    all=$(mktemp)
+    current_keys=$(mktemp)
     for repo in "${targets[@]}"; do
-        triage_scan_repo "$repo" >> "$all" || true
+        scan_rc=0
+        triage_scan_repo "$repo" >> "$all" || scan_rc=$?
+        [[ "$scan_rc" -eq 75 ]] && incomplete=1
     done
     # NB: `grep -c` PRINTS 0 and EXITS 1 on no matches, so `|| echo 0` would yield "0\n0" and
     # break the arithmetic below — count lines with wc instead.
     local count; count=$(wc -l < "$all" 2>/dev/null | tr -d ' '); count=${count:-0}
     if [[ "$count" -eq 0 ]]; then
         log_success "Triage clean: no failing CI or open security alerts across ${#targets[@]} repo(s)."
-        rm -f "$all"; return 0
+        if [[ "$incomplete" == "0" ]]; then
+            _triage_reconcile_signals "$current_keys" "${targets[@]}"
+        else
+            log_warning "Skipping triage signal reconciliation because at least one repo scan was incomplete."
+        fi
+        rm -f "$all" "$current_keys"; return 0
     fi
     echo
     log_warning "Found $count item(s) needing attention:"
     _triage_report "$all"
     echo
     # Compound: record each finding as a deduped signal (frequency climbs if it recurs).
-    local sev repo2 cat summary url
+    local sev repo2 cat summary url key
     while IFS=$'\t' read -r sev repo2 cat summary url; do
         [[ -z "$repo2" ]] && continue
-        record_signal "triage_${cat}_${repo2//[^a-zA-Z0-9]/_}" "$cat finding in $repo2" "$summary${url:+ ($url)}" "review and resolve: $summary" "triage" "$sev" >/dev/null 2>&1 || true
+        key=$(_triage_signal_key "$sev" "$repo2" "$cat" "$summary" "$url" 2>/dev/null || true)
+        [[ -n "$key" ]] && printf '%s\n' "$key" >> "$current_keys"
+        record_signal "$(_triage_signal_type "$cat" "$repo2")" "$cat finding in $repo2" "$summary${url:+ ($url)}" "review and resolve: $summary" "triage" "$sev" >/dev/null 2>&1 || true
     done < "$all"
-    rm -f "$all"
+    if [[ "$incomplete" == "0" ]]; then
+        _triage_reconcile_signals "$current_keys" "${targets[@]}"
+    else
+        log_warning "Skipping triage signal reconciliation because at least one repo scan was incomplete."
+    fi
+    rm -f "$all" "$current_keys"
     log_info "Recorded findings as signals (see 'ralph signal ls'). Autofix→PR / suggest modes are opt-in (coming next)."
     return 0
 }

@@ -7,6 +7,7 @@ export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
 source "$R/lib/triage.sh"
+source "$R/lib/signals.sh"
 set +eu
 IFS=' '
 
@@ -71,6 +72,31 @@ code='[{"state":"open","rule":{"security_severity_level":"critical","description
 eq "code-scanning uses security_severity_level" "critical	o/r	code-scan	SQL injection	https://x/c1" "$(printf '%s' "$code" | _triage_parse_alerts "o/r" code-scanning)"
 sec='[{"state":"open","secret_type_display_name":"AWS Access Key","html_url":"https://x/s1"}]'
 eq "secret-scanning -> high severity" "high	o/r	secret	AWS Access Key	https://x/s1" "$(printf '%s' "$sec" | _triage_parse_alerts "o/r" secret-scanning)"
+
+
+echo "== triage signal reconciliation: complete scans clear absent findings =="
+export SIGNAL_DIR="$TMP/reconcile-signals" SIGNAL_ARCHIVE_DIR="$TMP/reconcile-signals/.archive" RALPH_TARGETS="o/r"
+rm -rf "$SIGNAL_DIR"; init_signals
+old_key=$(record_signal "$(_triage_signal_type ci o/r)" "ci finding in o/r" "Old failed (https://x/old)" "review old" "triage" medium)
+keep_key=$(record_signal "$(_triage_signal_type ci o/r)" "ci finding in o/r" "Keep failed (https://x/keep)" "review keep" "triage" medium)
+other_key=$(record_signal "$(_triage_signal_type ci other/r)" "ci finding in other/r" "Other failed (https://x/other)" "review other" "triage" medium)
+gh() { :; }
+triage_scan_repo() { printf 'medium\to/r\tci\tKeep failed\thttps://x/keep\n'; }
+recon_out=$(handle_triage_command 2>&1); recon_rc=$?
+eq "triage reconciliation command succeeds" 0 "$recon_rc"
+eq "absent scanned-repo signal resolved" resolved "$(jq -r .status "$SIGNAL_DIR/$old_key.json")"
+eq "present scanned-repo signal remains open" open "$(jq -r .status "$SIGNAL_DIR/$keep_key.json")"
+eq "unscanned repo signal remains open" open "$(jq -r .status "$SIGNAL_DIR/$other_key.json")"
+printf '%s' "$recon_out" | grep -q 'Auto-resolved 1 stale triage signal' && ok "triage reconciliation reports resolved count" || bad "missing reconciliation log: $recon_out"
+
+signal_reopen "$old_key"
+triage_scan_repo() { return 75; }
+incomplete_out=$(handle_triage_command 2>&1); incomplete_rc=$?
+eq "incomplete triage command still exits 0" 0 "$incomplete_rc"
+eq "incomplete scan does not resolve absent signal" open "$(jq -r .status "$SIGNAL_DIR/$old_key.json")"
+printf '%s' "$incomplete_out" | grep -q 'Skipping triage signal reconciliation' && ok "incomplete scan skips reconciliation" || bad "missing incomplete reconciliation warning: $incomplete_out"
+unset RALPH_TARGETS SIGNAL_DIR SIGNAL_ARCHIVE_DIR
+unset -f gh triage_scan_repo
 
 echo "== CI autofix safety: branch naming + push gate + dry-run writes nothing =="
 eq "fix branch is bot-namespaced + deterministic" "ralph/fix-ci-789" "$(triage_ci_branch_name 789)"
