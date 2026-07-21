@@ -53,6 +53,12 @@ cat > "$TMP/ralph.sh" <<'SH'
 printf '%s\n' "$*" >> "$RALPH_CALL_LOG"
 case "$1 $2" in
   "synapse live-test") exit "${RALPH_SYN_RC:-0}" ;;
+  "resource report")
+    cat <<'JSON'
+{"ok":false,"disk":{"ralph_bytes":3400000,"run_dirs":307},"system":{"memory":{"used_percent":19.5},"load":{"load1":2.8}},"trend":{"slope":{"percent_per_sample":{"ralph_bytes":0,"load1":23.3}}},"warnings":[{"kind":"slope","metric":"trend.slope.percent_per_sample.load1"},{"kind":"disk","metric":"disk.ralph_bytes"}]}
+JSON
+    exit 0
+    ;;
   "triage "*)
     if [ "${RALPH_TRIAGE_GITHUB_503:-0}" = "1" ]; then
       printf 'WARNING: transient GitHub failure during triage: HTTP 503 Service Unavailable\n' >&2
@@ -95,12 +101,13 @@ eq "resq public targets wrapper defaults to resq-software" "resq-software/live" 
 
 echo "== org-patrol =="
 : > "$RALPH_CALL_LOG"
-RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" >/dev/null 2>&1; rc=$?
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" >"$TMP/patrol-report.out" 2>&1; rc=$?
 eq "report patrol exits 0" 0 "$rc"
 eq "patrol refreshes targets for requested org" "demo-org/live" "$(cat "$TMP/patrol.targets")"
 grep -qx 'synapse live-test ralph' "$RALPH_CALL_LOG" && ok "patrol runs synapse live-test by default" || bad "missing synapse check"
 grep -qx 'triage' "$RALPH_CALL_LOG" && ok "report mode runs read-only triage" || bad "report mode did not run triage"
 grep -Eq '^resource report --record-history .*/state/ralph/demo-org/resource-history\.jsonl$' "$RALPH_CALL_LOG" && ok "patrol records resource history by default" || bad "missing resource history call: $(cat "$RALPH_CALL_LOG")"
+grep -Eq '^resource summary: band=sustained-growth ok=false warnings=2 disk=3\.2M runs=307 memory=19\.5% load1=2\.8 slope_max=23\.3%/sample history=.*/state/ralph/demo-org/resource-history\.jsonl$' "$TMP/patrol-report.out" && ok "patrol prints compact resource summary" || bad "missing resource summary: $(cat "$TMP/patrol-report.out")"
 
 : > "$RALPH_CALL_LOG"
 RALPH_TRIAGE_GITHUB_503=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" --no-resource-history >"$TMP/patrol-triage-503.out" 2>&1; rc=$?
