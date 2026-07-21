@@ -98,6 +98,17 @@ _resource_previous_snapshot() {
     printf 'null\n'
 }
 
+_resource_history_window_json() {
+    local history_file="$1" window="$2"
+    if [[ -n "$history_file" && -f "$history_file" && ! -L "$history_file" && "$window" -gt 0 ]]; then
+        tail -n "$window" "$history_file" 2>/dev/null             | while IFS= read -r line; do
+                [[ -n "$line" ]] && jq -c . >/dev/null 2>&1 <<<"$line" && printf '%s\n' "$line"
+            done             | jq -s .
+        return 0
+    fi
+    printf '[]\n'
+}
+
 _resource_history_snapshot() {
     jq -c '{schema_version:1, artifact:"ralph_resource_snapshot", generated_at,
             disk:{ralph_bytes:.disk.ralph_bytes,runs_bytes:.disk.runs_bytes,signals_bytes:.disk.signals_bytes,beads_bytes:.disk.beads_bytes,signal_files:.disk.signal_files,run_dirs:.disk.run_dirs},
@@ -133,6 +144,8 @@ Options:
   --max-ralph-bytes BYTES    Warn when .ralph disk footprint exceeds BYTES. Supports K/M/G/T suffixes.
   --max-run-dirs N           Warn when retained .ralph run directories exceed N.
   --max-growth-pct N         Warn when tracked metrics grew by more than N percent since the last history snapshot.
+  --max-slope-pct N          Warn when recent history slope exceeds N percent per sample.
+  --slope-window N           Recent history snapshots to evaluate for slope warnings, default 6.
   --record-history FILE      Append a compact JSONL snapshot after building the report.
   --history-retention N      Keep at most N history snapshots, default 96. Set 0 to keep all.
   --fail-on-warning          Exit 3 after printing JSON if any warning is present.
@@ -146,6 +159,9 @@ handle_resource_report_command() {
     local max_ralph_bytes="${RALPH_RESOURCE_MAX_RALPH_BYTES:-${RALPH_RESOURCE_MAX_DISK_BYTES:-}}"
     local max_run_dirs="${RALPH_RESOURCE_MAX_RUN_DIRS:-}"
     local max_growth_pct="${RALPH_RESOURCE_MAX_GROWTH_PCT:-}"
+    local max_slope_pct="${RALPH_RESOURCE_MAX_SLOPE_PCT:-}"
+    local slope_window="${RALPH_RESOURCE_SLOPE_WINDOW:-6}"
+    local slope_min_samples=3
     local history_file="${RALPH_RESOURCE_HISTORY_FILE:-}"
     local history_retention="${RALPH_RESOURCE_HISTORY_RETENTION:-96}"
     local fail_on_warning="${RALPH_RESOURCE_FAIL_ON_WARNING:-0}"
@@ -162,6 +178,10 @@ handle_resource_report_command() {
             --max-run-dirs=*) max_run_dirs="${1#*=}"; shift ;;
             --max-growth-pct) max_growth_pct="${2:?--max-growth-pct requires a value}"; shift 2 ;;
             --max-growth-pct=*) max_growth_pct="${1#*=}"; shift ;;
+            --max-slope-pct) max_slope_pct="${2:?--max-slope-pct requires a value}"; shift 2 ;;
+            --max-slope-pct=*) max_slope_pct="${1#*=}"; shift ;;
+            --slope-window) slope_window="${2:?--slope-window requires a value}"; shift 2 ;;
+            --slope-window=*) slope_window="${1#*=}"; shift ;;
             --record-history|--history-file) history_file="${2:?$1 requires a value}"; shift 2 ;;
             --record-history=*|--history-file=*) history_file="${1#*=}"; shift ;;
             --history-retention) history_retention="${2:?--history-retention requires a value}"; shift 2 ;;
@@ -188,6 +208,14 @@ handle_resource_report_command() {
         echo "invalid --max-growth-pct: $max_growth_pct" >&2
         return 2
     fi
+    if [[ -n "$max_slope_pct" ]] && ! _resource_is_number "$max_slope_pct"; then
+        echo "invalid --max-slope-pct: $max_slope_pct" >&2
+        return 2
+    fi
+    if ! _resource_is_int "$slope_window" || [[ "$slope_window" -lt 1 ]]; then
+        echo "invalid --slope-window: $slope_window" >&2
+        return 2
+    fi
     if ! _resource_is_int "$history_retention"; then
         echo "invalid --history-retention: $history_retention" >&2
         return 2
@@ -206,12 +234,13 @@ handle_resource_report_command() {
     local beads_dir="$ralph_dir/beads"
     local state_root="${RALPH_ORG_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/ralph}"
     local config_root="${RALPH_ORG_CONFIG_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/ralph}"
-    local latest_patrol_log="" latest_patrol_size=0 report="" previous="" history_recorded=false history_error=""
+    local latest_patrol_log="" latest_patrol_size=0 report="" previous="" history_window="" history_recorded=false history_error=""
     latest_patrol_log=$(find "$state_root" -type f -name 'patrol-*.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {sub(/^[^ ]+ /, ""); print; exit}' || true)
     [[ -n "$latest_patrol_log" ]] && latest_patrol_size=$(_resource_size_bytes "$latest_patrol_log")
     previous=$(_resource_previous_snapshot "$history_file")
+    history_window=$(_resource_history_window_json "$history_file" "$slope_window")
 
-    # Self-benchmarking: next, add slope-based trend warnings instead of only comparing to the previous snapshot.
+    # Self-benchmarking: next, summarize resource history bands in patrol logs for faster operator scans.
     report=$(jq -n \
         --arg artifact "ralph_resource_report" \
         --arg generated_at "$(_resource_now)" \
@@ -261,6 +290,30 @@ handle_resource_report_command() {
              if .budgets.max_growth_percent != null and .trend.growth_percent.memory_used_percent != null and .trend.growth_percent.memory_used_percent > .budgets.max_growth_percent then warn("trend";"trend.growth_percent.memory_used_percent";.trend.growth_percent.memory_used_percent;.budgets.max_growth_percent;"used memory percentage growth exceeds trend budget") else empty end
            ]
          | .ok = (.warnings | length == 0)') || return 1
+
+    report=$(jq \
+        --argjson history_window "$history_window" \
+        --argjson slope_window "$slope_window" \
+        --argjson slope_min_samples "$slope_min_samples" \
+        --argjson max_slope_pct "$(_resource_budget_json_number "$max_slope_pct")" \
+        'def warn($kind;$metric;$observed;$limit;$message): {kind:$kind,metric:$metric,observed:$observed,limit:$limit,message:$message};
+         def pct_slope($current;$old;$steps): if $current == null or $old == null or $old <= 0 or $steps <= 0 then null else ((($current - $old) / $old / $steps * 10000 | round) / 100) end;
+         .budgets.max_slope_percent_per_sample = $max_slope_pct
+         | ({generated_at:.generated_at,disk:{ralph_bytes:.disk.ralph_bytes,run_dirs:.disk.run_dirs},system:{load1:.system.load.load1,memory_used_percent:.system.memory.used_percent}}) as $current
+         | ($history_window + [$current]) as $series
+         | ($series | length) as $count
+         | .trend.slope = (if $count < $slope_min_samples then {sample_count:$count,window:$slope_window,min_samples:$slope_min_samples,first_at:null,last_at:null,percent_per_sample:{}} else
+             ($series[0]) as $first | ($series[-1]) as $last | ($count - 1) as $steps |
+             {sample_count:$count,window:$slope_window,min_samples:$slope_min_samples,first_at:$first.generated_at,last_at:$last.generated_at,
+              percent_per_sample:{ralph_bytes:pct_slope($last.disk.ralph_bytes;$first.disk.ralph_bytes;$steps),run_dirs:pct_slope($last.disk.run_dirs;$first.disk.run_dirs;$steps),load1:pct_slope($last.system.load1;$first.system.load1;$steps),memory_used_percent:pct_slope($last.system.memory_used_percent;$first.system.memory_used_percent;$steps)}}
+           end)
+         | .warnings += [
+             if .budgets.max_slope_percent_per_sample != null and .trend.slope.percent_per_sample.ralph_bytes != null and .trend.slope.percent_per_sample.ralph_bytes > .budgets.max_slope_percent_per_sample then warn("slope";"trend.slope.percent_per_sample.ralph_bytes";.trend.slope.percent_per_sample.ralph_bytes;.budgets.max_slope_percent_per_sample;"Ralph disk footprint slope exceeds trend budget") else empty end,
+             if .budgets.max_slope_percent_per_sample != null and .trend.slope.percent_per_sample.run_dirs != null and .trend.slope.percent_per_sample.run_dirs > .budgets.max_slope_percent_per_sample then warn("slope";"trend.slope.percent_per_sample.run_dirs";.trend.slope.percent_per_sample.run_dirs;.budgets.max_slope_percent_per_sample;"retained run directory slope exceeds trend budget") else empty end,
+             if .budgets.max_slope_percent_per_sample != null and .trend.slope.percent_per_sample.load1 != null and .trend.slope.percent_per_sample.load1 > .budgets.max_slope_percent_per_sample then warn("slope";"trend.slope.percent_per_sample.load1";.trend.slope.percent_per_sample.load1;.budgets.max_slope_percent_per_sample;"1-minute load slope exceeds trend budget") else empty end,
+             if .budgets.max_slope_percent_per_sample != null and .trend.slope.percent_per_sample.memory_used_percent != null and .trend.slope.percent_per_sample.memory_used_percent > .budgets.max_slope_percent_per_sample then warn("slope";"trend.slope.percent_per_sample.memory_used_percent";.trend.slope.percent_per_sample.memory_used_percent;.budgets.max_slope_percent_per_sample;"used memory percentage slope exceeds trend budget") else empty end
+           ]
+         | .ok = (.warnings | length == 0)' <<<"$report") || return 1
 
     if [[ -n "$history_file" ]]; then
         if _resource_write_history "$history_file" "$history_retention" "$report"; then

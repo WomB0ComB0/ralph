@@ -66,5 +66,21 @@ eq "history retention keeps two snapshots" 2 "$(wc -l < "$history" | tr -d '[:sp
 jq -e 'select(.artifact == "ralph_resource_snapshot") and .disk.ralph_bytes > 0 and .warning_count >= 1' <<<"$(tail -n 1 "$history")" >/dev/null && ok "history file stores compact snapshot" || bad "bad history snapshot: $(cat "$history")"
 handle_resource_command report --history-retention nope >/dev/null 2>&1 && bad "invalid history retention accepted" || ok "invalid history retention rejected"
 
+slope_history="$TMP/resource-slope-history.jsonl"
+current_bytes=$(_resource_size_bytes "$PROJECT_DIR/.ralph")
+small_bytes=$((current_bytes / 4))
+[[ "$small_bytes" -lt 1 ]] && small_bytes=1
+mid_bytes=$((current_bytes / 2))
+cat > "$slope_history" <<JSON
+{"schema_version":1,"artifact":"ralph_resource_snapshot","generated_at":"2026-07-21T00:00:00Z","disk":{"ralph_bytes":$small_bytes,"run_dirs":1},"system":{"load1":1,"memory_used_percent":10}}
+{"schema_version":1,"artifact":"ralph_resource_snapshot","generated_at":"2026-07-21T01:00:00Z","disk":{"ralph_bytes":$mid_bytes,"run_dirs":1},"system":{"load1":1,"memory_used_percent":20}}
+JSON
+out=$(handle_resource_command report --record-history "$slope_history" --history-retention 4 --max-slope-pct 10 --slope-window 2); rc=$?
+eq "slope resource report exits 0" 0 "$rc"
+jq -e '.trend.slope.sample_count == 3 and .trend.slope.window == 2 and .budgets.max_slope_percent_per_sample == 10' <<<"$out" >/dev/null && ok "slope report records window metadata" || bad "slope metadata missing: $out"
+jq -e '.warnings[] | select(.kind == "slope" and .metric == "trend.slope.percent_per_sample.ralph_bytes")' <<<"$out" >/dev/null && ok "slope budget warning present" || bad "missing slope warning: $out"
+handle_resource_command report --max-slope-pct nope >/dev/null 2>&1 && bad "invalid slope budget accepted" || ok "invalid slope budget rejected"
+handle_resource_command report --slope-window 0 >/dev/null 2>&1 && bad "invalid slope window accepted" || ok "invalid slope window rejected"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
