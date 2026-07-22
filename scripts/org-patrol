@@ -13,13 +13,26 @@ log_dir="${RALPH_ORG_LOG_DIR:-}"
 mode="${RALPH_ORG_TRIAGE_MODE:-report}"
 synapse_check="${RALPH_ORG_SYNAPSE_CHECK:-1}"
 resource_history="${RALPH_ORG_RESOURCE_HISTORY:-1}"
+soak_summary="${RALPH_ORG_SOAK_SUMMARY:-1}"
+soak_summary_file="${RALPH_ORG_SOAK_SUMMARY_FILE:-}"
+soak_summary_retention="${RALPH_ORG_SOAK_SUMMARY_RETENTION:-500}"
 log_retention="${RALPH_ORG_LOG_RETENTION:-48}"
 discover_args=()
+started_at="$(date -u +%FT%TZ)"
+started_epoch="$(date -u +%s)"
+target_count=0
+synapse_rc=""
+triage_rc=""
+resource_rc=""
+resource_ok=""
+resource_warnings=""
+resource_band=""
+resource_history_file=""
 
 
 usage() {
     cat <<'EOF'
-Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check] [--no-resource-history]
+Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check] [--no-resource-history] [--no-soak-summary]
 
 MODE values:
   report              read-only triage report (default)
@@ -33,6 +46,7 @@ MODE values:
 The target allowlist is refreshed from public, non-archived org repos before triage.
 Set RALPH_ORG instead of --org for scheduled/non-interactive runs.
 Resource history is recorded to the patrol log directory by default; set RALPH_ORG_RESOURCE_HISTORY=0 or pass --no-resource-history to disable it.
+Durable soak summaries are appended to soak-summary.jsonl by default; set RALPH_ORG_SOAK_SUMMARY=0 or pass --no-soak-summary to disable them.
 EOF
 }
 
@@ -47,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --include-archived) discover_args+=(--include-archived); shift ;;
         --no-synapse-check) synapse_check=0; shift ;;
         --no-resource-history) resource_history=0; shift ;;
+        --no-soak-summary) soak_summary=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -59,6 +74,7 @@ if [[ -z "$org" ]]; then
 fi
 : "${targets_file:=$config_home/ralph/${org}.targets}"
 : "${log_dir:=$state_home/ralph/${org}}"
+: "${soak_summary_file:=$log_dir/soak-summary.jsonl}"
 
 mkdir -p "$log_dir" "$(dirname "$targets_file")"
 if [[ "$log_retention" =~ ^[0-9]+$ && "$log_retention" -gt 0 ]]; then
@@ -70,7 +86,78 @@ fi
 log_file="$log_dir/patrol-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$log_file") 2>&1
 
-printf '[%s] Ralph public-org patrol starting: org=%s mode=%s\n' "$(date -u +%FT%TZ)" "$org" "$mode"
+write_soak_summary() {
+    local exit_code="${1:-0}" ended_at ended_epoch elapsed summary_dir tmp summary ok_value
+    [[ "$soak_summary" == "1" ]] || return 0
+    command -v jq >/dev/null 2>&1 || { printf 'WARNING: soak summary requires jq; skipping\n' >&2; return 0; }
+    [[ ! -L "$soak_summary_file" ]] || { printf 'WARNING: soak summary refuses symlink: %s\n' "$soak_summary_file" >&2; return 0; }
+    if ! [[ "$soak_summary_retention" =~ ^[0-9]+$ ]]; then
+        printf 'WARNING: invalid RALPH_ORG_SOAK_SUMMARY_RETENTION=%s; using 500\n' "$soak_summary_retention" >&2
+        soak_summary_retention=500
+    fi
+    ended_at="$(date -u +%FT%TZ)"
+    ended_epoch="$(date -u +%s)"
+    elapsed=$((ended_epoch - started_epoch))
+    ok_value=false
+    [[ "$exit_code" -eq 0 ]] && ok_value=true
+
+    summary=$(jq -nc \
+        --arg org "$org" \
+        --arg mode "$mode" \
+        --arg started_at "$started_at" \
+        --arg ended_at "$ended_at" \
+        --arg log_file "$log_file" \
+        --arg targets_file "$targets_file" \
+        --arg resource_history_file "$resource_history_file" \
+        --arg resource_band "$resource_band" \
+        --argjson elapsed_seconds "$elapsed" \
+        --argjson target_count "${target_count:-0}" \
+        --argjson exit_code "$exit_code" \
+        --argjson result_ok "$ok_value" \
+        --arg synapse_enabled "$synapse_check" \
+        --arg synapse_rc "$synapse_rc" \
+        --arg triage_rc "$triage_rc" \
+        --arg resource_enabled "$resource_history" \
+        --arg resource_rc "$resource_rc" \
+        --arg resource_ok "$resource_ok" \
+        --arg resource_warnings "$resource_warnings" \
+        'def maybe_num($s): if $s == "" then null else ($s | tonumber) end;
+         def maybe_bool($s): if $s == "" then null elif $s == "true" then true elif $s == "false" then false else null end;
+         {
+           schema_version:1,
+           artifact:"ralph_org_patrol_soak_summary",
+           generated_at:$ended_at,
+           org:$org,
+           mode:$mode,
+           started_at:$started_at,
+           ended_at:$ended_at,
+           elapsed_seconds:$elapsed_seconds,
+           log_file:$log_file,
+           targets_file:$targets_file,
+           target_count:$target_count,
+           result:{ok:$result_ok,exit_code:$exit_code},
+           synapse:{enabled:($synapse_enabled == "1"),ok:(if $synapse_rc == "" then null else $synapse_rc == "0" end),rc:maybe_num($synapse_rc)},
+           triage:{ok:(if $triage_rc == "" then null else $triage_rc == "0" end),rc:maybe_num($triage_rc)},
+           resource:{enabled:($resource_enabled == "1"),ok:maybe_bool($resource_ok),rc:maybe_num($resource_rc),warning_count:maybe_num($resource_warnings),band:(if $resource_band == "" then null else $resource_band end),history_file:(if $resource_history_file == "" then null else $resource_history_file end)}
+         }') || { printf 'WARNING: failed to build soak summary\n' >&2; return 0; }
+
+    summary_dir=$(dirname "$soak_summary_file")
+    mkdir -p "$summary_dir" || { printf 'WARNING: failed to create soak summary dir: %s\n' "$summary_dir" >&2; return 0; }
+    tmp=$(mktemp "$summary_dir/.soak-summary.XXXXXX") || { printf 'WARNING: failed to create soak summary temp file\n' >&2; return 0; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    [[ -f "$soak_summary_file" ]] && cat "$soak_summary_file" >>"$tmp" 2>/dev/null || true
+    printf '%s\n' "$summary" >>"$tmp"
+    if [[ "$soak_summary_retention" -gt 0 ]]; then
+        tail -n "$soak_summary_retention" "$tmp" >"$tmp.keep" && mv "$tmp.keep" "$tmp"
+    fi
+    mv "$tmp" "$soak_summary_file" || { printf 'WARNING: failed to write soak summary: %s\n' "$soak_summary_file" >&2; return 0; }
+    chmod 600 "$soak_summary_file" 2>/dev/null || true
+    printf 'patrol soak summary recorded: ok=%s exit=%s file=%s\n' "$ok_value" "$exit_code" "$soak_summary_file"
+}
+trap 'rc=$?; write_soak_summary "$rc"; exit "$rc"' EXIT
+
+# Self-benchmarking: next, expose a compact command to summarize soak-summary.jsonl across repeated timer cycles.
+printf '[%s] Ralph public-org patrol starting: org=%s mode=%s\n' "$started_at" "$org" "$mode"
 printf 'ralph_home=%s\ntargets_file=%s\nlog_file=%s\n' "$ralph_home" "$targets_file" "$log_file"
 
 "$ralph_home/scripts/org-public-targets" --org "$org" --write "$targets_file" "${discover_args[@]}" >/dev/null
@@ -80,8 +167,10 @@ sed 's/^/  - /' "$targets_file"
 
 if [[ "$synapse_check" == "1" ]]; then
     if "$ralph_bin" synapse live-test ralph; then
+        synapse_rc=0
         printf 'synapse live-test passed\n'
     else
+        synapse_rc=$?
         printf 'WARNING: synapse live-test failed; continuing with GitHub triage\n' >&2
     fi
 fi
@@ -100,7 +189,11 @@ esac
 
 export RALPH_TARGETS_FILE="$targets_file"
 export RALPH_SIGNAL_REWRITE_MIN_SECONDS="${RALPH_SIGNAL_REWRITE_MIN_SECONDS:-3600}"
-"$ralph_bin" "${triage_args[@]}"
+"$ralph_bin" "${triage_args[@]}" || triage_rc=$?
+triage_rc="${triage_rc:-0}"
+if [[ "$triage_rc" -ne 0 ]]; then
+    exit "$triage_rc"
+fi
 if [[ "$resource_history" == "1" ]]; then
     resource_history_file="${RALPH_RESOURCE_HISTORY_FILE:-$log_dir/resource-history.jsonl}"
     resource_rc=0
@@ -110,6 +203,7 @@ if [[ "$resource_history" == "1" ]]; then
             "$ralph_bin" resource summary --history "$resource_history_file" <<<"$resource_output"
             resource_ok=$(jq -r '.ok' <<<"$resource_output")
             resource_warnings=$(jq -r '.warnings | length' <<<"$resource_output")
+            resource_band=$(jq -r 'if ([.warnings[]?.kind] | any(. == "slope")) then "sustained-growth" elif (.warnings | length) > 0 then "warning" else "normal" end' <<<"$resource_output")
             printf 'resource report recorded: ok=%s warnings=%s history=%s\n' "$resource_ok" "$resource_warnings" "$resource_history_file"
         else
             printf 'resource report recorded: history=%s\n' "$resource_history_file"

@@ -114,6 +114,11 @@ grep -qx 'triage' "$RALPH_CALL_LOG" && ok "report mode runs read-only triage" ||
 grep -Eq '^resource report --record-history .*/state/ralph/demo-org/resource-history\.jsonl$' "$RALPH_CALL_LOG" && ok "patrol records resource history by default" || bad "missing resource history call: $(cat "$RALPH_CALL_LOG")"
 grep -Eq '^resource summary --history .*/state/ralph/demo-org/resource-history\.jsonl$' "$RALPH_CALL_LOG" && ok "patrol uses reusable resource summary command" || bad "missing resource summary command: $(cat "$RALPH_CALL_LOG")"
 grep -Eq '^resource summary: band=sustained-growth ok=false warnings=2 disk=3\.2M runs=307 memory=19\.5% load1=2\.8 slope_max=23\.3%/sample history=.*/state/ralph/demo-org/resource-history\.jsonl$' "$TMP/patrol-report.out" && ok "patrol prints compact resource summary" || bad "missing resource summary: $(cat "$TMP/patrol-report.out")"
+summary_file="$XDG_STATE_HOME/ralph/demo-org/soak-summary.jsonl"
+[[ -f "$summary_file" ]] && ok "patrol writes durable soak summary" || bad "missing soak summary: $summary_file"
+eq "soak summary is mode 600" "600" "$(stat -c '%a' "$summary_file" 2>/dev/null)"
+jq -e '.artifact == "ralph_org_patrol_soak_summary" and .schema_version == 1 and .org == "demo-org" and .mode == "report" and .target_count == 1 and .result.ok == true and .result.exit_code == 0 and .synapse.enabled == true and .synapse.rc == 0 and .triage.rc == 0 and .resource.enabled == true and .resource.rc == 0 and .resource.ok == false and .resource.warning_count == 2 and .resource.band == "sustained-growth" and (.resource.history_file | test("/state/ralph/demo-org/resource-history\\.jsonl$")) and (.log_file | test("/state/ralph/demo-org/patrol-"))' "$summary_file" >/dev/null && ok "soak summary captures patrol, Synapse, triage, resource, and log fields" || bad "bad soak summary: $(cat "$summary_file" 2>/dev/null)"
+grep -Eq '^patrol soak summary recorded: ok=true exit=0 file=.*/state/ralph/demo-org/soak-summary\.jsonl$' "$TMP/patrol-report.out" && ok "patrol prints soak summary artifact path" || bad "missing soak summary line: $(cat "$TMP/patrol-report.out")"
 
 : > "$RALPH_CALL_LOG"
 RALPH_TRIAGE_GITHUB_503=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" --no-resource-history >"$TMP/patrol-triage-503.out" 2>&1; rc=$?
@@ -127,7 +132,9 @@ eq "suggest-apply patrol exits 0" 0 "$rc"
 ! grep -q '^synapse live-test' "$RALPH_CALL_LOG" && ok "--no-synapse-check skips live-test" || bad "synapse check ran despite flag"
 grep -qx 'triage --suggest --apply' "$RALPH_CALL_LOG" && ok "suggest-apply maps to triage issue write mode" || bad "wrong suggest-apply triage args"
 
-RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1 && bad "invalid patrol mode accepted" || ok "invalid patrol mode rejected"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >"$TMP/patrol-invalid.out" 2>&1; rc=$?
+[[ "$rc" -ne 0 ]] && ok "invalid patrol mode rejected" || bad "invalid patrol mode accepted"
+tail -n 1 "$summary_file" | jq -e '.result.ok == false and .result.exit_code == 2 and .synapse.enabled == false and .synapse.rc == null and .triage.rc == null and .resource.band == null and (.log_file | test("/state/ralph/demo-org/patrol-"))' >/dev/null && ok "failed patrol still records soak summary exit status" || bad "bad failed-patrol soak summary: $(tail -n 1 "$summary_file" 2>/dev/null)"
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1 && bad "missing patrol org accepted" || ok "missing patrol org rejected"
 
 
@@ -138,6 +145,7 @@ timer="$XDG_CONFIG_HOME/systemd/user/ralph-demo-org-patrol.timer"
 grep -q '^CPUQuota=25%$' "$svc" && ok "installer writes CPUQuota" || bad "CPUQuota missing: $(cat "$svc" 2>/dev/null)"
 grep -q '^MemoryMax=1G$' "$svc" && ok "installer writes MemoryMax" || bad "MemoryMax missing: $(cat "$svc" 2>/dev/null)"
 grep -q '^IOWeight=100$' "$svc" && ok "installer writes IOWeight" || bad "IOWeight missing: $(cat "$svc" 2>/dev/null)"
+grep -q '^RALPH_ORG_SOAK_SUMMARY_FILE=.*/state/ralph/demo-org/soak-summary.jsonl$' "$XDG_CONFIG_HOME/ralph/demo-org-patrol.env" && ok "installer configures soak summary artifact path" || bad "soak summary env missing: $(cat "$XDG_CONFIG_HOME/ralph/demo-org-patrol.env" 2>/dev/null)"
 grep -q '^OnUnitActiveSec=45min$' "$timer" && ok "installer preserves custom interval" || bad "custom interval missing: $(cat "$timer" 2>/dev/null)"
 grep -q 'enable --now ralph-demo-org-patrol.timer' "$SYSTEMCTL_CALL_LOG" && ok "installer enables timer" || bad "timer enable not called: $(cat "$SYSTEMCTL_CALL_LOG")"
 
