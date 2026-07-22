@@ -332,9 +332,61 @@ handle_resource_report_command() {
     return 0
 }
 
+_resource_summary_usage() {
+    cat <<'EOF'
+Usage: ralph resource summary [--history FILE] [REPORT_JSON_FILE]
+
+Reads a resource report JSON document from REPORT_JSON_FILE or stdin and prints a compact operator summary line.
+EOF
+}
+
+handle_resource_summary_command() {
+    command -v jq >/dev/null 2>&1 || { echo "resource summary requires jq" >&2; return 1; }
+    local history="" input="-"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --history) history="${2:?--history requires a value}"; shift 2 ;;
+            --history=*) history="${1#*=}"; shift ;;
+            -h|--help) _resource_summary_usage; return 0 ;;
+            -) input="-"; shift ;;
+            *)
+                if [[ "$input" != "-" ]]; then
+                    echo "resource summary accepts at most one report file" >&2
+                    _resource_summary_usage >&2
+                    return 2
+                fi
+                input="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local jq_filter='
+      def bytes($b):
+        if $b == null then "n/a"
+        elif $b >= 1073741824 then (((($b / 1073741824) * 10 | round) / 10) | tostring) + "G"
+        elif $b >= 1048576 then (((($b / 1048576) * 10 | round) / 10) | tostring) + "M"
+        elif $b >= 1024 then (((($b / 1024) * 10 | round) / 10) | tostring) + "K"
+        else ($b | tostring) + "B" end;
+      def pct($n): if $n == null then "n/a" else (($n | tostring) + "%") end;
+      def n($v): if $v == null then "n/a" else ($v | tostring) end;
+      ([.warnings[]?.kind] | any(. == "slope")) as $has_slope
+      | (.warnings | length) as $warning_count
+      | ([.trend.slope.percent_per_sample[]? | select(. != null)] | max // null) as $max_slope
+      | (if $has_slope then "sustained-growth" elif $warning_count > 0 then "warning" else "normal" end) as $band
+      | "resource summary: band=\($band) ok=\(.ok) warnings=\($warning_count) disk=\(bytes(.disk.ralph_bytes)) runs=\(.disk.run_dirs) memory=\(pct(.system.memory.used_percent)) load1=\(n(.system.load.load1)) slope_max=\(pct($max_slope))/sample history=\(if $history == "" then (.history.file // "n/a") else $history end)"
+    '
+    if [[ "$input" == "-" ]]; then
+        jq -r --arg history "$history" "$jq_filter"
+    else
+        jq -r --arg history "$history" "$jq_filter" "$input"
+    fi
+}
+
 handle_resource_command() {
     case "${1:-report}" in
         report) shift || true; handle_resource_report_command "$@" ;;
-        *) echo "Usage: ralph resource report"; return 1 ;;
+        summary) shift || true; handle_resource_summary_command "$@" ;;
+        *) echo "Usage: ralph resource report|summary"; return 1 ;;
     esac
 }

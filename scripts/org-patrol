@@ -17,24 +17,6 @@ log_retention="${RALPH_ORG_LOG_RETENTION:-48}"
 discover_args=()
 
 
-resource_summary_line() {
-    jq -r --arg history "$1" '
-      def bytes($b):
-        if $b == null then "n/a"
-        elif $b >= 1073741824 then (((($b / 1073741824) * 10 | round) / 10) | tostring) + "G"
-        elif $b >= 1048576 then (((($b / 1048576) * 10 | round) / 10) | tostring) + "M"
-        elif $b >= 1024 then (((($b / 1024) * 10 | round) / 10) | tostring) + "K"
-        else ($b | tostring) + "B" end;
-      def pct($n): if $n == null then "n/a" else (($n | tostring) + "%") end;
-      def n($v): if $v == null then "n/a" else ($v | tostring) end;
-      ([.warnings[]?.kind] | any(. == "slope")) as $has_slope
-      | (.warnings | length) as $warning_count
-      | ([.trend.slope.percent_per_sample[]? | select(. != null)] | max // null) as $max_slope
-      | (if $has_slope then "sustained-growth" elif $warning_count > 0 then "warning" else "normal" end) as $band
-      | "resource summary: band=\($band) ok=\(.ok) warnings=\($warning_count) disk=\(bytes(.disk.ralph_bytes)) runs=\(.disk.run_dirs) memory=\(pct(.system.memory.used_percent)) load1=\(n(.system.load.load1)) slope_max=\(pct($max_slope))/sample history=\($history)"
-    '
-}
-
 usage() {
     cat <<'EOF'
 Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check] [--no-resource-history]
@@ -125,7 +107,7 @@ if [[ "$resource_history" == "1" ]]; then
     resource_output=$("$ralph_bin" resource report --record-history "$resource_history_file" 2>&1) || resource_rc=$?
     if [[ "$resource_rc" -eq 0 || "$resource_rc" -eq 3 ]]; then
         if command -v jq >/dev/null 2>&1 && jq -e type >/dev/null 2>&1 <<<"$resource_output"; then
-            resource_summary_line "$resource_history_file" <<<"$resource_output"
+            "$ralph_bin" resource summary --history "$resource_history_file" <<<"$resource_output"
             resource_ok=$(jq -r '.ok' <<<"$resource_output")
             resource_warnings=$(jq -r '.warnings | length' <<<"$resource_output")
             printf 'resource report recorded: ok=%s warnings=%s history=%s\n' "$resource_ok" "$resource_warnings" "$resource_history_file"

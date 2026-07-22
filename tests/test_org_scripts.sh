@@ -59,6 +59,11 @@ case "$1 $2" in
 JSON
     exit 0
     ;;
+  "resource summary")
+    printf 'resource summary: band=sustained-growth ok=false warnings=2 disk=3.2M runs=307 memory=19.5%% load1=2.8 slope_max=23.3%%/sample history=%s
+' "$4"
+    exit 0
+    ;;
   "triage "*)
     if [ "${RALPH_TRIAGE_GITHUB_503:-0}" = "1" ]; then
       printf 'WARNING: transient GitHub failure during triage: HTTP 503 Service Unavailable\n' >&2
@@ -107,6 +112,7 @@ eq "patrol refreshes targets for requested org" "demo-org/live" "$(cat "$TMP/pat
 grep -qx 'synapse live-test ralph' "$RALPH_CALL_LOG" && ok "patrol runs synapse live-test by default" || bad "missing synapse check"
 grep -qx 'triage' "$RALPH_CALL_LOG" && ok "report mode runs read-only triage" || bad "report mode did not run triage"
 grep -Eq '^resource report --record-history .*/state/ralph/demo-org/resource-history\.jsonl$' "$RALPH_CALL_LOG" && ok "patrol records resource history by default" || bad "missing resource history call: $(cat "$RALPH_CALL_LOG")"
+grep -Eq '^resource summary --history .*/state/ralph/demo-org/resource-history\.jsonl$' "$RALPH_CALL_LOG" && ok "patrol uses reusable resource summary command" || bad "missing resource summary command: $(cat "$RALPH_CALL_LOG")"
 grep -Eq '^resource summary: band=sustained-growth ok=false warnings=2 disk=3\.2M runs=307 memory=19\.5% load1=2\.8 slope_max=23\.3%/sample history=.*/state/ralph/demo-org/resource-history\.jsonl$' "$TMP/patrol-report.out" && ok "patrol prints compact resource summary" || bad "missing resource summary: $(cat "$TMP/patrol-report.out")"
 
 : > "$RALPH_CALL_LOG"

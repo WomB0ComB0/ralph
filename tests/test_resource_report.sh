@@ -55,6 +55,17 @@ jq -e '.ok == false and (.warnings | length) == 1' <<<"$out" >/dev/null && ok "f
 handle_resource_command report --max-run-dirs nope >/dev/null 2>&1 && bad "invalid run budget accepted" || ok "invalid run budget rejected"
 handle_resource_command report --max-ralph-bytes nope >/dev/null 2>&1 && bad "invalid disk budget accepted" || ok "invalid disk budget rejected"
 
+summary_json='{"ok":false,"disk":{"ralph_bytes":3400000,"run_dirs":307},"system":{"memory":{"used_percent":19.5},"load":{"load1":2.8}},"history":{"file":"/tmp/history.jsonl"},"trend":{"slope":{"percent_per_sample":{"ralph_bytes":0,"load1":23.3}}},"warnings":[{"kind":"slope"},{"kind":"disk"}]}'
+out=$(handle_resource_command summary --history "$TMP/history.jsonl" <<<"$summary_json"); rc=$?
+eq "resource summary exits 0" 0 "$rc"
+eq "resource summary formats compact band" "resource summary: band=sustained-growth ok=false warnings=2 disk=3.2M runs=307 memory=19.5% load1=2.8 slope_max=23.3%/sample history=$TMP/history.jsonl" "$out"
+printf '%s
+' "$summary_json" > "$TMP/summary.json"
+out=$(handle_resource_command summary "$TMP/summary.json"); rc=$?
+eq "resource summary accepts report file" 0 "$rc"
+contains "resource summary uses report history fallback" 'history=/tmp/history.jsonl' "$out"
+handle_resource_command summary "$TMP/summary.json" "$TMP/summary.json" >/dev/null 2>&1 && bad "extra summary file accepted" || ok "extra summary file rejected"
+
 history="$TMP/resource-history.jsonl"
 printf '%s
 ' '{"schema_version":1,"artifact":"ralph_resource_snapshot","generated_at":"2026-07-21T00:00:00Z","disk":{"ralph_bytes":1,"run_dirs":1},"system":{"load1":1,"memory_used_percent":10}}' > "$history"
