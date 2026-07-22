@@ -266,6 +266,34 @@ printf '%s' "$sg" | grep -q 'alternate destination' && ok "disabled-issues skip 
 if printf '%s\n' "$(cat "$GHLOG")" | grep -q 'issue create'; then bad "disabled-issues repo attempted issue create: $(cat "$GHLOG")"; else ok "disabled-issues repo does not attempt issue create"; fi
 unset -f triage_scan_repo gh
 
+GHLOG="$TMP/ghcalls-disabled-expected"; : > "$GHLOG"
+export RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS=$'other/repo
+o/r'
+triage_scan_repo() {
+    printf '%s' $'medium	o/r	ci	Build failed	https://x/run
+'
+    printf '%s' $'high	o/r	secret	Token leaked	https://x/secret
+'
+}
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        issue\ list*) echo "the 'o/r' repository has disabled issues" >&2; return 1 ;;
+        issue\ create*) return 42 ;;
+        *) printf '
+' ;;
+    esac
+}
+sg=$(triage_suggest "o/r" 1 2>&1)
+eq "suggest apply skips expected disabled-issues repos" "0" "$?"
+printf '%s' "$sg" | grep -q 'GitHub issues are disabled as expected (2 current finding(s))' && ok "expected disabled-issues repo logs info context" || bad "expected disabled-issues missing info context: $sg"
+printf '%s' "$sg" | grep -q 'RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS' && ok "expected disabled-issues mentions config source" || bad "expected disabled-issues missing config hint: $sg"
+printf '%s' "$sg" | grep -q 'alternate destination' && bad "expected disabled-issues still warns about alternate destination: $sg" || ok "expected disabled-issues suppresses alternate routing warning"
+if printf '%s
+' "$(cat "$GHLOG")" | grep -q 'issue create'; then bad "expected disabled-issues repo attempted issue create: $(cat "$GHLOG")"; else ok "expected disabled-issues repo does not attempt issue create"; fi
+unset RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS
+unset -f triage_scan_repo gh
+
 GHLOG="$TMP/ghcalls-update"; : > "$GHLOG"
 triage_scan_repo() { printf 'medium\to/r\tci\tBuild failed\thttps://x/run\n'; }
 gh() {

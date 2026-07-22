@@ -105,6 +105,16 @@ triage_load_targets() {
     } | awk '{ sub(/#.*/,""); gsub(/[ \t\r]/,"") } /^[^\/]+\/[^\/]+$/ && !seen[$0]++ { print }'
 }
 
+
+_triage_expected_disabled_issues_repo() {
+    local repo="${1:-}"
+    [[ -n "$repo" && -n "${RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS:-}" ]] || return 1
+    printf '%s\n' "$RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS" \
+        | tr ', ' '\n\n' \
+        | awk '{ sub(/#.*/,""); gsub(/[ \t\r]/,"") } /^[^\/]+\/[^\/]+$/ && !seen[$0]++ { print }' \
+        | grep -Fxq "$repo"
+}
+
 # Parse `gh run list --json name,headBranch,url` -> TSV findings (sev\trepo\tcategory\tsummary\turl).
 _triage_parse_runs() {
     local repo="$1"
@@ -900,7 +910,12 @@ triage_suggest() {
             return 0
         fi
         if [[ "$issue_list_output" == *"repository has disabled issues"* || "$issue_list_output" == *"Issues are disabled"* ]]; then
-            log_warning "[$repo] skipped triage issue sync: GitHub issues are disabled ($count current finding(s)); route via alternate destination."
+            # Self-benchmarking: next, auto-suggest this allowlist entry when repo metadata confirms a public fork.
+            if _triage_expected_disabled_issues_repo "$repo"; then
+                log_info "[$repo] skipped triage issue sync: GitHub issues are disabled as expected ($count current finding(s)); repo is configured in RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS."
+            else
+                log_warning "[$repo] skipped triage issue sync: GitHub issues are disabled ($count current finding(s)); route via alternate destination."
+            fi
             return 0
         fi
         log_error "[$repo] failed to inspect triage issues: $issue_list_output"; return 1

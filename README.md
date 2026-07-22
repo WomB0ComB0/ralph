@@ -358,6 +358,7 @@ Common environment variables:
 | `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
 | `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
+| `RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS` | Optional comma/space/newline-separated `owner/repo` list whose disabled GitHub Issues setting is expected, such as public forks; `--suggest --apply` logs an info skip instead of a warning for those repos. |
 | `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |
 | `RALPH_ORG_RESOURCE_HISTORY` | Set to `0` to stop scheduled org patrols from recording compact resource-history snapshots. |
 | `RALPH_ORG_SOAK_SUMMARY` / `RALPH_ORG_SOAK_SUMMARY_FILE` / `RALPH_ORG_SOAK_SUMMARY_RETENTION` | Enable, relocate, and retain durable org-patrol soak summaries; defaults are `1`, `~/.local/state/ralph/<org>/soak-summary.jsonl`, and `500` rows. |
