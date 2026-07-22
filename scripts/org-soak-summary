@@ -1,0 +1,93 @@
+#!/bin/bash
+# Summarize durable org-patrol soak-summary.jsonl artifacts.
+set -euo pipefail
+
+org="${RALPH_ORG:-}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+summary_file="${RALPH_ORG_SOAK_SUMMARY_FILE:-}"
+recent="${RALPH_ORG_SOAK_SUMMARY_RECENT:-5}"
+format="text"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/org-soak-summary --org ORG [--file FILE] [--recent N] [--json]
+
+Reads org-patrol soak-summary.jsonl and prints a compact live-fire rollup.
+Set RALPH_ORG instead of --org for scheduled/non-interactive use.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --org) org="${2:?--org requires a value}"; shift 2 ;;
+        --org=*) org="${1#*=}"; shift ;;
+        --file) summary_file="${2:?--file requires a value}"; shift 2 ;;
+        --file=*) summary_file="${1#*=}"; shift ;;
+        --recent) recent="${2:?--recent requires a value}"; shift 2 ;;
+        --recent=*) recent="${1#*=}"; shift ;;
+        --json) format="json"; shift ;;
+        --text) format="text"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "$org" ]]; then
+    echo "--org or RALPH_ORG is required" >&2
+    usage >&2
+    exit 2
+fi
+case "$recent" in ''|*[!0-9]*) echo "--recent must be numeric" >&2; exit 2 ;; esac
+if [[ "$recent" -lt 1 ]]; then
+    echo "--recent must be greater than zero" >&2
+    exit 2
+fi
+: "${summary_file:=$state_home/ralph/${org}/soak-summary.jsonl}"
+
+command -v jq >/dev/null 2>&1 || { echo "org-soak-summary requires jq" >&2; exit 1; }
+[[ ! -L "$summary_file" ]] || { echo "org-soak-summary refuses symlink: $summary_file" >&2; exit 1; }
+[[ -f "$summary_file" ]] || { echo "org-soak-summary file not found: $summary_file" >&2; exit 1; }
+
+# Self-benchmarking: next, include latest-vs-previous deltas for elapsed time and warning count.
+jq_filter='
+  def n($v): if $v == null then "n/a" else ($v | tostring) end;
+  def rc($v): if $v == null then "null" else ($v | tostring) end;
+  (split("\n") | map(select(length > 0))) as $lines
+  | ([$lines[] | (fromjson? // empty) | select(.artifact == "ralph_org_patrol_soak_summary")]) as $records
+  | ($records[-1] // null) as $last
+  | ($records | map(.elapsed_seconds // 0) | max // null) as $worst_elapsed
+  | ($records | map(select((.result.ok // false) != true or ((.result.exit_code // 0) != 0))) | length) as $failures
+  | ($records | map(select((.synapse.enabled // false) == true and ((.synapse.ok // false) != true))) | length) as $synapse_failures
+  | ($records | map(select((.triage.rc // 0) != 0)) | length) as $triage_failures
+  | ($records | map(select((.resource.warning_count // 0) > 0)) | length) as $resource_warning_runs
+  | ($records | map(select(.resource.band != null)) | group_by(.resource.band) | map({key:.[0].resource.band, value:length}) | from_entries) as $resource_bands
+  | ($records | .[-$recent:] | map(.synapse.rc // null)) as $recent_synapse_rc
+  | {
+      schema_version:1,
+      artifact:"ralph_org_patrol_soak_rollup",
+      generated_at:(now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+      org:$org,
+      file:$file,
+      line_count:($lines | length),
+      parsed_records:($records | length),
+      skipped_lines:(($lines | length) - ($records | length)),
+      cycles:($records | length),
+      failures:$failures,
+      synapse_failures:$synapse_failures,
+      triage_failures:$triage_failures,
+      resource_warning_runs:$resource_warning_runs,
+      resource_bands:$resource_bands,
+      worst_elapsed_seconds:$worst_elapsed,
+      recent_synapse_rc:$recent_synapse_rc,
+      last:(if $last == null then null else {started_at:$last.started_at, ended_at:$last.ended_at, mode:$last.mode, exit_code:($last.result.exit_code // null), ok:($last.result.ok // null), elapsed_seconds:($last.elapsed_seconds // null), resource_band:($last.resource.band // null), resource_warnings:($last.resource.warning_count // null), synapse_rc:($last.synapse.rc // null), log_file:($last.log_file // null)} end)
+    }
+  | if $format == "json" then . else
+      "org soak summary: org=\(.org) cycles=\(.cycles) failures=\(.failures) synapse_failures=\(.synapse_failures) triage_failures=\(.triage_failures) resource_warning_runs=\(.resource_warning_runs) worst_elapsed=\(n(.worst_elapsed_seconds))s last_band=\(n(.last.resource_band)) last_exit=\(n(.last.exit_code)) recent_synapse_rc=[\(.recent_synapse_rc | map(rc(.)) | join(","))] file=\(.file)"
+    end
+'
+
+if [[ "$format" == "json" ]]; then
+    jq -R -s --arg org "$org" --arg file "$summary_file" --arg format "$format" --argjson recent "$recent" "$jq_filter" "$summary_file"
+else
+    jq -R -s -r --arg org "$org" --arg file "$summary_file" --arg format "$format" --argjson recent "$recent" "$jq_filter" "$summary_file"
+fi

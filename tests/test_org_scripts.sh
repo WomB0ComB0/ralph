@@ -135,6 +135,20 @@ grep -qx 'triage --suggest --apply' "$RALPH_CALL_LOG" && ok "suggest-apply maps 
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >"$TMP/patrol-invalid.out" 2>&1; rc=$?
 [[ "$rc" -ne 0 ]] && ok "invalid patrol mode rejected" || bad "invalid patrol mode accepted"
 tail -n 1 "$summary_file" | jq -e '.result.ok == false and .result.exit_code == 2 and .synapse.enabled == false and .synapse.rc == null and .triage.rc == null and .resource.band == null and (.log_file | test("/state/ralph/demo-org/patrol-"))' >/dev/null && ok "failed patrol still records soak summary exit status" || bad "bad failed-patrol soak summary: $(tail -n 1 "$summary_file" 2>/dev/null)"
+cat > "$TMP/soak-fixture.jsonl" <<'JSON'
+{"artifact":"ralph_org_patrol_soak_summary","schema_version":1,"org":"demo-org","mode":"report","started_at":"2026-07-22T00:00:00Z","ended_at":"2026-07-22T00:00:10Z","elapsed_seconds":10,"log_file":"/tmp/patrol-1.log","target_count":2,"result":{"ok":true,"exit_code":0},"synapse":{"enabled":true,"ok":true,"rc":0},"triage":{"ok":true,"rc":0},"resource":{"enabled":true,"ok":true,"rc":0,"warning_count":0,"band":"normal","history_file":"/tmp/history.jsonl"}}
+not-json
+{"artifact":"ralph_org_patrol_soak_summary","schema_version":1,"org":"demo-org","mode":"report","started_at":"2026-07-22T00:01:00Z","ended_at":"2026-07-22T00:01:25Z","elapsed_seconds":25,"log_file":"/tmp/patrol-2.log","target_count":2,"result":{"ok":false,"exit_code":75},"synapse":{"enabled":true,"ok":false,"rc":1},"triage":{"ok":false,"rc":75},"resource":{"enabled":true,"ok":false,"rc":3,"warning_count":2,"band":"warning","history_file":"/tmp/history.jsonl"}}
+{"artifact":"ralph_org_patrol_soak_summary","schema_version":1,"org":"demo-org","mode":"report","started_at":"2026-07-22T00:02:00Z","ended_at":"2026-07-22T00:02:07Z","elapsed_seconds":7,"log_file":"/tmp/patrol-3.log","target_count":2,"result":{"ok":true,"exit_code":0},"synapse":{"enabled":false,"ok":null,"rc":null},"triage":{"ok":true,"rc":0},"resource":{"enabled":true,"ok":false,"rc":0,"warning_count":1,"band":"sustained-growth","history_file":"/tmp/history.jsonl"}}
+JSON
+out=$("$R/scripts/org-soak-summary" --org demo-org --file "$TMP/soak-fixture.jsonl" --recent 2); rc=$?
+eq "org soak summary exits 0" 0 "$rc"
+eq "org soak summary prints compact rollup" "org soak summary: org=demo-org cycles=3 failures=1 synapse_failures=1 triage_failures=1 resource_warning_runs=2 worst_elapsed=25s last_band=sustained-growth last_exit=0 recent_synapse_rc=[1,null] file=$TMP/soak-fixture.jsonl" "$out"
+out=$("$R/scripts/org-soak-summary" --org demo-org --file "$TMP/soak-fixture.jsonl" --recent 2 --json); rc=$?
+eq "org soak summary json exits 0" 0 "$rc"
+jq -e '.artifact == "ralph_org_patrol_soak_rollup" and .schema_version == 1 and .org == "demo-org" and .cycles == 3 and .failures == 1 and .synapse_failures == 1 and .triage_failures == 1 and .resource_warning_runs == 2 and .worst_elapsed_seconds == 25 and .recent_synapse_rc == [1,null] and .resource_bands.normal == 1 and .resource_bands.warning == 1 and .resource_bands["sustained-growth"] == 1 and .skipped_lines == 1 and .last.resource_band == "sustained-growth" and .last.log_file == "/tmp/patrol-3.log"' <<<"$out" >/dev/null && ok "org soak summary emits machine-readable rollup" || bad "bad org soak summary json: $out"
+"$R/scripts/org-soak-summary" --org demo-org --file "$TMP/soak-fixture.jsonl" --recent 0 >/dev/null 2>&1 && bad "org soak summary accepted zero recent" || ok "org soak summary rejects zero recent"
+"$R/scripts/org-soak-summary" --file "$TMP/soak-fixture.jsonl" >/dev/null 2>&1 && bad "org soak summary accepted missing org" || ok "org soak summary requires org"
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --targets-file "$TMP/patrol.targets" --no-synapse-check >/dev/null 2>&1 && bad "missing patrol org accepted" || ok "missing patrol org rejected"
 
 
