@@ -334,19 +334,21 @@ handle_resource_report_command() {
 
 _resource_summary_usage() {
     cat <<'EOF'
-Usage: ralph resource summary [--history FILE] [REPORT_JSON_FILE]
+Usage: ralph resource summary [--json] [--history FILE] [REPORT_JSON_FILE]
 
-Reads a resource report JSON document from REPORT_JSON_FILE or stdin and prints a compact operator summary line.
+Reads a resource report JSON document from REPORT_JSON_FILE or stdin and prints a compact operator summary line. Use --json for machine-readable output.
 EOF
 }
 
 handle_resource_summary_command() {
     command -v jq >/dev/null 2>&1 || { echo "resource summary requires jq" >&2; return 1; }
-    local history="" input="-"
+    local history="" input="-" format="text"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --history) history="${2:?--history requires a value}"; shift 2 ;;
             --history=*) history="${1#*=}"; shift ;;
+            --json) format="json"; shift ;;
+            --text) format="text"; shift ;;
             -h|--help) _resource_summary_usage; return 0 ;;
             -) input="-"; shift ;;
             *)
@@ -374,12 +376,32 @@ handle_resource_summary_command() {
       | (.warnings | length) as $warning_count
       | ([.trend.slope.percent_per_sample[]? | select(. != null)] | max // null) as $max_slope
       | (if $has_slope then "sustained-growth" elif $warning_count > 0 then "warning" else "normal" end) as $band
-      | "resource summary: band=\($band) ok=\(.ok) warnings=\($warning_count) disk=\(bytes(.disk.ralph_bytes)) runs=\(.disk.run_dirs) memory=\(pct(.system.memory.used_percent)) load1=\(n(.system.load.load1)) slope_max=\(pct($max_slope))/sample history=\(if $history == "" then (.history.file // "n/a") else $history end)"
+      | (if $format == "json" then {
+          schema_version:1,
+          artifact:"ralph_resource_summary",
+          band:$band,
+          ok:.ok,
+          warning_count:$warning_count,
+          has_slope_warning:$has_slope,
+          history:(if $history == "" then (.history.file // null) else $history end),
+          metrics:{ralph_bytes:.disk.ralph_bytes,run_dirs:.disk.run_dirs,memory_used_percent:.system.memory.used_percent,load1:.system.load.load1,slope_max_percent_per_sample:$max_slope},
+          display:{disk:bytes(.disk.ralph_bytes),memory:pct(.system.memory.used_percent),load1:n(.system.load.load1),slope_max:(pct($max_slope) + "/sample")}
+        } else
+          "resource summary: band=\($band) ok=\(.ok) warnings=\($warning_count) disk=\(bytes(.disk.ralph_bytes)) runs=\(.disk.run_dirs) memory=\(pct(.system.memory.used_percent)) load1=\(n(.system.load.load1)) slope_max=\(pct($max_slope))/sample history=\(if $history == "" then (.history.file // "n/a") else $history end)"
+        end)
     '
-    if [[ "$input" == "-" ]]; then
-        jq -r --arg history "$history" "$jq_filter"
+    if [[ "$format" == "json" ]]; then
+        if [[ "$input" == "-" ]]; then
+            jq --arg history "$history" --arg format "$format" "$jq_filter"
+        else
+            jq --arg history "$history" --arg format "$format" "$jq_filter" "$input"
+        fi
     else
-        jq -r --arg history "$history" "$jq_filter" "$input"
+        if [[ "$input" == "-" ]]; then
+            jq -r --arg history "$history" --arg format "$format" "$jq_filter"
+        else
+            jq -r --arg history "$history" --arg format "$format" "$jq_filter" "$input"
+        fi
     fi
 }
 

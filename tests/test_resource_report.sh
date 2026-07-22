@@ -64,6 +64,9 @@ printf '%s
 out=$(handle_resource_command summary "$TMP/summary.json"); rc=$?
 eq "resource summary accepts report file" 0 "$rc"
 contains "resource summary uses report history fallback" 'history=/tmp/history.jsonl' "$out"
+out=$(handle_resource_command summary --json --history "$TMP/history.jsonl" "$TMP/summary.json"); rc=$?
+eq "resource summary json exits 0" 0 "$rc"
+jq -e --arg history "$TMP/history.jsonl" '.artifact == "ralph_resource_summary" and .schema_version == 1 and .band == "sustained-growth" and .warning_count == 2 and .has_slope_warning == true and .history == $history and .metrics.slope_max_percent_per_sample == 23.3 and .display.disk == "3.2M"' <<<"$out" >/dev/null && ok "resource summary emits machine-readable JSON" || bad "bad summary JSON: $out"
 handle_resource_command summary "$TMP/summary.json" "$TMP/summary.json" >/dev/null 2>&1 && bad "extra summary file accepted" || ok "extra summary file rejected"
 
 history="$TMP/resource-history.jsonl"
