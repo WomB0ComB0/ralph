@@ -55,7 +55,10 @@ jq_filter='
   (split("\n") | map(select(length > 0))) as $lines
   | ([$lines[] | (fromjson? // empty) | select(.artifact == "ralph_org_patrol_soak_summary")]) as $records
   | ($records[-1] // null) as $last
-  | ($records | map(.elapsed_seconds // 0) | max // null) as $worst_elapsed
+  | ($records | map(select((.timing.elapsed_source // "") == "monotonic") | .elapsed_seconds // ((.timing.elapsed_milliseconds // 0) / 1000 | ceil))) as $monotonic_elapsed_values
+  | (if ($monotonic_elapsed_values | length) > 0 then ($monotonic_elapsed_values | max) else ($records | map(.elapsed_seconds // 0) | max // null) end) as $worst_elapsed
+  | ($records | map(select((.timing.elapsed_source // "") != "monotonic" and (.elapsed_seconds != null))) | length) as $legacy_elapsed_records
+  | ($records | map(.wall_elapsed_seconds // .timing.wall_elapsed_seconds // .elapsed_seconds // 0) | max // null) as $worst_wall_elapsed
   | ($records | map(select((.result.ok // false) != true or ((.result.exit_code // 0) != 0))) | length) as $failures
   | ($records | map(select((.synapse.enabled // false) == true and ((.synapse.ok // false) != true))) | length) as $synapse_failures
   | ($records | map(select((.triage.rc // 0) != 0)) | length) as $triage_failures
@@ -78,11 +81,13 @@ jq_filter='
       resource_warning_runs:$resource_warning_runs,
       resource_bands:$resource_bands,
       worst_elapsed_seconds:$worst_elapsed,
+      worst_wall_elapsed_seconds:$worst_wall_elapsed,
+      legacy_elapsed_records:$legacy_elapsed_records,
       recent_synapse_rc:$recent_synapse_rc,
-      last:(if $last == null then null else {started_at:$last.started_at, ended_at:$last.ended_at, mode:$last.mode, exit_code:($last.result.exit_code // null), ok:($last.result.ok // null), elapsed_seconds:($last.elapsed_seconds // null), resource_band:($last.resource.band // null), resource_warnings:($last.resource.warning_count // null), synapse_rc:($last.synapse.rc // null), log_file:($last.log_file // null)} end)
+      last:(if $last == null then null else {started_at:$last.started_at, ended_at:$last.ended_at, mode:$last.mode, exit_code:($last.result.exit_code // null), ok:($last.result.ok // null), elapsed_seconds:($last.elapsed_seconds // null), wall_elapsed_seconds:($last.wall_elapsed_seconds // $last.timing.wall_elapsed_seconds // null), elapsed_source:($last.timing.elapsed_source // null), resource_band:($last.resource.band // null), resource_warnings:($last.resource.warning_count // null), synapse_rc:($last.synapse.rc // null), log_file:($last.log_file // null)} end)
     }
   | if $format == "json" then . else
-      "org soak summary: org=\(.org) cycles=\(.cycles) failures=\(.failures) synapse_failures=\(.synapse_failures) triage_failures=\(.triage_failures) resource_warning_runs=\(.resource_warning_runs) worst_elapsed=\(n(.worst_elapsed_seconds))s last_band=\(n(.last.resource_band)) last_exit=\(n(.last.exit_code)) recent_synapse_rc=[\(.recent_synapse_rc | map(rc(.)) | join(","))] file=\(.file)"
+      "org soak summary: org=\(.org) cycles=\(.cycles) failures=\(.failures) synapse_failures=\(.synapse_failures) triage_failures=\(.triage_failures) resource_warning_runs=\(.resource_warning_runs) worst_elapsed=\(n(.worst_elapsed_seconds))s worst_wall_elapsed=\(n(.worst_wall_elapsed_seconds))s legacy_elapsed_records=\(.legacy_elapsed_records) last_band=\(n(.last.resource_band)) last_exit=\(n(.last.exit_code)) recent_synapse_rc=[\(.recent_synapse_rc | map(rc(.)) | join(","))] file=\(.file)"
     end
 '
 
