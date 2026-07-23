@@ -18,8 +18,18 @@ soak_summary_file="${RALPH_ORG_SOAK_SUMMARY_FILE:-}"
 soak_summary_retention="${RALPH_ORG_SOAK_SUMMARY_RETENTION:-500}"
 log_retention="${RALPH_ORG_LOG_RETENTION:-48}"
 discover_args=()
+
+_soak_monotonic_ms() {
+    if [[ -r /proc/uptime ]]; then
+        awk '{printf "%d\n", $1 * 1000}' /proc/uptime
+    else
+        printf '%s000\n' "$(date -u +%s)"
+    fi
+}
+
 started_at="$(date -u +%FT%TZ)"
 started_epoch="$(date -u +%s)"
+started_mono_ms="$(_soak_monotonic_ms)"
 target_count=0
 synapse_rc=""
 triage_rc=""
@@ -87,7 +97,7 @@ log_file="$log_dir/patrol-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$log_file") 2>&1
 
 write_soak_summary() {
-    local exit_code="${1:-0}" ended_at ended_epoch elapsed summary_dir tmp summary ok_value
+    local exit_code="${1:-0}" ended_at ended_epoch ended_mono_ms elapsed_ms elapsed_seconds wall_elapsed_seconds summary_dir tmp summary ok_value
     [[ "$soak_summary" == "1" ]] || return 0
     command -v jq >/dev/null 2>&1 || { printf 'WARNING: soak summary requires jq; skipping\n' >&2; return 0; }
     [[ ! -L "$soak_summary_file" ]] || { printf 'WARNING: soak summary refuses symlink: %s\n' "$soak_summary_file" >&2; return 0; }
@@ -97,7 +107,13 @@ write_soak_summary() {
     fi
     ended_at="$(date -u +%FT%TZ)"
     ended_epoch="$(date -u +%s)"
-    elapsed=$((ended_epoch - started_epoch))
+    ended_mono_ms="$(_soak_monotonic_ms)"
+    wall_elapsed_seconds=$((ended_epoch - started_epoch))
+    elapsed_ms=$((ended_mono_ms - started_mono_ms))
+    if [[ "$elapsed_ms" -lt 0 ]]; then
+        elapsed_ms=$((wall_elapsed_seconds * 1000))
+    fi
+    elapsed_seconds=$(((elapsed_ms + 999) / 1000))
     ok_value=false
     [[ "$exit_code" -eq 0 ]] && ok_value=true
 
@@ -110,7 +126,9 @@ write_soak_summary() {
         --arg targets_file "$targets_file" \
         --arg resource_history_file "$resource_history_file" \
         --arg resource_band "$resource_band" \
-        --argjson elapsed_seconds "$elapsed" \
+        --argjson elapsed_seconds "$elapsed_seconds" \
+        --argjson elapsed_milliseconds "$elapsed_ms" \
+        --argjson wall_elapsed_seconds "$wall_elapsed_seconds" \
         --argjson target_count "${target_count:-0}" \
         --argjson exit_code "$exit_code" \
         --argjson result_ok "$ok_value" \
@@ -132,6 +150,8 @@ write_soak_summary() {
            started_at:$started_at,
            ended_at:$ended_at,
            elapsed_seconds:$elapsed_seconds,
+           wall_elapsed_seconds:$wall_elapsed_seconds,
+           timing:{elapsed_source:"monotonic",elapsed_milliseconds:$elapsed_milliseconds,wall_elapsed_seconds:$wall_elapsed_seconds},
            log_file:$log_file,
            targets_file:$targets_file,
            target_count:$target_count,
