@@ -76,6 +76,8 @@ if [[ ! -f "$env_file" ]]; then
 # Trusted-header Synapse mode is localhost-only. For non-loopback BIND_ADDR/SYNAPSE_BIND_ADDR, configure AUTH_JWT_SECRET, AUTH_JWT_PUBLIC_KEY, or AUTH_JWKS_URL and set SYNAPSE_TOKEN for Ralph callers.
 RALPH_ORG=$org
 RALPH_ORG_TRIAGE_MODE=report
+# Code-changing modes (fix-ci-apply/fix-security-apply) require an explicit owner/repo allowlist.
+# RALPH_ORG_CODE_WRITE_TARGETS=$org/example-repo
 RALPH_ORG_SYNAPSE_CHECK=0
 RALPH_ORG_TARGETS_FILE=$ralph_config_dir/${org}.targets
 RALPH_ORG_LOG_DIR=$state_home/ralph/$org
