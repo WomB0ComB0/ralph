@@ -65,6 +65,9 @@ JSON
     exit 0
     ;;
   "triage "*)
+    if [ "$1 $2 $3" = "triage --fix-ci --apply" ] || [ "$1 $2 $3" = "triage --fix-security --apply" ]; then
+      printf 'targets:%s\n' "$(cat "$RALPH_TARGETS_FILE" 2>/dev/null)" >> "$RALPH_CALL_LOG"
+    fi
     if [ "${RALPH_TRIAGE_GITHUB_503:-0}" = "1" ]; then
       printf 'WARNING: transient GitHub failure during triage: HTTP 503 Service Unavailable\n' >&2
     fi
@@ -131,6 +134,24 @@ RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode suggest-apply --org dem
 eq "suggest-apply patrol exits 0" 0 "$rc"
 ! grep -q '^synapse live-test' "$RALPH_CALL_LOG" && ok "--no-synapse-check skips live-test" || bad "synapse check ran despite flag"
 grep -qx 'triage --suggest --apply' "$RALPH_CALL_LOG" && ok "suggest-apply maps to triage issue write mode" || bad "wrong suggest-apply triage args"
+
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode fix-ci-apply --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check --no-resource-history >"$TMP/patrol-fix-ci-apply-guard.out" 2>&1; rc=$?
+eq "fix-ci-apply without code-write targets exits 0" 0 "$rc"
+! grep -qx 'triage --fix-ci --apply' "$RALPH_CALL_LOG" && ok "fix-ci-apply skips triage without code-write opt-in" || bad "unguarded fix-ci-apply ran triage: $(cat "$RALPH_CALL_LOG")"
+grep -q 'has no approved targets' "$TMP/patrol-fix-ci-apply-guard.out" && ok "fix-ci-apply explains missing code-write opt-in" || bad "missing code-write opt-in warning: $(cat "$TMP/patrol-fix-ci-apply-guard.out")"
+
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode fix-ci-apply --org demo-org --targets-file "$TMP/patrol.targets" --code-write-targets 'demo-org/live,other-org/live demo-org/live' --no-synapse-check --no-resource-history >"$TMP/patrol-fix-ci-apply-allowed.out" 2>&1; rc=$?
+eq "fix-ci-apply with matching code-write target exits 0" 0 "$rc"
+grep -qx 'triage --fix-ci --apply' "$RALPH_CALL_LOG" && ok "fix-ci-apply runs triage after code-write opt-in" || bad "guarded fix-ci-apply did not run triage: $(cat "$RALPH_CALL_LOG")"
+grep -qx 'targets:demo-org/live' "$RALPH_CALL_LOG" && ok "fix-ci-apply narrows triage targets to approved discovered repos" || bad "fix-ci-apply did not narrow targets: $(cat "$RALPH_CALL_LOG")"
+grep -q 'code-write target filter: 1 approved target(s)' "$TMP/patrol-fix-ci-apply-allowed.out" && ok "fix-ci-apply reports approved target count" || bad "missing approved target count: $(cat "$TMP/patrol-fix-ci-apply-allowed.out")"
+
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode fix-security-apply --org demo-org --targets-file "$TMP/patrol.targets" --code-write-targets 'other-org/live' --no-synapse-check --no-resource-history >"$TMP/patrol-fix-security-apply-empty.out" 2>&1; rc=$?
+eq "fix-security-apply with no discovered approved target exits 0" 0 "$rc"
+! grep -qx 'triage --fix-security --apply' "$RALPH_CALL_LOG" && ok "fix-security-apply skips triage when approved targets are absent from discovery" || bad "empty filtered fix-security-apply ran triage: $(cat "$RALPH_CALL_LOG")"
 
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >"$TMP/patrol-invalid.out" 2>&1; rc=$?
 [[ "$rc" -ne 0 ]] && ok "invalid patrol mode rejected" || bad "invalid patrol mode accepted"
