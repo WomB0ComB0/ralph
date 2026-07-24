@@ -261,6 +261,7 @@ _triage_reconcile_signals() {
         fi
     done
     [[ "$resolved" -gt 0 ]] && log_info "Auto-resolved $resolved stale triage signal(s) absent from the latest complete scan."
+    return 0
 }
 
 # Deterministic, clearly bot-namespaced fix branch (so a human PR can never collide / be mistaken).

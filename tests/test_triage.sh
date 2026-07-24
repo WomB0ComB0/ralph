@@ -89,6 +89,10 @@ eq "present scanned-repo signal remains open" open "$(jq -r .status "$SIGNAL_DIR
 eq "unscanned repo signal remains open" open "$(jq -r .status "$SIGNAL_DIR/$other_key.json")"
 printf '%s' "$recon_out" | grep -q 'Auto-resolved 1 stale triage signal' && ok "triage reconciliation reports resolved count" || bad "missing reconciliation log: $recon_out"
 
+recon_again_out=$(handle_triage_command 2>&1); recon_again_rc=$?
+eq "triage reconciliation with no stale signals still succeeds" 0 "$recon_again_rc"
+if printf '%s' "$recon_again_out" | grep -q 'Auto-resolved'; then bad "no-stale reconciliation should not report auto-resolve: $recon_again_out"; else ok "no-stale reconciliation emits no auto-resolve count"; fi
+
 signal_reopen "$old_key"
 triage_scan_repo() { return 75; }
 incomplete_out=$(handle_triage_command 2>&1); incomplete_rc=$?
