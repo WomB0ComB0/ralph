@@ -38,9 +38,22 @@ curl() {
                 [[ "$health_calls" -eq 1 ]] && { printf '\n000'; return 0; }
             fi
             printf '{"status":"ok"}\n200' ;;
-        context.upsert) printf '{"principal_id":"agent:x","status":"upserted"}\n200' ;;
-        context.get)    printf '{"principal_id":"agent:x","active_projects":["livetest"],"data_classification":{"contains_pii":false,"special_category":false}}\n200' ;;
-        retrieve)       printf '{"results":[],"trace_id":"t-abc"}\n200' ;;
+        context.upsert) printf '{"principal_id":"%s","status":"upserted"}\n200' "${SYN_LT_PRINCIPAL:-agent:claude}" ;;
+        context.get)
+            if [ "${SYN_CONTEXT_MODE:-persistent}" = "volatile" ]; then
+                printf '{"principal_id":"%s","active_projects":["livetest"],"data_classification":{"contains_pii":false,"special_category":false}}\n200' "${SYN_LT_PRINCIPAL:-agent:claude}"
+            else
+                printf '{"principal_id":"%s","tenant_id":"%s","active_projects":["livetest"],"data_classification":{"contains_pii":false,"special_category":false},"updated_at":"2026-07-24T00:00:00Z"}\n200' "${SYN_LT_PRINCIPAL:-agent:claude}" "${SYN_LT_TENANT:-ralph-dev}"
+            fi
+            ;;
+        retrieve)
+            if [ -n "${SYN_LT_DOC_ID:-}" ]; then
+                printf '{"results":[{"doc_id":"%s","text":"token %s"}],"trace_id":"t-abc"}\n200' "$SYN_LT_DOC_ID" "${SYN_LT_TOKEN:-}"
+            else
+                printf '{"results":[],"trace_id":"t-abc"}\n200'
+            fi
+            ;;
+        documents.ingest) printf '{"doc_id":"%s","status":"ingested","chunks_ingested":1}\n200' "${SYN_LT_DOC_ID:-doc}" ;;
         *)              printf '{}\n200' ;;
     esac
     return 0
@@ -139,6 +152,18 @@ out=$(synapse_live_test claude 2>&1); rc=$?
 eq "live-test PASS -> rc 0" 0 "$rc"
 [[ "$out" == *"[PASS] live-test claude OK"* ]] && ok "prints final PASS line" || bad "no final PASS: $out"
 [[ "$out" == *"[PASS] context.get"* ]] && ok "context round-trip asserted" || bad "no context.get step: $out"
+
+SYN_CONTEXT_MODE=volatile
+out=$(synapse_live_test claude 2>&1); rc=$?
+eq "live-test rejects non-persistent context response" 1 "$(( rc == 0 ? 0 : 1 ))"
+[[ "$out" == *"[FAIL] context.get"* ]] && ok "non-persistent context fails at context.get" || bad "wrong non-persistent failure: $out"
+SYN_CONTEXT_MODE=persistent
+
+SYNAPSE_LIVETEST_INGEST=1
+out=$(synapse_live_test claude 2>&1); rc=$?
+eq "live-test optional ingest persistence path passes" 0 "$rc"
+[[ "$out" == *"[PASS] documents.ingest"* && "$out" == *"[PASS] retrieve.persist"* ]] && ok "optional ingest path proves document retrieve" || bad "missing ingest persistence steps: $out"
+unset SYNAPSE_LIVETEST_INGEST
 
 echo "== synapse_live_test retries transient health failures =="
 : > "$SYN_CALL_LOG"

@@ -17,6 +17,7 @@
 #   SYNAPSE_RETRIES    default 2                    retries on retriable status (5xx / 429 / network)
 #   SYNAPSE_AGENTS     default "claude codex opencode"   agents `ralph agents test` probes
 #   SYNAPSE_ENABLED    default 0                    gate for the optional in-loop grounding hook
+#   SYNAPSE_LIVETEST_INGEST default 0                  1 = live-test writes a probe document and retrieves it
 #   AGENT_PROBE_LIVE   default 0                    1 = `ralph agents test` runs a REAL generation per
 #                                                   agent (proves the CLI is authed + model reachable;
 #                                                   costs tokens). Or pass `--live`. Default checks only
@@ -191,15 +192,27 @@ synapse_live_test() {
 
     _syn_lt_step health '.status=="ok"' GET /health \
         || { _syn_lt_fail "$agent" "$why"; return 1; }
-    _syn_lt_step context.upsert '.status=="upserted"' POST /context.upsert \
+    SYN_LT_PRINCIPAL="$principal" _syn_lt_step context.upsert '.status=="upserted" and .principal_id==env.SYN_LT_PRINCIPAL' POST /context.upsert \
         "$(jq -nc --arg p "$principal" --arg t "$T" '{principal_id:$p,tenant_id:$t,active_projects:["livetest"],data_classification:{contains_pii:false,special_category:false}}')" \
         || { _syn_lt_fail "$agent" "$why"; return 1; }
-    _syn_lt_step context.get '.active_projects==["livetest"]' POST /context.get \
+    SYN_LT_PRINCIPAL="$principal" SYN_LT_TENANT="$T" _syn_lt_step context.get '.principal_id==env.SYN_LT_PRINCIPAL and .tenant_id==env.SYN_LT_TENANT and .active_projects==["livetest"] and (.updated_at|type=="string" and length > 0)' POST /context.get \
         "$(jq -nc --arg p "$principal" '{principal_id:$p}')" \
         || { _syn_lt_fail "$agent" "$why"; return 1; }
     _syn_lt_step retrieve '.trace_id and (.results|type=="array")' POST /retrieve \
         "$(jq -nc --arg t "$T" --arg p "$principal" '{tenant_id:$t,principal_id:$p,query:"livetest ping",retrieval:{top_k:1}}')" \
         || { _syn_lt_fail "$agent" "$why"; return 1; }
+
+    if [[ "${SYNAPSE_LIVETEST_INGEST:-0}" == "1" ]]; then
+        local token doc_id
+        token="ralph-livetest-${agent}-$(_syn_ms)"
+        doc_id="ralph-livetest-${token}"
+        SYN_LT_DOC_ID="$doc_id" _syn_lt_step documents.ingest '.status=="ingested" and .doc_id==env.SYN_LT_DOC_ID and (.chunks_ingested // 0) > 0' POST /documents.ingest \
+            "$(jq -nc --arg id "$doc_id" --arg t "$T" --arg p "$principal" --arg token "$token" '{doc_id:$id,tenant_id:$t,source_system:"ralph",source_uri:("ralph://livetest/" + $id),title:"Ralph live persistence probe",content_type:"text/plain",language:"en",owners:[$p],metadata:{kind:"ralph_livetest",token:$token},content:("Ralph live persistence probe token " + $token + ". This document proves Synapse document ingestion, embeddings, chunk persistence, and retrieval.")}')" \
+            || { _syn_lt_fail "$agent" "$why"; return 1; }
+        SYN_LT_DOC_ID="$doc_id" SYN_LT_TOKEN="$token" _syn_lt_step retrieve.persist '.trace_id and ((.results // []) | any(.doc_id==env.SYN_LT_DOC_ID and ((.text // "") | contains(env.SYN_LT_TOKEN))))' POST /retrieve \
+            "$(jq -nc --arg t "$T" --arg p "$principal" --arg q "$token" '{tenant_id:$t,principal_id:$p,query:$q,retrieval:{top_k:3,mmr:false}}')" \
+            || { _syn_lt_fail "$agent" "$why"; return 1; }
+    fi
 
     printf '  [PASS] live-test %s OK\n' "$agent"
     return 0
