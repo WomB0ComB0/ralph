@@ -50,5 +50,15 @@ echo "== empty ledger is a clean no-op =="
 eq "empty summary" "mine summary: 0 recurring failure themes, 0 failing iterations (top: none)" \
    "$(METRICS_FILE="$TMP/none.json" mine_digest quiet)"
 
+echo "== regression: a theme worse in the recent window is flagged =="
+REG="$TMP/reg.json"
+LEDGER_SAVE="$LEDGER"; LEDGER="$REG"   # row() appends to $LEDGER
+i=0
+while [[ $i -lt 6 ]]; do row rb $i opencode opus 0 100 6 true true;  i=$((i+1)); done  # baseline: clean
+while [[ $i -lt 9 ]]; do row rb $i opencode opus 0 100 6 true false; i=$((i+1)); done  # recent: verify_fail
+reg=$(METRICS_FILE="$REG" RALPH_MINE_WINDOW=3 RALPH_MINE_BASELINE=6 _mine_scan)
+eq "regressing theme flagged" "true" "$(printf '%s' "$reg" | jq -r '.[]|select(.kind=="verify_fail")|.regress')"
+LEDGER="$LEDGER_SAVE"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

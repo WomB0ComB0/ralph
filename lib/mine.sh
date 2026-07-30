@@ -20,7 +20,11 @@ _mine_scan() {
     local stall="${RALPH_MINE_STALL:-3}" pctl="${RALPH_MINE_TOKEN_P:-95}"
     [[ "$stall" =~ ^[0-9]+$ ]] || stall=3
     [[ "$pctl"  =~ ^[0-9]+$ ]] || pctl=95
-    jq -R -s --argjson stall "$stall" --argjson pctl "$pctl" '
+    local window="${RALPH_MINE_WINDOW:-50}" baseline="${RALPH_MINE_BASELINE:-200}"
+    [[ "$window"   =~ ^[0-9]+$ ]] || window=50
+    [[ "$baseline" =~ ^[0-9]+$ ]] || baseline=200
+    jq -R -s --argjson stall "$stall" --argjson pctl "$pctl" \
+             --argjson win "$window" --argjson base "$baseline" '
       def tier($m): ($m|ascii_downcase) as $l
         | if   ($l|test("opus"))   then "opus"
           elif ($l|test("sonnet")) then "sonnet"
@@ -34,10 +38,11 @@ _mine_scan() {
           else ($l|capture("^(?<t>[a-z0-9]+)").t // "other") end;
       [ split("\n")[] | select(length>0) | (try fromjson catch empty)
         | select(type=="object") ] as $rows
+      | ($rows|length) as $N
       | ($rows | map(.tokens // 0) | sort) as $ts
       | ($ts|length) as $n
       | (if $n==0 then 0 else $ts[ (($n-1) * $pctl / 100) | floor ] end) as $thr
-      | [ $rows[] | . as $r
+      | [ range(0;$N) as $i | $rows[$i] as $r
           | ( if   ((($r.lazy_streak)//0) >= $stall) then "stall"
               elif (($r.verify_ok) == false)         then "verify_fail"
               elif (($r.changed) == false)           then "no_progress"
@@ -45,15 +50,21 @@ _mine_scan() {
               else null end ) as $k
           | select($k != null)
           | { kind:$k, tool:($r.tool//"?"), tier:tier($r.model//""),
-              run:($r.run_id//"?"), ts:($r.timestamp//"") } ]
+              run:($r.run_id//"?"), ts:($r.timestamp//""), idx:$i } ]
+      | ($N) as $N
       | group_by(.kind + ":" + .tool + ":" + .tier)
-      | map( { theme:(.[0].kind+":"+.[0].tool+":"+.[0].tier),
+      | map( ([.[] | select(.idx >= ($N-$win))] | length) as $recent
+           | ([.[] | select(.idx >= ($N-$win-$base) and .idx < ($N-$win))] | length) as $basec
+           | ( ($recent / (if $win>0 then $win else 1 end))
+               > ($basec / (if $base>0 then $base else 1 end)) and $recent > 0 ) as $reg
+           | { theme:(.[0].kind+":"+.[0].tool+":"+.[0].tier),
                kind:.[0].kind, tool:.[0].tool, tier:.[0].tier,
                frequency: length,
                distinct_runs: ([.[].run]|unique|length),
                first_seen: ([.[].ts]|min),
                last_seen:  ([.[].ts]|max),
-               score: (length * ([.[].run]|unique|length)) } )
+               regress: $reg,
+               score: (length * ([.[].run]|unique|length) * (if $reg then 2 else 1 end)) } )
       | sort_by(-.score)
     ' "$file" 2>/dev/null || printf '[]\n'
 }
@@ -78,7 +89,8 @@ mine_digest() {
     [[ "$mode" == "quiet" ]] && return 0
     [[ "$nthemes" == "0" ]] && return 0
     printf '%s' "$scan" | jq -r --argjson top "$top" '
-      .[:$top][] | "  [\(.kind)] \(.tool)/\(.tier)  x\(.frequency) across \(.distinct_runs) runs  (last \(.last_seen))"
+      .[:$top][] | (if .regress then "!" else " " end) as $m
+      | "\($m) [\(.kind)] \(.tool)/\(.tier)  x\(.frequency) across \(.distinct_runs) runs  (last \(.last_seen))"
     ' 2>/dev/null || true
     return 0
 }
