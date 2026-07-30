@@ -55,16 +55,23 @@ metrics.json (all runs)
 
 Slurp `metrics.json` across all runs with a single-slurp `jq` pass and a
 per-line fallback on malformed lines (mirrors `signals.sh` robustness; a corrupt
-line must never abort the pass). A **failing iteration** is classified by kind,
-in priority order:
+line must never abort the pass). A **failing iteration** is classified into
+exactly one kind, in priority order (first match wins):
 
-| Kind | Detected from | Meaning |
+| Kind | Detected from (metrics.json fields) | Meaning |
 |---|---|---|
-| `provider_failure` | provider summary `outcome=provider_failure` | model chain exhausted — infra/capacity |
-| `verify_fail` | `verify_ok=false` | agent claimed progress but verification failed |
-| `no_progress` | `changed=false` (and not a completion iteration) | iteration burned with no file changes |
 | `stall` | `lazy_streak >= RALPH_MINE_STALL` | sustained no-progress |
-| `token_blowup` | `tokens` above `RALPH_MINE_TOKEN_P` percentile | cost anomaly |
+| `verify_fail` | `verify_ok == false` | agent completed but verification failed |
+| `no_progress` | `changed == false` | iteration burned with no file changes |
+| `token_blowup` | `tokens` above `RALPH_MINE_TOKEN_P` percentile | cost anomaly on an otherwise-clean iteration |
+
+> **Why no `provider_failure` kind:** a model-chain-exhaustion iteration
+> `return 2`s at `engine.sh:1947`, *before* `log_metrics` (2069) — so it never
+> writes a `metrics.json` row. It already self-records a high-severity
+> `task_repeat_failure` signal at runtime (`engine.sh:1938`). Mining it from the
+> ledger is impossible and would double-count what signals already capture, so
+> it is intentionally excluded. The four kinds above are exactly the failure
+> states that reach the durable ledger.
 
 **Theme key** = `<kind>:<tool>:<model-tier>`, where the model is normalized to
 its tier (e.g. `opus-4-8-*` and `opus-*` collapse to `opus`) so grouping is
