@@ -41,6 +41,9 @@ source "$SCRIPT_DIR/lib/lint.sh"
 # shellcheck source=lib/triage.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/triage.sh"
+# shellcheck source=lib/mine.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/mine.sh"
 # shellcheck source=lib/jules.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/jules.sh"
