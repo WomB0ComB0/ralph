@@ -181,6 +181,14 @@ _syn_lt_fail() {   # record a durable signal so a recurrence escalates (dedup by
         synapse,livetest high synapse_live_test >/dev/null 2>&1 || true
 }
 
+# Stable per-agent doc_id for the persistence probe. STABLE (no timestamp/nonce)
+# so Synapse upserts the same document in place on every run instead of
+# accumulating one probe doc per run (issue #51). Freshness is proven by the
+# per-run token in the content/metadata, not by a unique doc_id.
+_syn_livetest_doc_id() {
+    printf 'ralph-livetest-%s-probe\n' "${1:-ralph}"
+}
+
 # synapse_live_test [agent] — /health -> /context.upsert+get round-trip -> /retrieve, within a timeout,
 # asserting shape + latency. Non-zero exit on the FIRST failure (so cron/systemd/CI catch it).
 synapse_live_test() {
@@ -205,7 +213,7 @@ synapse_live_test() {
     if [[ "${SYNAPSE_LIVETEST_INGEST:-0}" == "1" ]]; then
         local token doc_id
         token="ralph-livetest-${agent}-$(_syn_ms)"
-        doc_id="ralph-livetest-${token}"
+        doc_id="$(_syn_livetest_doc_id "$agent")"
         SYN_LT_DOC_ID="$doc_id" _syn_lt_step documents.ingest '.status=="ingested" and .doc_id==env.SYN_LT_DOC_ID and (.chunks_ingested // 0) > 0' POST /documents.ingest \
             "$(jq -nc --arg id "$doc_id" --arg t "$T" --arg p "$principal" --arg token "$token" '{doc_id:$id,tenant_id:$t,source_system:"ralph",source_uri:("ralph://livetest/" + $id),title:"Ralph live persistence probe",content_type:"text/plain",language:"en",owners:[$p],metadata:{kind:"ralph_livetest",token:$token},content:("Ralph live persistence probe token " + $token + ". This document proves Synapse document ingestion, embeddings, chunk persistence, and retrieval.")}')" \
             || { _syn_lt_fail "$agent" "$why"; return 1; }
