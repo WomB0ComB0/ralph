@@ -874,6 +874,36 @@ _triage_clean_body() {
     echo "<!-- ralph-triage -->"
 }
 
+# Deterministic TOTAL order over findings (severity-rank desc, then every column).
+# Without this, findings sharing a severity fall back to the gh API's return order,
+# which varies run to run — so the digest body flaps and the issue is edited +
+# commented on every patrol tick even when the finding SET is unchanged.
+_triage_sort_findings() {
+    local sev repo cat summary url
+    while IFS=$'\t' read -r sev repo cat summary url; do
+        [[ -z "$repo" ]] && continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(_triage_sev_rank "$sev")" "$sev" "$repo" "$cat" "$summary" "$url"
+    done | sort -t$'\t' -k1,1rn -k2,2 -k3,3 -k4,4 -k5,5 -k6,6 | cut -f2-
+}
+
+# Extract the triage finding lines from an issue body, checkbox-normalized and
+# sorted, so a human ticking a box does not register as a finding change.
+_triage_finding_set() {
+    grep -E '^- \[[ x]\] ' | sed -E 's/^- \[[ x]\] /- /' | sort
+}
+
+# Build a COMPACT delta comment (never the whole digest) from added/removed lines.
+_triage_delta_comment() {
+    local added="$1" removed="$2" na nr
+    na=$(printf '%s' "$added"   | grep -cE '^- ' || true)
+    nr=$(printf '%s' "$removed" | grep -cE '^- ' || true)
+    printf 'Ralph triage update: +%s new, -%s resolved.\n' "$na" "$nr"
+    [[ -n "$added" ]]   && printf '\n**New:**\n%s\n' "$added"
+    [[ -n "$removed" ]] && printf '\n**Resolved:**\n%s\n' "$removed"
+    printf '\n<!-- ralph-triage-delta -->\n'
+    return 0
+}
+
 # Suggest-only mode: digest a repo's findings into ONE GitHub issue (idempotent — comments an
 # existing open ralph-triage issue rather than spamming). Lower blast radius than autofix→PR:
 # it never touches code. DRY-RUN by default.
@@ -953,6 +983,8 @@ triage_suggest() {
     fi
 
     local title body; title="Ralph triage: $count item(s) needing attention"
+    # Normalize finding order so an unchanged set renders a byte-identical body.
+    if _triage_sort_findings < "$all" > "$all.sorted" 2>/dev/null; then mv -f "$all.sorted" "$all"; else rm -f "$all.sorted"; fi
     body=$(_triage_suggest_body < "$all")
     rm -f "$all"
 
@@ -978,12 +1010,22 @@ triage_suggest() {
             elif [[ "$edit_rc" -ne 0 ]]; then
                 log_error "[$repo] failed to update triage issue #$existing: $edit_out"; return 1
             fi
-            comment_out=$(_triage_gh_or_transient "commenting on triage issue #$existing" "$repo" gh issue comment "$existing" --repo "$repo" --body "$body") || comment_rc=$?
-            if [[ "$comment_rc" -eq 75 ]]; then
-                log_warning "[$repo] deferred triage issue history comment #$existing due to transient GitHub failure."
-                return 0
-            elif [[ "$comment_rc" -ne 0 ]]; then
-                log_error "[$repo] failed to comment on triage issue #$existing: $comment_out"; return 1
+            # Post a COMPACT delta (added/resolved findings), not the whole digest,
+            # and only when the finding set actually changed — so the issue does not
+            # accumulate a long repetitive thread across patrol ticks.
+            local _old _new added removed
+            _old=$(printf '%s\n' "$current_body" | _triage_finding_set)
+            _new=$(printf '%s\n' "$body" | _triage_finding_set)
+            added=$(comm -13 <(printf '%s\n' "$_old") <(printf '%s\n' "$_new") | grep -E '^- ' || true)
+            removed=$(comm -23 <(printf '%s\n' "$_old") <(printf '%s\n' "$_new") | grep -E '^- ' || true)
+            if [[ -n "$added" || -n "$removed" ]]; then
+                comment_out=$(_triage_gh_or_transient "commenting on triage issue #$existing" "$repo" gh issue comment "$existing" --repo "$repo" --body "$(_triage_delta_comment "$added" "$removed")") || comment_rc=$?
+                if [[ "$comment_rc" -eq 75 ]]; then
+                    log_warning "[$repo] deferred triage issue history comment #$existing due to transient GitHub failure."
+                    return 0
+                elif [[ "$comment_rc" -ne 0 ]]; then
+                    log_error "[$repo] failed to comment on triage issue #$existing: $comment_out"; return 1
+                fi
             fi
             log_success "[$repo] updated triage issue #$existing."
         fi
