@@ -5,6 +5,7 @@ export VERBOSE=false
 # shellcheck disable=SC1090
 source "$R/lib/utils.sh"
 source "$R/lib/signals.sh"
+source "$R/lib/github.sh"
 source "$R/lib/triage.sh"
 source "$R/lib/mine.sh"
 set +eu
@@ -69,6 +70,31 @@ METRICS_FILE="$LEDGER" RALPH_MINE_MIN_FREQ=3 mine_feed >/dev/null   # feed again
 n2=$(find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | wc -l | tr -d ' ')
 eq "feed is idempotent (no new signal file)" "$n1" "$n2"
 grep -rl 'no_progress' "$SIGNAL_DIR" >/dev/null 2>&1 && bad "single-run theme leaked into signals" || ok "single-run theme not fed"
+
+echo "== mine_propose dry-run does no clone/push; non-repo skips cleanly =="
+BIN="$TMP/bin"; mkdir -p "$BIN"; GHLOG="$TMP/gh.log"; : > "$GHLOG"
+cat > "$BIN/gh" <<EOF
+#!/bin/bash
+echo "gh \$*" >> "$GHLOG"
+case "\$*" in
+  *"repo view"*"nameWithOwner"*)     echo "acme/widget" ;;
+  *"repo view"*"defaultBranchRef"*)  echo "main" ;;
+  *clone*)                           echo "CLONE-CALLED" >> "$GHLOG" ;;
+esac
+EOF
+chmod +x "$BIN/gh"
+out=$(PATH="$BIN:$PATH" METRICS_FILE="$LEDGER" mine_propose 2>&1)
+printf '%s' "$out" | grep -qi 'DRY-RUN' && ok "propose prints a dry-run plan" || bad "no dry-run plan: $out"
+grep -q 'CLONE-CALLED' "$GHLOG" 2>/dev/null && bad "dry-run cloned the repo" || ok "dry-run performed no clone"
+
+echo "== non-GitHub project: clean skip, exit 0 =="
+cat > "$BIN/gh" <<'EOF'
+#!/bin/bash
+echo "not a gh repo" >&2; exit 1
+EOF
+chmod +x "$BIN/gh"
+PATH="$BIN:$PATH" METRICS_FILE="$LEDGER" mine_propose >/dev/null 2>&1
+eq "propose returns 0 when not a GitHub repo" "0" "$?"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

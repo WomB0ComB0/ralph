@@ -134,3 +134,47 @@ mine_feed() {
     printf 'mine: fed %s signal(s)\n' "$fed"
     return 0
 }
+
+# Draft a code-fix for the single top recurring theme. Dry-run unless apply=1.
+mine_propose() {
+    local apply="${1:-0}"
+    [[ "$apply" == "1" ]] || apply=0
+    command_exists jq || { log_info "mine: jq unavailable; cannot propose."; return 0; }
+    local scan top kind tool tier freq runs
+    scan=$(_mine_scan)
+    top=$(printf '%s' "$scan" | jq -r '.[0] // empty' 2>/dev/null)
+    if [[ -z "$top" ]]; then
+        log_info "mine: no recurring failure theme to propose a fix for."
+        return 0
+    fi
+    kind=$(printf '%s' "$top" | jq -r '.kind')
+    tool=$(printf '%s' "$top" | jq -r '.tool')
+    tier=$(printf '%s' "$top" | jq -r '.tier')
+    freq=$(printf '%s' "$top" | jq -r '.frequency')
+    runs=$(printf '%s' "$top" | jq -r '.distinct_runs')
+
+    local repo=""
+    if declare -F ralph_gh_current_repo >/dev/null; then
+        repo=$(ralph_gh_current_repo 2>/dev/null) || repo=""
+    fi
+    if [[ -z "$repo" || "$repo" != */* ]]; then
+        log_info "mine: current project is not a GitHub repo; skipping fix proposal (mine/--feed still work)."
+        return 0
+    fi
+
+    local base hash branch title body prompt
+    base=$(_triage_default_branch "$repo" 2>/dev/null) || base=""
+    [[ -n "$base" ]] || base="main"
+    hash=$(printf '%s' "$top" | jq -r '.theme' | _signal_sha1 2>/dev/null | cut -c1-8)
+    [[ -n "$hash" ]] || hash="theme"
+    branch="ralph/mine-fix-$hash"
+    title="mine: address recurring $kind failures ($tool/$tier)"
+    body="Ralph's failure-mining meta-loop found a recurring $kind failure pattern on $tool/$tier: $freq failing iterations across $runs runs. $(_mine_action "$kind")"
+    prompt="You are addressing a recurring failure the ralph loop mined from its run ledger.
+Failure kind: $kind (tool $tool, model tier $tier), $freq occurrences across $runs runs.
+Guidance: $(_mine_action "$kind")
+Make the smallest, safest source change that reduces this failure. Do not touch CI, secrets, or unrelated code. If no code change is warranted, make no changes."
+
+    _triage_apply_fix "$repo" "$base" "$branch" "$prompt" "$title" "$body" "$apply" "mine:$kind"
+    return 0
+}
