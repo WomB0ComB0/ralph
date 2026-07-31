@@ -106,6 +106,7 @@ echo "== CI autofix safety: branch naming + push gate + dry-run writes nothing =
 eq "fix branch is bot-namespaced + deterministic" "ralph/fix-ci-789" "$(triage_ci_branch_name 789)"
 # the push gate is the last line of defense against ever writing a default branch
 _triage_safe_push_branch "ralph/fix-ci-1" "main" && ok "push allowed for ralph/fix-* off main" || bad "push wrongly blocked"
+_triage_safe_push_branch "ralph/mine-fix-abc" "main" && ok "push allowed for ralph/mine-fix-* off main" || bad "mine-fix push wrongly blocked"
 _triage_safe_push_branch "main" "main"          && bad "push allowed for default branch!" || ok "push BLOCKED for the default branch"
 _triage_safe_push_branch "feature/x" "main"     && bad "push allowed for non-ralph branch!" || ok "push BLOCKED for a non-ralph/fix branch"
 _triage_safe_push_branch "" "main"              && bad "push allowed for empty branch!" || ok "push BLOCKED for an empty branch"
