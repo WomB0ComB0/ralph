@@ -60,5 +60,15 @@ reg=$(METRICS_FILE="$REG" RALPH_MINE_WINDOW=3 RALPH_MINE_BASELINE=6 _mine_scan)
 eq "regressing theme flagged" "true" "$(printf '%s' "$reg" | jq -r '.[]|select(.kind=="verify_fail")|.regress')"
 LEDGER="$LEDGER_SAVE"
 
+echo "== mine_feed records deduped signals, idempotent, threshold-gated =="
+export SIGNAL_DIR="$TMP/sig" RUN_ID="r-feed"; init_signals
+fed=$(METRICS_FILE="$LEDGER" RALPH_MINE_MIN_FREQ=3 mine_feed)
+printf '%s' "$fed" | grep -q 'mine: fed 1 signal' && ok "fed exactly the qualifying theme" || bad "feed count wrong: $fed"
+n1=$(find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | wc -l | tr -d ' ')
+METRICS_FILE="$LEDGER" RALPH_MINE_MIN_FREQ=3 mine_feed >/dev/null   # feed again -> upsert
+n2=$(find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | wc -l | tr -d ' ')
+eq "feed is idempotent (no new signal file)" "$n1" "$n2"
+grep -rl 'no_progress' "$SIGNAL_DIR" >/dev/null 2>&1 && bad "single-run theme leaked into signals" || ok "single-run theme not fed"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

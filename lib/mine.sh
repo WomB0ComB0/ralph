@@ -94,3 +94,43 @@ mine_digest() {
     ' 2>/dev/null || true
     return 0
 }
+
+# Suggested-action hint per failure kind (stable, human-actionable).
+_mine_action() {
+    case "$1" in
+        stall)        printf 'sustained no-progress; check the stall guard, instructions, or intervene\n' ;;
+        verify_fail)  printf 'agent completes but verification fails; inspect the verify/build gate for this tool\n' ;;
+        no_progress)  printf 'iterations make no file changes; prompt/model may be stuck — check instructions or switch model\n' ;;
+        token_blowup) printf 'iteration token cost anomaly; check prompt bloat or oversized artifacts\n' ;;
+        *)            printf 'investigate recurring failure\n' ;;
+    esac
+}
+
+# Record deduped ledger_failure signals for qualifying themes.
+mine_feed() {
+    command_exists jq || { printf 'mine: fed 0 signal(s) (jq unavailable)\n'; return 0; }
+    local min="${RALPH_MINE_MIN_FREQ:-3}"
+    [[ "$min" =~ ^[0-9]+$ ]] || min=3
+    declare -F init_signals >/dev/null && init_signals
+    local scan qualifying fed=0
+    scan=$(_mine_scan)
+    qualifying=$(printf '%s' "$scan" | jq -r --argjson min "$min" '
+      .[] | select(.frequency >= $min and .distinct_runs >= 2)
+      | [.theme, .kind, .tool, .tier, (.frequency|tostring), (.distinct_runs|tostring), (.regress|tostring)]
+      | @tsv' 2>/dev/null)
+    local theme kind tool tier freq runs reg
+    while IFS=$'\t' read -r theme kind tool tier freq runs reg; do
+        [[ -n "$theme" ]] || continue
+        local sev="medium"
+        [[ "$kind" == "no_progress" || "$kind" == "token_blowup" ]] && sev="low"
+        [[ "$reg" == "true" ]] && sev="high"
+        record_signal ledger_failure \
+            "Recurring $kind failures on $tool/$tier ($freq iters, $runs runs)" \
+            "ledger failure theme $theme" \
+            "$(_mine_action "$kind")" \
+            "mined,$kind" "$sev" "mine" >/dev/null 2>&1 || true
+        fed=$((fed+1))
+    done <<< "$qualifying"
+    printf 'mine: fed %s signal(s)\n' "$fed"
+    return 0
+}
