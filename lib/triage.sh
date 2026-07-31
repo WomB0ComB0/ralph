@@ -1044,6 +1044,49 @@ triage_suggest() {
 }
 
 # Orchestrate the read-only triage across the allowlist; record each finding as a signal.
+# One-time cleanup for the pre-delta noise: remove Ralph's OLD full-body triage
+# "history" comments. Scoped to comments authored by THIS gh identity that carry the
+# full `<!-- ralph-triage -->` marker but NOT the `<!-- ralph-triage-delta -->` marker,
+# so human comments and the new compact delta comments are left intact. DRY-RUN default.
+triage_tidy_issue() {
+    local repo="$1" apply="${2:-0}"
+    local num num_rc=0
+    num=$(_triage_gh_or_transient "inspecting triage issues" "$repo" gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty') || num_rc=$?
+    if [[ "$num_rc" -eq 75 ]]; then return 0; elif [[ "$num_rc" -ne 0 ]]; then log_error "[$repo] tidy: failed to find triage issue."; return 1; fi
+    if [[ -z "$num" ]]; then log_info "[$repo] tidy: no open ralph-triage issue."; return 0; fi
+
+    local login login_rc=0
+    login=$(_triage_gh_or_transient "reading gh identity" "$repo" gh api user --jq '.login') || login_rc=$?
+    if [[ "$login_rc" -eq 75 ]]; then return 0; elif [[ "$login_rc" -ne 0 || -z "$login" ]]; then log_error "[$repo] tidy: could not resolve gh identity."; return 1; fi
+
+    local ids ids_rc=0
+    ids=$(_triage_gh_or_transient "listing triage issue comments" "$repo" gh api "repos/$repo/issues/$num/comments" --paginate --jq "[.[] | select(.user.login==\"$login\" and (.body|contains(\"<!-- ralph-triage -->\")) and ((.body|contains(\"<!-- ralph-triage-delta -->\"))|not)) | .id] | .[]") || ids_rc=$?
+    if [[ "$ids_rc" -eq 75 ]]; then return 0; elif [[ "$ids_rc" -ne 0 ]]; then log_error "[$repo] tidy: failed to list comments."; return 1; fi
+
+    local count; count=$(printf '%s' "$ids" | grep -c . || true)
+    if [[ "$count" -eq 0 ]]; then log_success "[$repo#$num] tidy: no legacy history comments to remove."; return 0; fi
+    if [[ "$apply" != "1" ]]; then
+        log_info "[$repo#$num] DRY-RUN — would delete $count legacy full-body history comment(s). Re-run with --apply."
+        return 0
+    fi
+
+    local id removed=0 del_rc
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        del_rc=0
+        _triage_gh_or_transient "deleting comment $id" "$repo" gh api -X DELETE "repos/$repo/issues/comments/$id" >/dev/null || del_rc=$?
+        if [[ "$del_rc" -eq 0 ]]; then
+            removed=$((removed+1))
+        elif [[ "$del_rc" -eq 75 ]]; then
+            log_warning "[$repo#$num] tidy: deferred remaining deletions due to transient GitHub failure."; break
+        else
+            log_error "[$repo#$num] tidy: failed to delete comment $id."
+        fi
+    done <<< "$ids"
+    log_success "[$repo#$num] tidy: removed $removed legacy history comment(s)."
+    return 0
+}
+
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
     # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
@@ -1053,6 +1096,7 @@ handle_triage_command() {
             --fix-ci)          mode="fix-ci" ;;
             --fix-security)    mode="fix-security"; [[ "${2:-}" =~ ^[0-9]+$ ]] && { sec_alert="$2"; shift; } ;;
             --suggest)         mode="suggest" ;;
+            --tidy)            mode="tidy" ;;
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
@@ -1084,6 +1128,12 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the issue(s) only — nothing is created."
         local r
         for r in "${targets[@]}"; do triage_suggest "$r" "$apply" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "tidy" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing what would be removed — no comments are deleted."
+        local r
+        for r in "${targets[@]}"; do triage_tidy_issue "$r" "$apply" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then

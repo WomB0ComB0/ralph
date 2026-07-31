@@ -623,5 +623,31 @@ grep -q 'RCE A' "$CMT" && ok "delta names the new finding" || bad "delta missing
 grep -q 'Automated triage by' "$CMT" && bad "delta re-posted the full digest body: $(cat "$CMT")" || ok "delta comment omits the full digest body"
 unset -f triage_scan_repo gh
 
+echo "== triage --tidy: removes only legacy full-body history comments =="
+unset -f triage_scan_repo gh
+COMMENTS_JSON='[{"id":101,"user":{"login":"ralph-bot"},"body":"Automated triage\n<!-- ralph-triage -->"},{"id":102,"user":{"login":"ralph-bot"},"body":"Ralph triage update: +1 new\n<!-- ralph-triage-delta -->"},{"id":103,"user":{"login":"human"},"body":"lgtm <!-- ralph-triage -->"},{"id":104,"user":{"login":"ralph-bot"},"body":"chat"}]'
+GHLOG="$TMP/gh-tidy"; : > "$GHLOG"
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    local jqx="" prev="" a
+    for a in "$@"; do [[ "$prev" == "--jq" ]] && jqx="$a"; prev="$a"; done
+    case "$*" in
+        "issue list"*)      echo 42 ;;
+        "api user"*)        echo "ralph-bot" ;;
+        *"-X DELETE"*)      : ;;                                  # deletion; recorded in GHLOG
+        "api "*comments*)   printf '%s' "$COMMENTS_JSON" | jq -r "$jqx" ;;
+        *)                  printf '' ;;
+    esac
+}
+dout=$(triage_tidy_issue "o/r" 0 2>&1)
+printf '%s' "$dout" | grep -q 'would delete 1 legacy' && ok "tidy dry-run identifies the 1 legacy comment" || bad "dry-run count wrong: $dout"
+grep -q 'DELETE' "$GHLOG" && bad "tidy dry-run deleted a comment" || ok "tidy dry-run deletes nothing"
+: > "$GHLOG"
+aout=$(triage_tidy_issue "o/r" 1 2>&1)
+grep -q 'comments/101' "$GHLOG" && ok "tidy --apply deletes the legacy full-body comment" || bad "did not delete legacy comment: $(cat "$GHLOG")"
+grep -qE 'comments/(102|103|104)' "$GHLOG" && bad "tidy deleted a delta/human/non-triage comment: $(cat "$GHLOG")" || ok "tidy preserves delta, human, and non-triage comments"
+printf '%s' "$aout" | grep -q 'removed 1 legacy' && ok "tidy reports removed count" || bad "no removed count: $aout"
+unset -f gh
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
