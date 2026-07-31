@@ -14,6 +14,7 @@ mkdir -p "$TMP/bin" "$TMP/config" "$TMP/state"
 
 cat > "$TMP/bin/gh" <<'SH'
 #!/bin/sh
+if [ "$1 $2" = "auth status" ]; then exit "${RALPH_GH_AUTH_RC:-0}"; fi
 if [ "$1 $2" = "repo list" ]; then
   org="$3"
   if [ "$org" = "outage-org" ]; then
@@ -189,6 +190,27 @@ grep -q 'enable --now ralph-demo-org-patrol.timer' "$SYSTEMCTL_CALL_LOG" && ok "
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/resq-org-patrol" --mode report --targets-file "$TMP/resq-patrol.targets" --no-synapse-check >/dev/null 2>&1; rc=$?
 eq "resq patrol wrapper exits 0" 0 "$rc"
 eq "resq patrol wrapper defaults to resq-software" "resq-software/live" "$(cat "$TMP/resq-patrol.targets")"
+
+echo "== org-patrol credential preflight =="
+# Broken gh auth must abort the patrol EARLY (before target refresh + triage).
+: > "$RALPH_CALL_LOG"
+RALPH_GH_AUTH_RC=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode suggest-apply --org demo-org --targets-file "$TMP/pf.targets" >"$TMP/pf-fail.out" 2>&1; rc=$?
+[[ "$rc" -ne 0 ]] && ok "broken gh auth aborts the patrol (rc=$rc)" || bad "patrol proceeded despite broken gh auth (rc=$rc)"
+grep -qi 'preflight' "$TMP/pf-fail.out" && ok "preflight failure is reported" || bad "no preflight message: $(cat "$TMP/pf-fail.out")"
+! grep -q 'triage' "$RALPH_CALL_LOG" && ok "failed preflight runs no triage" || bad "triage ran despite failed preflight"
+tail -n1 "$summary_file" | jq -e '.preflight.ok == false and .result.ok == false' >/dev/null && ok "soak summary records the preflight failure" || bad "soak summary missing preflight failure: $(tail -n1 "$summary_file" 2>/dev/null)"
+
+# Healthy gh auth -> preflight passes and the patrol proceeds.
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/pf.targets" --no-synapse-check --no-resource-history >/dev/null 2>&1; rc=$?
+eq "healthy preflight patrol exits 0" 0 "$rc"
+tail -n1 "$summary_file" | jq -e '.preflight.enabled == true and .preflight.ok == true' >/dev/null && ok "soak summary records preflight ok" || bad "soak summary missing preflight ok: $(tail -n1 "$summary_file" 2>/dev/null)"
+
+# --no-preflight bypasses the gate even with broken gh auth.
+: > "$RALPH_CALL_LOG"
+RALPH_GH_AUTH_RC=1 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/pf.targets" --no-synapse-check --no-resource-history --no-preflight >/dev/null 2>&1; rc=$?
+eq "--no-preflight bypasses the credential gate" 0 "$rc"
+tail -n1 "$summary_file" | jq -e '.preflight.enabled == false' >/dev/null && ok "soak summary marks preflight disabled" || bad "preflight not marked disabled: $(tail -n1 "$summary_file" 2>/dev/null)"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

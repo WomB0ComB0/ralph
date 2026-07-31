@@ -12,6 +12,7 @@ targets_file="${RALPH_ORG_TARGETS_FILE:-}"
 log_dir="${RALPH_ORG_LOG_DIR:-}"
 mode="${RALPH_ORG_TRIAGE_MODE:-report}"
 synapse_check="${RALPH_ORG_SYNAPSE_CHECK:-1}"
+preflight="${RALPH_ORG_PREFLIGHT:-1}"
 resource_history="${RALPH_ORG_RESOURCE_HISTORY:-1}"
 soak_summary="${RALPH_ORG_SOAK_SUMMARY:-1}"
 soak_summary_file="${RALPH_ORG_SOAK_SUMMARY_FILE:-}"
@@ -35,6 +36,7 @@ started_epoch="$(date -u +%s)"
 started_mono_ms="$(_soak_monotonic_ms)"
 target_count=0
 synapse_rc=""
+preflight_rc=""
 triage_rc=""
 resource_rc=""
 resource_ok=""
@@ -45,7 +47,7 @@ resource_history_file=""
 
 usage() {
     cat <<'EOF'
-Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-synapse-check] [--no-resource-history] [--no-soak-summary]
+Usage: scripts/org-patrol --org ORG [--mode MODE] [--targets-file FILE] [--no-preflight] [--no-synapse-check] [--no-resource-history] [--no-soak-summary]
 
 MODE values:
   report              read-only triage report (default)
@@ -90,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --code-write-targets=*) code_write_targets="${1#*=}"; shift ;;
         --include-archived) discover_args+=(--include-archived); shift ;;
         --no-synapse-check) synapse_check=0; shift ;;
+        --no-preflight) preflight=0; shift ;;
         --no-resource-history) resource_history=0; shift ;;
         --no-soak-summary) soak_summary=0; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -152,6 +155,8 @@ write_soak_summary() {
         --argjson target_count "${target_count:-0}" \
         --argjson exit_code "$exit_code" \
         --argjson result_ok "$ok_value" \
+        --arg preflight_enabled "$preflight" \
+        --arg preflight_rc "$preflight_rc" \
         --arg synapse_enabled "$synapse_check" \
         --arg synapse_rc "$synapse_rc" \
         --arg triage_rc "$triage_rc" \
@@ -176,6 +181,7 @@ write_soak_summary() {
            targets_file:$targets_file,
            target_count:$target_count,
            result:{ok:$result_ok,exit_code:$exit_code},
+           preflight:{enabled:($preflight_enabled == "1"),ok:(if $preflight_rc == "" then null else $preflight_rc == "0" end),rc:maybe_num($preflight_rc)},
            synapse:{enabled:($synapse_enabled == "1"),ok:(if $synapse_rc == "" then null else $synapse_rc == "0" end),rc:maybe_num($synapse_rc)},
            triage:{ok:(if $triage_rc == "" then null else $triage_rc == "0" end),rc:maybe_num($triage_rc)},
            resource:{enabled:($resource_enabled == "1"),ok:maybe_bool($resource_ok),rc:maybe_num($resource_rc),warning_count:maybe_num($resource_warnings),band:(if $resource_band == "" then null else $resource_band end),history_file:(if $resource_history_file == "" then null else $resource_history_file end)}
@@ -194,11 +200,37 @@ write_soak_summary() {
     chmod 600 "$soak_summary_file" 2>/dev/null || true
     printf 'patrol soak summary recorded: ok=%s exit=%s file=%s\n' "$ok_value" "$exit_code" "$soak_summary_file"
 }
+# Fast, read-only credential/liveness preflight so a stale credential fails
+# loud-and-early instead of deep inside a per-repo pass. The whole patrol is
+# gh-dependent, so an unauthenticated gh is a hard stop before any org work.
+preflight_check() {
+    if ! command -v gh >/dev/null 2>&1; then
+        printf 'PREFLIGHT FAIL: gh CLI not found on PATH\n' >&2
+        return 1
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        printf 'PREFLIGHT FAIL: gh is not authenticated (gh auth status failed)\n' >&2
+        return 1
+    fi
+    return 0
+}
+
 trap 'rc=$?; write_soak_summary "$rc"; [[ -n "${code_write_allowed_file:-}" ]] && rm -f "$code_write_allowed_file" 2>/dev/null || true; [[ -n "${code_write_targets_file:-}" ]] && rm -f "$code_write_targets_file" 2>/dev/null || true; exit "$rc"' EXIT
 
 # Self-benchmarking: next, include code-write filter decisions in soak summaries for unattended audit trails.
 printf '[%s] Ralph public-org patrol starting: org=%s mode=%s\n' "$started_at" "$org" "$mode"
 printf 'ralph_home=%s\ntargets_file=%s\nlog_file=%s\n' "$ralph_home" "$targets_file" "$log_file"
+
+if [[ "$preflight" == "1" ]]; then
+    if preflight_check; then
+        preflight_rc=0
+        printf 'preflight OK: gh authenticated\n'
+    else
+        preflight_rc=$?
+        printf 'ABORT: credential preflight failed; not starting the org pass (use --no-preflight to override)\n' >&2
+        exit 3
+    fi
+fi
 
 "$ralph_home/scripts/org-public-targets" --org "$org" --write "$targets_file" "${discover_args[@]}" >/dev/null
 target_count=$(grep -c '^[^#[:space:]].*/[^#[:space:]]' "$targets_file" 2>/dev/null || true)
