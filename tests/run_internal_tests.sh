@@ -10,4 +10,6 @@ source "$R/lib/tools.sh"
 source "$R/lib/signals.sh"
 source "$R/lib/skills.sh"
 source "$R/lib/lint.sh"
+source "$R/lib/triage.sh"
+source "$R/lib/mine.sh"
 run_internal_tests

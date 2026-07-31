@@ -755,6 +755,20 @@ run_internal_tests() {
         rm -rf "$_rd"
     fi
 
+    # Test failure-mining digest is set -e/-u safe on an empty/nonexistent ledger
+    log_info "Testing mine digest..."
+    if ! command_exists jq || ! declare -F mine_digest >/dev/null; then
+        log_warning "Skipping mine digest test (jq or mine.sh unavailable)"
+    else
+        if ( set -euo pipefail
+             METRICS_FILE="$(mktemp -u)" mine_digest quiet | grep -q '^mine summary: 0 recurring' ); then
+            log_success "mine digest clean on empty ledger"
+            passed=$((passed+1))
+        else
+            log_error "mine digest aborted or wrong under set -e"; failed=$((failed+1))
+        fi
+    fi
+
     # Summary
     log_info "----------------------------------"
     log_info "Test Summary: $passed passed, $failed failed"

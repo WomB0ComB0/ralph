@@ -241,6 +241,18 @@ It can also prepare opt-in fixes:
 
 Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches. Untrusted GitHub content (PR review comments, CI logs, code-scanning descriptions) is fenced as data before it enters any prompt, and self-triage can never rewrite Ralph's own control surface (`lib/`, `ralph.sh`, `scripts/`, config/allowlist).
 
+### `ralph mine` — failure-mining meta-loop
+
+Analyzes the cross-run JSONL ledger (`.ralph/state/metrics.json`) for recurring
+failure themes (stall / verify_fail / no_progress / token_blowup).
+
+- `ralph mine` — read-only ranked digest.
+- `ralph mine --feed` — also record deduped `ledger_failure` signals (themes recurring across >=2 runs).
+- `ralph mine --propose` — also draft a dry-run source-only fix PR for the top theme.
+- `ralph mine --propose --apply` — open the `ralph/mine-fix-*` PR (never pushes the default branch).
+
+Knobs: `RALPH_MINE_MIN_FREQ` (3), `RALPH_MINE_WINDOW` (50), `RALPH_MINE_BASELINE` (200),
+`RALPH_MINE_TOP` (5), `RALPH_MINE_STALL` (3), `RALPH_MINE_TOKEN_P` (95).
 
 ### Public Org Patrol
 
@@ -368,6 +380,8 @@ Common environment variables:
 | `RALPH_RESOURCE_MAX_LOAD1` / `RALPH_RESOURCE_MAX_MEMORY_USED_PCT` / `RALPH_RESOURCE_MAX_RALPH_BYTES` / `RALPH_RESOURCE_MAX_RUN_DIRS` / `RALPH_RESOURCE_MAX_GROWTH_PCT` / `RALPH_RESOURCE_MAX_SLOPE_PCT` | Optional default warning budgets for `ralph resource report`. Disk budgets accept byte values or `K`, `M`, `G`, `T` suffixes. Growth budgets compare against the previous history snapshot; slope budgets compare percent-per-sample over the recent history window. |
 | `RALPH_RESOURCE_HISTORY_FILE` / `RALPH_RESOURCE_HISTORY_RETENTION` / `RALPH_RESOURCE_SLOPE_WINDOW` | Optional resource-history JSONL path, max retained snapshots, and slope sample window for `ralph resource report`; default retention `96` and slope window `6`; set retention `0` to keep all. |
 | `RALPH_RESOURCE_FAIL_ON_WARNING` | Set to `1` for `ralph resource report` to exit `3` after printing JSON when any budget warning is present. |
+| `RALPH_MINE_MIN_FREQ` / `RALPH_MINE_WINDOW` / `RALPH_MINE_BASELINE` | `ralph mine` theme qualification and regression-window sizes; defaults `3`, `50`, `200`. |
+| `RALPH_MINE_TOP` / `RALPH_MINE_STALL` / `RALPH_MINE_TOKEN_P` | `ralph mine` ranked-digest size, stall-streak threshold, and token-outlier percentile; defaults `5`, `3`, `95`. |
 
 ## Dependencies
 
