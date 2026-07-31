@@ -96,5 +96,15 @@ chmod +x "$BIN/gh"
 PATH="$BIN:$PATH" METRICS_FILE="$LEDGER" mine_propose >/dev/null 2>&1
 eq "propose returns 0 when not a GitHub repo" "0" "$?"
 
+echo "== handle_mine_command arg parsing =="
+o=$(METRICS_FILE="$LEDGER" handle_mine_command 2>&1)
+printf '%s' "$o" | grep -q '^mine summary:' && ok "bare mine prints digest" || bad "no digest: $o"
+o=$(METRICS_FILE="$LEDGER" SIGNAL_DIR="$TMP/sig2" RUN_ID=r-cli handle_mine_command --feed 2>&1)
+printf '%s' "$o" | grep -q 'mine: fed' && ok "--feed runs feed" || bad "--feed did not feed: $o"
+
+echo "== end-to-end via ralph.sh =="
+e=$(cd "$R" && METRICS_FILE="$LEDGER" ./ralph.sh mine 2>&1)
+printf '%s' "$e" | grep -q '^mine summary:' && ok "ralph.sh mine dispatches" || bad "ralph.sh mine failed: $e"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

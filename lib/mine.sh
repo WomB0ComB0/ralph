@@ -178,3 +178,28 @@ Make the smallest, safest source change that reduces this failure. Do not touch 
     _triage_apply_fix "$repo" "$base" "$branch" "$prompt" "$title" "$body" "$apply" "mine:$kind"
     return 0
 }
+
+# CLI entrypoint: ralph mine [--feed] [--propose] [--apply]
+handle_mine_command() {
+    local do_feed=0 do_propose=0 apply=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --feed)    do_feed=1 ;;
+            --propose) do_propose=1 ;;
+            --apply)   apply=1; do_propose=1 ;;
+            -h|--help)
+                printf 'usage: ralph mine [--feed] [--propose] [--apply]\n'
+                printf '  (default)   read-only ranked failure-theme digest\n'
+                printf '  --feed      also record deduped ledger_failure signals\n'
+                printf '  --propose   also draft a dry-run code-fix PR for the top theme\n'
+                printf '  --apply     with --propose, actually open the PR (never pushes default)\n'
+                return 0 ;;
+            *) log_warning "mine: ignoring unknown argument: $1" ;;
+        esac
+        shift
+    done
+    mine_digest
+    [[ "$do_feed" == "1" ]] && mine_feed
+    [[ "$do_propose" == "1" ]] && mine_propose "$apply"
+    return 0
+}
