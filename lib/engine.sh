@@ -3655,6 +3655,9 @@ review_run() {
     # every --once tick, and a read-only review must not mutate the run narrative.)
     prune_signals || true
     declare -F prune_skills >/dev/null && prune_skills || true
+    # Independent verification of candidate skills: invalidate resolutions that
+    # regressed, verify those that survived probation (evidence, not self-report).
+    declare -F verify_skills >/dev/null && verify_skills || true
     # Refresh the signal co-occurrence graph (.related links) from shared run history.
     declare -F link_related_signals >/dev/null && link_related_signals || true
 
