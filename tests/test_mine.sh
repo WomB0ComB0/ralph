@@ -106,5 +106,21 @@ echo "== end-to-end via ralph.sh =="
 e=$(cd "$R" && METRICS_FILE="$LEDGER" ./ralph.sh mine 2>&1)
 printf '%s' "$e" | grep -q '^mine summary:' && ok "ralph.sh mine dispatches" || bad "ralph.sh mine failed: $e"
 
+echo "== RALPH_MINE_MAX_LINES bounds the ledger read to the last N iterations =="
+BND="$TMP/bnd.json"
+LSAVE="$LEDGER"; LEDGER="$BND"
+row ro 1 opencode opus 0 100 0 true false   # old verify_fail theme (run ro)
+row ro 2 opencode opus 0 100 0 true false
+row rp 1 opencode opus 0 100 0 true false   # (run rp) -> theme spans 2 runs
+row rp 2 opencode opus 0 100 0 true false
+row rq 1 agy gemini 0 100 0 false true       # recent no_progress theme (run rq)
+row rq 2 agy gemini 0 100 0 false true
+LEDGER="$LSAVE"
+bnd=$(METRICS_FILE="$BND" RALPH_MINE_MAX_LINES=2 _mine_scan)
+eq "bound=2 scans only the last 2 lines -> 1 theme" "1" "$(printf '%s' "$bnd" | jq 'length')"
+eq "bounded theme is the recent no_progress" "no_progress" "$(printf '%s' "$bnd" | jq -r '.[0].kind')"
+unb=$(METRICS_FILE="$BND" _mine_scan)
+eq "default (unbounded window) sees both themes" "2" "$(printf '%s' "$unb" | jq 'length')"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
