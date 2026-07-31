@@ -34,6 +34,54 @@ Run all tests:
 ./tests/run_all.sh
 ```
 
+`./ralph.sh --setup` also installs a `ralph` symlink into `~/.local/bin`, so the commands below use `ralph` from inside your own project.
+
+### Walkthrough: from init to a completed task
+
+A first end-to-end run on a real project.
+
+**1. Scaffold Ralph into the project.**
+
+```bash
+cd ~/code/my-project
+ralph --init
+```
+
+`--init` writes the agent-instructions file your tool reads — `CLAUDE.md` for `--tool claude`, `AGENTS.md` for the others — plus the `.ralph/` state directory. Edit that file so its top section says what *done* means for this project: the build/test commands, the scope, and any house style. It is the operating prompt every iteration is grounded in, so a vague file yields vague work.
+
+**2. Put work on the queue.**
+
+Ralph pulls from a dependency-aware Beads queue via the `bd` CLI:
+
+```bash
+bd create "Add a /health endpoint" -d "Return 200 {\"status\":\"ok\"}; add a test"
+bd ready          # confirm the task shows up as ready to work
+```
+
+No Beads installed? Ralph still runs — it just works from the instructions file and repo state instead of a task queue.
+
+**3. Run the loop.**
+
+```bash
+ralph --tool opencode        # or claude / codex / agy / jules / ...
+```
+
+Each iteration grounds the agent in the instructions file, the ready Beads tasks, `git diff`, and prior signals/memory; runs the tool; then validates. A productive iteration logs `Files modified - agent is making progress`; a no-op or a repeated loop signature triggers a corrective prompt instead of silently burning iterations.
+
+**4. Completion is earned, not announced.**
+
+Ralph does **not** stop just because the agent claims it is done. A `<promise>COMPLETE</promise>` is honored only when every Beads task is closed, the declared verification commands pass, and the quality gate reads `Quality Gate: pass`. Otherwise the loop injects a "completion blocked" prompt and keeps going. When it genuinely finishes, it early-exits and records the run as `completed`.
+
+**5. Confirm what happened.**
+
+```bash
+bd ready          # empty — the queue drained
+jq '{run_id, status, reason, current_iteration}' .ralph/runs/latest/run.json
+# => { "status": "completed", "reason": "backlog_drained", ... }
+```
+
+`reason` is `completion_signal` when the agent's verified `<promise>COMPLETE</promise>` ended the run, or `backlog_drained` when the last ready task closed. For an interrupted or capped run the status is `interrupted`/`incomplete` instead — see [Run Lifecycle Evidence](#run-lifecycle-evidence).
+
 ## How It Fits Together
 
 ```mermaid
