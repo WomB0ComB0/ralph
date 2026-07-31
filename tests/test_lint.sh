@@ -36,9 +36,12 @@ record_skill "$stale" "idle" "do work" >/dev/null; approve_skill "$stale"
 # 4. ORPHAN: approved skill with no matching signal
 record_skill "orphan-theme-zzz" "p" "r" >/dev/null; approve_skill "orphan-theme-zzz"
 
-# 5. BACKLOG: candidate skill (with a signal, so not also orphan)
-bk=$(record_signal loop_detected "loop" "BACKLOG candidate" "fix")
-record_skill "$bk" "loop" "x" >/dev/null   # left candidate
+# 5. PROBATION: an UNVERIFIED candidate with a signal (not yet approvable)
+bk=$(record_signal loop_detected "loop" "PROBATION candidate" "fix")
+record_skill "$bk" "loop" "x" >/dev/null   # left candidate, verified:false
+# 5b. BACKLOG: a VERIFIED candidate with a signal (ready to approve)
+rdy=$(record_signal loop_detected "loop2" "READY candidate" "fix")
+record_skill "$rdy" "loop2" "y" >/dev/null; _skill_set "$rdy" '.verified=true'
 
 # 6. HIGH-SEV: open high-severity signal, freq 1 (below min_freq -> not a gap)
 hot=$(record_signal runtime_failure "crash" "HOT severe" "fix" "" high)
@@ -56,7 +59,7 @@ sect() { printf '%s\n' "$out" | awk -v t="$1" 'index($0,t){f=1;next} /^== /{f=0}
 
 echo "== exact summary counts =="
 summary=$(printf '%s\n' "$out" | grep '^lint summary:')
-eq "summary line" "lint summary: 2 gaps, 1 orphaned, 1 stale, 1 backlog, 1 high-severity" "$summary"
+eq "summary line" "lint summary: 2 gaps, 1 orphaned, 1 stale, 1 backlog, 1 probation, 1 high-severity" "$summary"
 
 echo "== category membership =="
 g=$(sect "KNOWLEDGE GAPS")
@@ -67,7 +70,9 @@ printf '%s' "$g" | grep -qF "$rej"  && ok "rejected-skill theme still flagged a 
 printf '%s' "$(sect "ORPHANED SKILLS")" | grep -qF "orphan-theme-zzz" && ok "orphan skill listed" || bad "orphan missing"
 printf '%s' "$(sect "STALE APPROVED")" | grep -qF "$stale" && ok "stale skill listed" || bad "stale missing"
 printf '%s' "$(sect "STALE APPROVED")" | grep -qF "$cov" && bad "recent covered skill flagged stale" || ok "recent skill not stale"
-printf '%s' "$(sect "APPROVAL BACKLOG")" | grep -qF "$bk" && ok "candidate listed in backlog" || bad "backlog missing"
+printf '%s' "$(sect "APPROVAL BACKLOG")" | grep -qF "$rdy" && ok "verified candidate listed in approval backlog" || bad "verified candidate missing from backlog"
+printf '%s' "$(sect "APPROVAL BACKLOG")" | grep -qF "$bk" && bad "unverified candidate leaked into approval backlog" || ok "unverified candidate not in backlog"
+printf '%s' "$(sect "IN PROBATION")" | grep -qF "$bk" && ok "unverified candidate listed in probation" || bad "probation missing the unverified candidate"
 printf '%s' "$(sect "UNRESOLVED HIGH-SEVERITY")" | grep -qF "$hot" && ok "high-sev signal listed" || bad "high-sev missing"
 
 echo "== quiet mode: summary only, no sections =="
@@ -78,7 +83,7 @@ printf '%s' "$q" | grep -q 'KNOWLEDGE GAPS' && bad "quiet leaked sections" || ok
 echo "== empty store is a clean no-op =="
 export SIGNAL_DIR="$TMP/empty_s" SKILL_DIR="$TMP/empty_k"; init_signals; init_skills
 e=$(lint_knowledge)
-eq "empty summary all zero" "lint summary: 0 gaps, 0 orphaned, 0 stale, 0 backlog, 0 high-severity" "$(printf '%s\n' "$e" | grep '^lint summary:')"
+eq "empty summary all zero" "lint summary: 0 gaps, 0 orphaned, 0 stale, 0 backlog, 0 probation, 0 high-severity" "$(printf '%s\n' "$e" | grep '^lint summary:')"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
