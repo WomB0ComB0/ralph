@@ -23,7 +23,11 @@ _mine_scan() {
     local window="${RALPH_MINE_WINDOW:-50}" baseline="${RALPH_MINE_BASELINE:-200}"
     [[ "$window"   =~ ^[0-9]+$ ]] || window=50
     [[ "$baseline" =~ ^[0-9]+$ ]] || baseline=200
-    jq -R -s --argjson stall "$stall" --argjson pctl "$pctl" \
+    # Bound the read to the last N ledger lines so the whole-file jq slurp stays
+    # O(N), not O(all-history) — the metrics ledger grows unbounded across runs.
+    local max="${RALPH_MINE_MAX_LINES:-5000}"
+    [[ "$max" =~ ^[0-9]+$ && "$max" -gt 0 ]] || max=5000
+    tail -n "$max" "$file" 2>/dev/null | jq -R -s --argjson stall "$stall" --argjson pctl "$pctl" \
              --argjson win "$window" --argjson base "$baseline" '
       def tier($m): ($m|ascii_downcase) as $l
         | if   ($l|test("opus"))   then "opus"
@@ -66,7 +70,7 @@ _mine_scan() {
                regress: $reg,
                score: (length * ([.[].run]|unique|length) * (if $reg then 2 else 1 end)) } )
       | sort_by(-.score)
-    ' "$file" 2>/dev/null || printf '[]\n'
+    ' 2>/dev/null || printf '[]\n'
 }
 
 # Print a one-line summary (+ ranked section unless "quiet").

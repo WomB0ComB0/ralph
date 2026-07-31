@@ -252,7 +252,8 @@ failure themes (stall / verify_fail / no_progress / token_blowup).
 - `ralph mine --propose --apply` — open the `ralph/mine-fix-*` PR (never pushes the default branch).
 
 Knobs: `RALPH_MINE_MIN_FREQ` (3), `RALPH_MINE_WINDOW` (50), `RALPH_MINE_BASELINE` (200),
-`RALPH_MINE_TOP` (5), `RALPH_MINE_STALL` (3), `RALPH_MINE_TOKEN_P` (95).
+`RALPH_MINE_TOP` (5), `RALPH_MINE_STALL` (3), `RALPH_MINE_TOKEN_P` (95),
+`RALPH_MINE_MAX_LINES` (5000 — caps how many trailing ledger lines are scanned, so the read stays O(N) as `metrics.json` grows).
 
 ### Public Org Patrol
 
