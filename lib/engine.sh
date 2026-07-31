@@ -2192,6 +2192,11 @@ main() {
         handle_triage_command "$@"
         exit $?
     fi
+    if [[ "${1:-}" == "mine" ]]; then
+        shift
+        handle_mine_command "$@"
+        exit $?
+    fi
     if [[ "${1:-}" == "resource" ]]; then
         shift
         handle_resource_command "$@"
@@ -3657,6 +3662,9 @@ review_run() {
     # stale / approval-backlog / high-severity). Read-only; full report via `ralph lint`.
     if declare -F lint_knowledge >/dev/null; then
         log_info "$(lint_knowledge quiet)"
+    fi
+    if declare -F mine_digest >/dev/null; then
+        log_info "$(mine_digest quiet)"
     fi
 
     if [[ ! -f "$metrics" ]]; then

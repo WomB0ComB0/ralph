@@ -267,11 +267,12 @@ _triage_reconcile_signals() {
 # Deterministic, clearly bot-namespaced fix branch (so a human PR can never collide / be mistaken).
 triage_ci_branch_name() { printf 'ralph/fix-ci-%s\n' "$1"; }
 
-# Safety gate for ANY push: only a non-empty `ralph/fix-*` branch that isn't the default branch
-# may be pushed. This is the last line of defense against ever writing to a default branch.
+# Safety gate for ANY push: only a non-empty `ralph/fix-*` or `ralph/mine-fix-*` branch that
+# isn't the default branch may be pushed. This is the last line of defense against ever writing
+# to a default branch.
 _triage_safe_push_branch() {
     local branch="$1" default="$2"
-    [[ -n "$branch" && "$branch" != "$default" && "$branch" == ralph/fix-* ]]
+    [[ -n "$branch" && "$branch" != "$default" && ( "$branch" == ralph/fix-* || "$branch" == ralph/mine-fix-* ) ]]
 }
 
 # Attempt to fix the latest failing CI run for ONE repo and open a PR. DRY-RUN by default
@@ -631,7 +632,7 @@ _triage_apply_fix() {
     fi
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
-        log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-* branch off '$default_branch'."
+        log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-*/ralph/mine-fix-* branch off '$default_branch'."
         _triage_apply_fix_return 1; return $?
     fi
     if ! ( cd "$work" \
