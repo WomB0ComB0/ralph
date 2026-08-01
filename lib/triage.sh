@@ -1087,6 +1087,44 @@ triage_tidy_issue() {
     return 0
 }
 
+# Run FN(target [, extra args]) for each entry in the caller's `targets` array with bounded
+# concurrency (RALPH_TRIAGE_CONCURRENCY, default 1 = sequential/unchanged). Parallel runs
+# capture each target's combined output to a temp file and flush it in TARGET ORDER, so a
+# patrol log stays readable and deterministic. Bash 3.2 safe (no `wait -n`). NOTE: with
+# concurrency > 1 the code-changing modes clone + run agents concurrently — opt in knowingly.
+_triage_map_targets() {
+    local fn="$1"; shift
+    local -a extra=("$@")
+    local conc="${RALPH_TRIAGE_CONCURRENCY:-1}"
+    [[ "$conc" =~ ^[0-9]+$ && "$conc" -ge 1 ]] || conc=1
+    local r
+    if [[ "$conc" -eq 1 ]]; then
+        for r in "${targets[@]}"; do "$fn" "$r" ${extra[@]+"${extra[@]}"} || true; done
+        return 0
+    fi
+    local tmpdir
+    if ! tmpdir=$(mktemp -d 2>/dev/null); then
+        for r in "${targets[@]}"; do "$fn" "$r" ${extra[@]+"${extra[@]}"} || true; done
+        return 0
+    fi
+    local -a outs=() pids=()
+    local i=0 of
+    for r in "${targets[@]}"; do
+        of="$tmpdir/$i.out"; outs+=("$of")
+        ( "$fn" "$r" ${extra[@]+"${extra[@]}"} >"$of" 2>&1 || true ) &
+        pids+=("$!")
+        i=$((i + 1))
+        if [[ "${#pids[@]}" -ge "$conc" ]]; then
+            wait "${pids[0]}" 2>/dev/null || true
+            pids=("${pids[@]:1}")
+        fi
+    done
+    wait 2>/dev/null || true
+    for of in ${outs[@]+"${outs[@]}"}; do [[ -f "$of" ]] && cat "$of"; done
+    rm -rf "$tmpdir" 2>/dev/null || true
+    return 0
+}
+
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
     # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
@@ -1114,33 +1152,28 @@ handle_triage_command() {
     fi
     if [[ "$mode" == "fix-ci" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
-        local r
-        for r in "${targets[@]}"; do triage_autofix_ci "$r" "$apply" "$run_override" || true; done
+        _triage_map_targets triage_autofix_ci "$apply" "$run_override"
         return 0
     fi
     if [[ "$mode" == "fix-security" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the plan only — nothing is cloned, pushed, or opened."
-        local r
-        for r in "${targets[@]}"; do triage_autofix_security "$r" "$apply" "$sec_alert" || true; done
+        _triage_map_targets triage_autofix_security "$apply" "$sec_alert"
         return 0
     fi
     if [[ "$mode" == "suggest" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the issue(s) only — nothing is created."
-        local r
-        for r in "${targets[@]}"; do triage_suggest "$r" "$apply" || true; done
+        _triage_map_targets triage_suggest "$apply"
         return 0
     fi
     if [[ "$mode" == "tidy" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing what would be removed — no comments are deleted."
-        local r
-        for r in "${targets[@]}"; do triage_tidy_issue "$r" "$apply" || true; done
+        _triage_map_targets triage_tidy_issue "$apply"
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then
         if [[ ! "$resolve_pr" =~ ^[0-9]+$ ]]; then log_error "--resolve-reviews needs a numeric PR number, e.g. 'ralph triage --resolve-reviews 475'."; return 1; fi
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): listing unresolved conversations only — nothing is pushed or resolved."
-        local r
-        for r in "${targets[@]}"; do triage_resolve_reviews "$r" "$resolve_pr" "$apply" || true; done
+        _triage_map_targets triage_resolve_reviews "$resolve_pr" "$apply"
         return 0
     fi
     log_info "Triaging ${#targets[@]} repo(s), read-only: ${targets[*]}"
