@@ -15,10 +15,10 @@ run() {
     # Run in a throwaway cwd so no suite can write into the repo.
     out=$(cd "$tmpd" && bash "$script" 2>&1); rc=$?
     rm -rf "$tmpd"
-    summary=$(printf '%s\n' "$out" | grep -oE 'TOTAL[^:]*: [0-9]+ passed.*|Test Summary: [0-9]+ passed.*' | head -1)
+    summary=$(printf '%s\n' "$out" | grep -oE 'TOTAL: [0-9]+ passed.*|Test Summary: [0-9]+ passed.*' | head -1)
     # Pass only if the suite EXITED 0 *and* reported zero failures: a crash before the
     # summary line fails the rc check; a non-zero failure count fails the grep.
-    if [[ $rc -eq 0 ]] && printf '%s\n' "$out" | grep -qE 'TOTAL[^:]*: [0-9]+ passed, 0 failed|Test Summary: [0-9]+ passed, 0 failed'; then
+    if [[ $rc -eq 0 ]] && printf '%s\n' "$out" | grep -qE 'TOTAL: [0-9]+ passed, 0 failed|Test Summary: [0-9]+ passed, 0 failed'; then
         printf '  PASS  %-9s %s\n' "$name" "$summary"
     else
         printf '  FAIL  %-9s (exit %s) %s\n' "$name" "$rc" "$summary"
@@ -51,6 +51,7 @@ run github   "$DIR/test_github_helpers.sh"
 run synapse  "$DIR/test_synapse.sh"
 run org      "$DIR/test_org_scripts.sh"
 run memory   "$DIR/test_memory.sh"
+run synapse_memory "$DIR/test_synapse_memory.sh"
 run guards   "$DIR/test_loop_guards.sh"
 run runtime "$DIR/test_runtime_verification.sh"
 run agents   "$DIR/test_agents.sh"
