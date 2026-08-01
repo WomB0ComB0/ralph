@@ -649,5 +649,26 @@ grep -qE 'comments/(102|103|104)' "$GHLOG" && bad "tidy deleted a delta/human/no
 printf '%s' "$aout" | grep -q 'removed 1 legacy' && ok "tidy reports removed count" || bad "no removed count: $aout"
 unset -f gh
 
+echo "== idempotent autofix: dedup by ralph-fix marker + marker stamped on new PRs =="
+unset -f gh
+# (a) an existing open PR carrying the finding marker -> apply_fix skips (no clone, no pr create)
+GHLOG="$TMP/gh-dedup"; : > "$GHLOG"
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        *"pr list"*"ralph-fix:ci:o/r"*) printf '[{"number":7,"body":"x <!-- ralph-fix:ci:o/r -->"}]\n' ;;
+        *"repo view"*defaultBranchRef*) echo main ;;
+        *) printf '\n' ;;
+    esac
+}
+out=$(_triage_apply_fix "o/r" main "ralph/fix-ci-1" "prompt" "t" "body" 1 "" "ci:o/r" 2>&1)
+printf '%s' "$out" | grep -qi 'already has an open fix PR #7' && ok "dedup skips when a marker-matching PR is open" || bad "no dedup skip: $out"
+grep -qE 'clone|pr create' "$GHLOG" && bad "dedup still cloned/created a PR: $(cat "$GHLOG")" || ok "dedup did zero write-work"
+# (b) dry-run with a key and NO existing PR -> plan is shown (proceeds)
+gh() { case "$*" in *"pr list"*) printf '[]\n' ;; *defaultBranchRef*) echo main ;; *) printf '\n' ;; esac; }
+d=$(_triage_apply_fix "o/r" main "ralph/fix-ci-1" "prompt" "t" "body" 0 "" "ci:o/r" 2>&1)
+printf '%s' "$d" | grep -qi 'DRY-RUN' && ok "no existing PR -> autofix proceeds (dry-run plan shown)" || bad "did not proceed: $d"
+unset -f gh
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

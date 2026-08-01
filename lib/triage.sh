@@ -547,11 +547,26 @@ _triage_alert_workflow_context() {
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
 _triage_apply_fix() {
-    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}"
+    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
     local default_branch iteration=1 default_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
     if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
+
+    # Idempotency: one open ralph fix PR per finding. Skip (zero work) if one already exists.
+    if [[ -n "$finding_key" ]]; then
+        local _dup_list _dup
+        _dup_list=$(_triage_gh_or_transient "checking for an existing fix PR" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix:$finding_key in:body" --json number,body) || _dup_list=""
+        _dup=$(printf '%s' "$_dup_list" | jq -r --arg m "<!-- ralph-fix:$finding_key -->" '[.[]? | select(.body // "" | test($m; "")) | .number] | .[0] // empty' 2>/dev/null || true)
+        if [[ -n "$_dup" ]]; then
+            log_success "[$repo] already has an open fix PR #$_dup for $finding_key — skipping."
+            return 0
+        fi
+        # Stamp the marker so future ticks find this PR.
+        body="$body
+
+<!-- ralph-fix:$finding_key -->"
+    fi
 
     if [[ "$apply" != "1" ]]; then
         log_info "[$repo] DRY-RUN — $title"
@@ -697,7 +712,7 @@ triage_autofix_ci() {
         "fix: resolve failing CI (run $run_id)" \
         "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
 
-⚠️ Agent-generated — please review before merging." "$apply"
+⚠️ Agent-generated — please review before merging." "$apply" "" "ci:$repo"
 }
 
 # Remediate a code-scanning (CodeQL etc.) alert -> PR against the default branch (where the alert's
@@ -749,7 +764,7 @@ triage_autofix_security() {
         "fix(security): $rule ($sev) in $path" \
         "Automated remediation of code-scanning alert #$number ($rule, $sev) at \`$path:$line\` by \`ralph triage --fix-security\`.
 
-⚠️ Agent-generated security fix — review carefully before merging." "$apply" "$workflow_context"
+⚠️ Agent-generated security fix — review carefully before merging." "$apply" "$workflow_context" "sec:$number"
 }
 
 # Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
