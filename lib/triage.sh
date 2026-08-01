@@ -547,11 +547,33 @@ _triage_alert_workflow_context() {
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
 _triage_apply_fix() {
-    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}"
+    local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
     local default_branch iteration=1 default_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
     if [[ "$default_rc" -eq 75 ]]; then return 0; elif [[ "$default_rc" -ne 0 ]]; then return 1; fi
+
+    # Idempotency: one open ralph fix PR per finding. Skip (zero work) if one already exists.
+    if [[ -n "$finding_key" ]]; then
+        local _dup_list _dup _dup_rc=0
+        _dup_list=$(_triage_gh_or_transient "checking for an existing fix PR" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix:$finding_key in:body" --json number,body) || _dup_rc=$?
+        if [[ "$_dup_rc" -eq 75 ]]; then
+            log_warning "[$repo] deferred autofix: could not check for an existing fix PR (transient GitHub failure)."
+            return 0
+        elif [[ "$_dup_rc" -ne 0 ]]; then
+            log_error "[$repo] failed to check for an existing fix PR: $_dup_list"
+            return 1
+        fi
+        _dup=$(printf '%s' "$_dup_list" | jq -r --arg m "<!-- ralph-fix:$finding_key -->" '[.[]? | select(.body // "" | test($m; "")) | .number] | .[0] // empty' 2>/dev/null || true)
+        if [[ -n "$_dup" ]]; then
+            log_success "[$repo] already has an open fix PR #$_dup for $finding_key — skipping."
+            return 0
+        fi
+        # Stamp the marker so future ticks find this PR.
+        body="$body
+
+<!-- ralph-fix:$finding_key -->"
+    fi
 
     if [[ "$apply" != "1" ]]; then
         log_info "[$repo] DRY-RUN — $title"
@@ -697,7 +719,7 @@ triage_autofix_ci() {
         "fix: resolve failing CI (run $run_id)" \
         "Automated CI fix from \`ralph triage --fix-ci\` using a local model. Failing run: $run_url
 
-⚠️ Agent-generated — please review before merging." "$apply"
+⚠️ Agent-generated — please review before merging." "$apply" "" "ci:$repo"
 }
 
 # Remediate a code-scanning (CodeQL etc.) alert -> PR against the default branch (where the alert's
@@ -749,7 +771,7 @@ triage_autofix_security() {
         "fix(security): $rule ($sev) in $path" \
         "Automated remediation of code-scanning alert #$number ($rule, $sev) at \`$path:$line\` by \`ralph triage --fix-security\`.
 
-⚠️ Agent-generated security fix — review carefully before merging." "$apply" "$workflow_context"
+⚠️ Agent-generated security fix — review carefully before merging." "$apply" "$workflow_context" "sec:$number"
 }
 
 # Parse the GraphQL reviewThreads payload -> TSV of UNRESOLVED threads: id\tauthor\tpath\tline\tbody.
@@ -901,6 +923,60 @@ _triage_delta_comment() {
     [[ -n "$added" ]]   && printf '\n**New:**\n%s\n' "$added"
     [[ -n "$removed" ]] && printf '\n**Resolved:**\n%s\n' "$removed"
     printf '\n<!-- ralph-triage-delta -->\n'
+    return 0
+}
+
+# Verify ralph's OWN open fix PRs against their CI and build a ralph-ready merge queue.
+# Green -> label ralph-ready (+ one-time comment). Red -> remove the label, comment once, and
+# record an autofix_failed signal. NEVER merges. DRY-RUN by default.
+triage_verify_fixes() {
+    local repo="$1" apply="${2:-0}"
+    local list rc=0
+    list=$(_triage_gh_or_transient "listing ralph fix PRs" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix in:body" --json number --jq '.[].number') || rc=$?
+    if [[ "$rc" -eq 75 ]]; then return 0; elif [[ "$rc" -ne 0 ]]; then log_error "[$repo] verify: failed to list fix PRs."; return 1; fi
+    local ready=0 failing=0 pending=0 n view state merge has_ready has_verified has_failmark body
+    while IFS= read -r n; do
+        [[ "$n" =~ ^[0-9]+$ ]] || continue
+        view=$(_triage_gh_or_transient "reading PR #$n" "$repo" gh pr view "$n" --repo "$repo" --json number,statusCheckRollup,mergeable,comments,labels,body) || continue
+        # SAFETY: the search above is fuzzy full-text (`in:body`) and can return a human PR whose
+        # body merely mentions "ralph-fix" in prose. Only act on PRs that carry the literal
+        # ralph-fix marker (same check `_triage_apply_fix` uses to stamp/find its own PRs) — never
+        # touch a human's PR.
+        body=$(printf '%s' "$view" | jq -r '.body // ""' 2>/dev/null)
+        if [[ "$body" != *"<!-- ralph-fix"* ]]; then
+            continue
+        fi
+        # state: FAILURE if any check failed; SUCCESS if all terminal-good; else PENDING.
+        state=$(printf '%s' "$view" | jq -r '
+            (.statusCheckRollup // []) as $c
+            | if ($c | any((.conclusion // .state) as $s | $s == "FAILURE" or $s == "CANCELLED" or $s == "TIMED_OUT" or $s == "ERROR")) then "red"
+              elif (($c | length) > 0) and ($c | all((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "NEUTRAL" or $s == "SKIPPED" or $s == "COMPLETED")) then "green"
+              else "pending" end' 2>/dev/null)
+        merge=$(printf '%s' "$view" | jq -r '.mergeable // ""' 2>/dev/null)
+        has_ready=$(printf '%s' "$view" | jq -r '[.labels[]?.name] | index("ralph-ready") // empty' 2>/dev/null)
+        has_verified=$(printf '%s' "$view" | jq -r '[.comments[]?.body] | map(select(test("<!-- ralph-verified -->"))) | length' 2>/dev/null)
+        has_failmark=$(printf '%s' "$view" | jq -r '[.comments[]?.body] | map(select(test("<!-- ralph-fix-failed -->"))) | length' 2>/dev/null)
+        if [[ "$state" == "green" && "$merge" == "MERGEABLE" ]]; then
+            ready=$((ready+1))
+            if [[ "$apply" == "1" ]]; then
+                _triage_gh_or_transient "creating ralph-ready label" "$repo" gh label create ralph-ready --repo "$repo" --color 0E8A16 --description "Ralph autofix: CI green, ready to merge" >/dev/null 2>&1 || true
+                [[ -z "$has_ready" ]] && _triage_gh_or_transient "labelling PR #$n" "$repo" gh pr edit "$n" --repo "$repo" --add-label ralph-ready >/dev/null 2>&1 || true
+                [[ "${has_verified:-0}" == "0" ]] && _triage_gh_or_transient "commenting on PR #$n" "$repo" gh pr comment "$n" --repo "$repo" --body "Ralph verified: CI is green and the PR is mergeable — ready for your review/merge.
+<!-- ralph-verified -->" >/dev/null 2>&1 || true
+            fi
+        elif [[ "$state" == "red" ]]; then
+            failing=$((failing+1))
+            if [[ "$apply" == "1" ]]; then
+                [[ -n "$has_ready" ]] && _triage_gh_or_transient "removing ralph-ready from PR #$n" "$repo" gh pr edit "$n" --repo "$repo" --remove-label ralph-ready >/dev/null 2>&1 || true
+                [[ "${has_failmark:-0}" == "0" ]] && _triage_gh_or_transient "commenting on PR #$n" "$repo" gh pr comment "$n" --repo "$repo" --body "Ralph: CI is failing on this autofix — the fix did not hold. Left open for revision; not merging.
+<!-- ralph-fix-failed -->" >/dev/null 2>&1 || true
+                record_signal autofix_failed "Ralph autofix PR failed CI in $repo" "ralph fix PR #$n in $repo has failing CI" "revise or close the autofix PR" "triage,autofix" high "triage" >/dev/null 2>&1 || true
+            fi
+        else
+            pending=$((pending+1))
+        fi
+    done <<< "$list"
+    log_info "[$repo] verify: $ready ready, $failing failing, $pending pending$([[ "$apply" == "1" ]] || echo ' (dry-run)')"
     return 0
 }
 
@@ -1138,6 +1214,7 @@ handle_triage_command() {
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
+            --verify-fixes)    mode="verify-fixes" ;;
         esac
         shift
     done
@@ -1168,6 +1245,12 @@ handle_triage_command() {
     if [[ "$mode" == "tidy" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing what would be removed — no comments are deleted."
         _triage_map_targets triage_tidy_issue "$apply"
+        return 0
+    fi
+    if [[ "$mode" == "verify-fixes" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): reporting ralph fix PR status only — no labels/comments written."
+        local r
+        for r in "${targets[@]}"; do triage_verify_fixes "$r" "$apply" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then

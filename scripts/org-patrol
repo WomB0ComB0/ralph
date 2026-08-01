@@ -296,6 +296,14 @@ triage_rc="${triage_rc:-0}"
 if [[ "$triage_rc" -ne 0 ]]; then
     exit "$triage_rc"
 fi
+
+case "$mode" in
+    fix-ci-apply|fix-security-apply)
+        printf 'verifying ralph fix PRs (ready-to-merge queue)...\n'
+        "$ralph_bin" triage --verify-fixes --apply || printf 'WARNING: verify-fixes pass failed\n' >&2
+        ;;
+esac
+
 if [[ "$resource_history" == "1" ]]; then
     resource_history_file="${RALPH_RESOURCE_HISTORY_FILE:-$log_dir/resource-history.jsonl}"
     resource_rc=0

@@ -323,6 +323,25 @@ scripts/org-install-systemd install --org <github-org> --interval 30min --cpu-qu
 
 Default mode is read-only `report`. Patrols also record compact resource history to `~/.local/state/ralph/<github-org>/resource-history.jsonl` unless `RALPH_ORG_RESOURCE_HISTORY=0` or `--no-resource-history` is used, and each patrol log includes a one-line `resource summary` band: `normal`, `warning`, or `sustained-growth` when slope warnings are present. Each patrol also appends a mode-`600` durable soak artifact to `~/.local/state/ralph/<github-org>/soak-summary.jsonl` unless `RALPH_ORG_SOAK_SUMMARY=0` or `--no-soak-summary` is used; the JSONL rows capture exit status, monotonic elapsed time, wall-clock elapsed time, target count, Synapse result, triage result, resource band/warnings, and the linked patrol log path. `scripts/org-soak-summary --org <github-org>` turns that JSONL into a compact rollup for live-fire sessions, and `--json` emits the same data as a machine-readable artifact. Optional `org-install-systemd` limits write `CPUQuota=`, `MemoryMax=`, and `IOWeight=` into the user service. More active modes are opt-in through `RALPH_ORG_TRIAGE_MODE` or `--mode`: `suggest-apply` opens or updates idempotent triage issues, while `fix-ci-apply` and `fix-security-apply` create `ralph/fix-*` PRs for review. Those code-changing apply modes require a second owner/repo allowlist through `RALPH_ORG_CODE_WRITE_TARGETS` or `--code-write-targets`; Ralph intersects that list with the refreshed public targets and skips the PR-writing pass if the intersection is empty. The generated systemd environment lives at `~/.config/ralph/<github-org>-patrol.env`; logs live under `~/.local/state/ralph/<github-org>/`. The timer defaults `RALPH_ORG_SYNAPSE_CHECK=0`; enable it after local Synapse is backed by a non-RLS-bypassing application DB role. Local trusted-header Synapse mode is safe only on loopback (`127.0.0.1`/`::1`); before binding Synapse to `0.0.0.0` or another non-loopback interface, configure `AUTH_JWT_SECRET`, `AUTH_JWT_PUBLIC_KEY`, or `AUTH_JWKS_URL`, set Ralph's `SYNAPSE_TOKEN`, and run `./ralph.sh synapse auth-check`. Historical `scripts/resq-*` names remain as compatibility wrappers for the local resq-software deployment.
 
+#### Autonomous up to the merge
+
+Ralph can run CI autofix hands-off up to (but never including) the merge. Configure the patrol:
+
+```bash
+export RALPH_ORG_TRIAGE_MODE=fix-ci-apply
+export RALPH_ORG_CODE_WRITE_TARGETS='owner/api,owner/web'
+scripts/org-patrol --org <github-org>
+```
+
+Each tick: `org-patrol` refreshes the public target allowlist, opens idempotent `ralph/fix-*` CI-autofix PRs (marked with a `ralph-fix:` marker so a repeat tick is a no-op rather than a duplicate PR), then runs `ralph triage --verify-fixes --apply`, which re-checks CI on Ralph's own open fix PRs and labels the green ones `ralph-ready` (and flags the red ones instead of leaving them silently stuck). That `ralph-ready` label is a merge queue that grows on every patrol tick. A human (or a separate, explicitly-authorized process) merges it:
+
+```bash
+gh pr list --repo <owner/repo> --label ralph-ready
+gh pr merge <pr-number> --repo <owner/repo>
+```
+
+Ralph never merges its own PRs — there is no `gh pr merge` call anywhere in the triage or patrol code paths, and a test asserts it. Ralph also never touches `fix-security` autonomously in this workflow: only `fix-ci-apply` is recommended for unattended `RALPH_ORG_TRIAGE_MODE`; `fix-security-apply` remains a mode you run and review deliberately.
+
 ## Task Management
 
 Ralph uses Beads through the `bd` CLI for dependency-aware work queues. Dolt is optional for time-travel task history.
