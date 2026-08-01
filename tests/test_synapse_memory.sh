@@ -86,6 +86,20 @@ printf '%s' "$o" | grep -q '^memory: synced' && ok "--sync runs memory_sync" || 
 o=$(handle_memory_command 2>&1)
 printf '%s' "$o" | grep -qi 'usage' && ok "bare prints usage" || bad "no usage: $o"
 
+echo "== handle_memory_command --ground arg parsing (regression: trailing-shift underflow) =="
+memory_ground() { printf 'GROUNDED:%s\n' "$1"; }
+o=$(handle_memory_command --ground "myquery" 2>&1)
+printf '%s' "$o" | grep -q 'GROUNDED:myquery' && ok "--ground <query> passes the query through" || bad "--ground broken: $o"
+
+o=$( ( set -euo pipefail; handle_memory_command --ground ) 2>&1 ); rc=$?
+eq "--ground alone does not crash under set -euo pipefail (fail-open)" "0" "$rc"
+printf '%s' "$o" | grep -qi 'requires a query' && ok "--ground alone warns" || bad "no warning emitted: $o"
+
+memory_sync() { printf 'SYNC_CALLED\n'; }
+o=$(handle_memory_command --ground --sync 2>&1)
+printf '%s' "$o" | grep -q 'SYNC_CALLED' && ok "--ground --sync still runs --sync (not swallowed as the query)" || bad "--sync swallowed: $o"
+unset -f memory_sync memory_ground
+
 echo "== ralph.sh memory subcommand dispatches =="
 e=$(cd "$R" && SKILL_DIR="$TMP/empty" SYNAPSE_URL="http://127.0.0.1:9" ./ralph.sh memory --sync 2>&1)
 printf '%s' "$e" | grep -q '^memory: synced' && ok "ralph.sh memory dispatches" || bad "dispatch failed: $e"

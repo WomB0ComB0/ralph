@@ -98,9 +98,15 @@ handle_memory_command() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --sync)   do_sync=1; saw=1 ;;
-            --ground) ground_q="${2:-}"; saw=1; shift ;;
+            --ground)
+                if [[ -n "${2:-}" && "${2:0:1}" != "-" ]]; then
+                    ground_q="$2"; shift
+                else
+                    log_warning "memory: --ground requires a query"
+                fi
+                saw=1 ;;
             -h|--help) saw=0; break ;;
-            *) log_warning "memory: ignoring unknown argument: $1" ;;
+            *) log_warning "memory: ignoring unknown argument: $1"; saw=1 ;;
         esac
         shift
     done
