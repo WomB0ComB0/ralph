@@ -564,7 +564,7 @@ _triage_apply_fix() {
             log_error "[$repo] failed to check for an existing fix PR: $_dup_list"
             return 1
         fi
-        _dup=$(printf '%s' "$_dup_list" | jq -r --arg m "<!-- ralph-fix:$finding_key -->" '[.[]? | select(.body // "" | test($m; "")) | .number] | .[0] // empty' 2>/dev/null || true)
+        _dup=$(printf '%s' "$_dup_list" | jq -r --arg m "<!-- ralph-fix:$finding_key -->" '[.[]? | select(.body // "" | contains($m)) | .number] | .[0] // empty' 2>/dev/null || true)
         if [[ -n "$_dup" ]]; then
             log_success "[$repo] already has an open fix PR #$_dup for $finding_key — skipping."
             return 0
@@ -1249,8 +1249,7 @@ handle_triage_command() {
     fi
     if [[ "$mode" == "verify-fixes" ]]; then
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): reporting ralph fix PR status only — no labels/comments written."
-        local r
-        for r in "${targets[@]}"; do triage_verify_fixes "$r" "$apply" || true; done
+        _triage_map_targets triage_verify_fixes "$apply"
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then
