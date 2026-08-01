@@ -137,5 +137,44 @@ out5=$(recall_skills)
 odot=$(jq -r '.origin_project // ""' "$RALPH_GLOBAL_SKILL_DIR/dotrepo-x.json" 2>/dev/null)
 [[ -n "$odot" && "$odot" != "." && "$odot" != "/" ]] && ok "PROJECT_DIR=. resolves to a real provenance name" || bad "origin is '.'/'/'/'empty (got [$odot])"
 
+echo "== skill verification gate: promotion needs evidence, not the agent's word =="
+export SIGNAL_DIR="$TMP/vg-sig" SIGNAL_ARCHIVE_DIR="$TMP/vg-sig/.archive" SKILL_DIR="$TMP/vg-skill"
+rm -rf "$SIGNAL_DIR" "$SKILL_DIR"; init_signals; init_skills
+vk=$(RALPH_NOW=2026-01-01T00:00:00Z record_signal validation_failure "cargo fails" "E0432 unresolved import" "add mod" "" medium)
+RALPH_NOW=2026-01-01T00:00:00Z record_signal validation_failure "cargo fails" "E0432 unresolved import" "add mod" "" medium >/dev/null
+RALPH_NOW=2026-01-01T00:05:00Z signal_resolve "$vk" "added 'mod db;' to main.rs" >/dev/null
+eq "resolved recurring signal autocaptures a candidate" candidate "$(jq -r .status "$SKILL_DIR/$vk.json")"
+eq "candidate starts UNVERIFIED" false "$(jq -r '.verified' "$SKILL_DIR/$vk.json")"
+
+gout=$(handle_skill_command approve "$vk" 2>&1)
+printf '%s' "$gout" | grep -qi 'Refusing to approve' && ok "CLI approve blocked for an unverified candidate" || bad "approve not blocked: $gout"
+eq "blocked candidate stays candidate" candidate "$(jq -r .status "$SKILL_DIR/$vk.json")"
+
+handle_skill_command approve "$vk" --force >/dev/null 2>&1
+eq "--force approves despite the gate" approved "$(jq -r .status "$SKILL_DIR/$vk.json")"
+
+_skill_set "$vk" '.status="candidate" | .verified=false' >/dev/null
+signal_reopen "$vk"          # regression: signal reopens with regressed=true
+verify_skills
+eq "regressed signal rejects the candidate (fix did not hold)" rejected "$(jq -r .status "$SKILL_DIR/$vk.json")"
+jq -r '.verify_reason // ""' "$SKILL_DIR/$vk.json" | grep -q regressed && ok "rejection records the regression reason" || bad "no verify_reason recorded"
+
+export SIGNAL_DIR="$TMP/vg-sig2" SIGNAL_ARCHIVE_DIR="$TMP/vg-sig2/.archive" SKILL_DIR="$TMP/vg-skill2"
+rm -rf "$SIGNAL_DIR" "$SKILL_DIR"; init_signals; init_skills
+pk=$(RALPH_NOW=2020-01-01T00:00:00Z record_signal runtime_failure "vet fails" "gofmt drift" "run gofmt" "" medium)
+RALPH_NOW=2020-01-01T00:00:00Z record_signal runtime_failure "vet fails" "gofmt drift" "run gofmt" "" medium >/dev/null
+RALPH_NOW=2020-01-01T00:01:00Z signal_resolve "$pk" "ran gofmt on save" >/dev/null
+eq "fresh candidate unverified before probation" false "$(jq -r '.verified' "$SKILL_DIR/$pk.json")"
+verify_skills   # real now >> 2020 + probation, signal still resolved -> verified
+eq "candidate that survived probation is verified" true "$(jq -r '.verified' "$SKILL_DIR/$pk.json")"
+aout=$(handle_skill_command approve "$pk" 2>&1)
+printf '%s' "$aout" | grep -q 'Approved skill' && ok "verified candidate is approvable via CLI" || bad "verified not approvable: $aout"
+
+export SKILL_DIR="$TMP/vg-skill3"; rm -rf "$SKILL_DIR"; init_skills
+q=$(record_skill "some--theme" "prob" "res" "")
+RALPH_SKILL_REQUIRE_VERIFY=0 handle_skill_command approve "$q" >/dev/null 2>&1
+eq "RALPH_SKILL_REQUIRE_VERIFY=0 bypasses the gate" approved "$(jq -r .status "$SKILL_DIR/$q.json")"
+unset RALPH_SKILL_REQUIRE_VERIFY
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

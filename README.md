@@ -224,7 +224,8 @@ Supported AI tools:
 ./ralph.sh signal recall
 
 ./ralph.sh skill ls
-./ralph.sh skill approve <theme>
+./ralph.sh skill approve <theme>          # blocked until the candidate is verified (see below)
+./ralph.sh skill approve <theme> --force  # override the verification gate
 ./ralph.sh skill reject <theme>
 ./ralph.sh skill globalize <theme>
 ./ralph.sh skill global
@@ -233,6 +234,8 @@ Supported AI tools:
 ```
 
 Signals are recurring issues Ralph keeps seeing. Skills are guarded fixes that can be recalled when matching signals reappear. `lint` is a read-only curator pass over that knowledge store.
+
+A candidate skill is captured from the agent's *self-reported* resolution, so it must earn promotion with evidence rather than its own word. Each candidate serves a **probation**: the `--review` curator invalidates it if its signal regresses (the fix did not hold) and marks it `verified` only once the signal has stayed resolved for `RALPH_SKILL_PROBATION_SECONDS` (default 3 days). `ralph skill approve` refuses an unverified candidate unless you pass `--force` or set `RALPH_SKILL_REQUIRE_VERIFY=0`. Only approved skills are ever recalled, so a bogus fix is caught before it can be re-applied.
 
 ### Cleanup latency stats
 

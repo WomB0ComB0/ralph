@@ -56,7 +56,8 @@ record_skill() {
         if jq -n --arg theme "$theme" --arg prob "$problem" --arg res "$resolution" \
               --arg now "$now" --arg run "$run" --argjson tags "$tags_json" \
               '{schema_version: 1, theme_key: $theme, problem: $prob, resolution: $res,
-                status: "candidate", tags: $tags, uses: 0,
+                status: "candidate", verified: false, probation_started: $now,
+                tags: $tags, uses: 0,
                 created_at: $now, updated_at: $now, approved_at: null,
                 first_run: $run, last_run: $run}' \
               > "$tmp" 2>/dev/null; then
@@ -83,6 +84,74 @@ _skill_set() {
 
 approve_skill() { _skill_set "$1" --arg n "$(_skill_now)" '.status = "approved" | .approved_at = $n'; }
 reject_skill()  { _skill_set "$1" '.status = "rejected"'; }
+
+# Independent verification of candidate skills. A candidate is captured from the
+# agent's SELF-REPORTED resolution note, so it must survive PROBATION before it can
+# be recalled as a proven fix. The verifier is the signal's own recurrence behaviour
+# (independent of the note), not the agent's claim:
+#   - the signal regressed and is active again  -> the fix did NOT hold  -> reject
+#   - the signal stayed resolved for RALPH_SKILL_PROBATION_SECONDS       -> verified
+# Recall only surfaces APPROVED skills, so a bogus resolution is invalidated here
+# before it can ever be promoted and re-applied.
+verify_skills() {
+    command_exists jq || return 0
+    declare -F _signal_epoch >/dev/null || return 0
+    local kdir="${SKILL_DIR:-.ralph/artifacts/skills}"
+    local sdir="${SIGNAL_DIR:-.ralph/artifacts/signals}"
+    [[ -d "$kdir" ]] || return 0
+    local probation="${RALPH_SKILL_PROBATION_SECONDS:-259200}"   # 3 days
+    [[ "$probation" =~ ^[0-9]+$ ]] || probation=259200
+    local now_epoch; now_epoch=$(_signal_epoch "$(_skill_now)")
+    local kf status verified theme sigfile sstatus regressed started started_epoch
+    local verified_n=0 rejected_n=0
+    for kf in "$kdir"/*.json; do
+        [[ -f "$kf" ]] || continue
+        status=$(jq -r '.status // ""' "$kf" 2>/dev/null) || continue
+        [[ "$status" == "candidate" ]] || continue
+        verified=$(jq -r '.verified // false' "$kf" 2>/dev/null)
+        [[ "$verified" == "true" ]] && continue
+        theme=$(jq -r '.theme_key // ""' "$kf" 2>/dev/null); [[ -n "$theme" ]] || continue
+        sigfile="$sdir/$theme.json"
+        if [[ -f "$sigfile" ]]; then
+            sstatus=$(jq -r '.status // ""' "$sigfile" 2>/dev/null)
+            regressed=$(jq -r '.regressed // false' "$sigfile" 2>/dev/null)
+            if [[ "$regressed" == "true" && ( "$sstatus" == "open" || "$sstatus" == "ack" ) ]]; then
+                _skill_set "$theme" --arg n "$(_skill_now)" '.status="rejected" | .verify_reason="resolution regressed during probation" | .rejected_at=$n' && rejected_n=$((rejected_n+1))
+                continue
+            fi
+        fi
+        started=$(jq -r '.probation_started // .created_at // ""' "$kf" 2>/dev/null)
+        started_epoch=$(_signal_epoch "$started")
+        if [[ "$now_epoch" -gt 0 && "$started_epoch" -gt 0 && $(( now_epoch - started_epoch )) -ge "$probation" ]]; then
+            _skill_set "$theme" '.verified=true' && verified_n=$((verified_n+1))
+        fi
+    done
+    [[ $(( verified_n + rejected_n )) -gt 0 ]] && log_debug "verify_skills: ${verified_n} verified, ${rejected_n} rejected (regressed)"
+    return 0
+}
+
+# Approval gate: echo empty + return 0 if a candidate may be approved; else echo a
+# reason and return 1. Used by the human-facing `ralph skill approve`.
+_skill_verify_gate() {
+    local theme="$1"
+    local file="${SKILL_DIR:-.ralph/artifacts/skills}/$theme.json"
+    [[ -f "$file" ]] || { printf 'no such skill: %s\n' "$theme"; return 1; }
+    local verified; verified=$(jq -r '.verified // false' "$file" 2>/dev/null)
+    [[ "$verified" == "true" ]] && return 0
+    local sigfile="${SIGNAL_DIR:-.ralph/artifacts/signals}/$theme.json" sstatus regressed
+    if [[ -f "$sigfile" ]]; then
+        sstatus=$(jq -r '.status // ""' "$sigfile" 2>/dev/null)
+        regressed=$(jq -r '.regressed // false' "$sigfile" 2>/dev/null)
+        if [[ "$regressed" == "true" && ( "$sstatus" == "open" || "$sstatus" == "ack" ) ]]; then
+            printf 'the signal regressed after this resolution — the fix did not hold'; return 1
+        fi
+        if [[ "$sstatus" == "open" || "$sstatus" == "ack" ]]; then
+            printf 'the signal is still open — resolve it and let the fix survive probation first'; return 1
+        fi
+    fi
+    printf 'candidate not yet verified — it has not survived the probation window'
+    return 1
+}
 
 skill_get() {
     local f="${SKILL_DIR:-.ralph/artifacts/skills}/$1.json"
@@ -273,7 +342,19 @@ handle_skill_command() {
     case "$cmd" in
         ls|list)  list_skills "${1:-}" ;;
         show|get) skill_get "${1:-}" ;;
-        approve)  if [[ -n "${1:-}" ]]; then approve_skill "$1" && echo "Approved skill: $1"; else echo "Usage: ralph skill approve <theme>"; fi ;;
+        approve)
+            if [[ -z "${1:-}" ]]; then
+                echo "Usage: ralph skill approve <theme> [--force]"
+            else
+                local _t="$1" _reason
+                if [[ "${2:-}" == "--force" || "${RALPH_SKILL_REQUIRE_VERIFY:-1}" == "0" ]]; then
+                    approve_skill "$_t" && echo "Approved skill: $_t"
+                elif _reason=$(_skill_verify_gate "$_t"); then
+                    approve_skill "$_t" && echo "Approved skill: $_t"
+                else
+                    echo "Refusing to approve '$_t': $_reason. Re-run with --force to override."
+                fi
+            fi ;;
         reject)   if [[ -n "${1:-}" ]]; then reject_skill "$1" && echo "Rejected skill: $1"; else echo "Usage: ralph skill reject <theme>"; fi ;;
         globalize)
             if [[ -z "${1:-}" ]]; then

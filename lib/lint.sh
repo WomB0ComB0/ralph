@@ -55,8 +55,8 @@ lint_knowledge() {
     # `local x=()` is a syntax error on Bash 3.2/4.0-4.1; but a `local -a` array left
     # unassigned reads as "unbound" under set -u once it stays empty. So declare local,
     # then initialize to empty arrays on a separate (non-`local`) line — safe on both.
-    local -a gaps orphans stale backlog highsev
-    gaps=(); orphans=(); stale=(); backlog=(); highsev=()
+    local -a gaps orphans stale backlog probation highsev
+    gaps=(); orphans=(); stale=(); backlog=(); probation=(); highsev=()
     local f theme status freq sev last skillfile sigfile sk_status age covered sst
 
     # --- Signal-driven checks ---
@@ -96,12 +96,15 @@ lint_knowledge() {
             sigfile="$sdir/$theme.json"
             case "$sk_status" in
                 candidate)
-                    # Disjoint: a candidate with a live signal is review backlog; one
-                    # whose signal is gone is an orphan (not both).
-                    if [[ -f "$sigfile" ]]; then
+                    # Disjoint: a candidate whose signal is gone is an orphan. One with a
+                    # live signal is review backlog ONLY once verified (survived probation);
+                    # an unverified candidate is still on probation, not yet approvable.
+                    if [[ ! -f "$sigfile" ]]; then
+                        orphans+=("$theme (candidate)")
+                    elif [[ "$(jq -r '.verified // false' "$f" 2>/dev/null)" == "true" ]]; then
                         backlog+=("$theme")
                     else
-                        orphans+=("$theme (candidate)")
+                        probation+=("$theme")
                     fi
                     ;;
                 approved)
@@ -121,12 +124,13 @@ lint_knowledge() {
         _lint_section "KNOWLEDGE GAPS (recurring open problem, no skill yet)" "${gaps[@]+"${gaps[@]}"}"
         _lint_section "ORPHANED SKILLS (skill references a signal that no longer exists)" "${orphans[@]+"${orphans[@]}"}"
         _lint_section "STALE APPROVED SKILLS (signal idle > ${stale_days}d; maybe obsolete)" "${stale[@]+"${stale[@]}"}"
-        _lint_section "APPROVAL BACKLOG (candidate skills awaiting review)" "${backlog[@]+"${backlog[@]}"}"
+        _lint_section "APPROVAL BACKLOG (verified candidates ready to approve)" "${backlog[@]+"${backlog[@]}"}"
+        _lint_section "IN PROBATION (candidates not yet verified; --review watches for regressions)" "${probation[@]+"${probation[@]}"}"
         _lint_section "UNRESOLVED HIGH-SEVERITY SIGNALS" "${highsev[@]+"${highsev[@]}"}"
         printf '\n'
     fi
-    printf 'lint summary: %d gaps, %d orphaned, %d stale, %d backlog, %d high-severity\n' \
-        "${#gaps[@]}" "${#orphans[@]}" "${#stale[@]}" "${#backlog[@]}" "${#highsev[@]}"
+    printf 'lint summary: %d gaps, %d orphaned, %d stale, %d backlog, %d probation, %d high-severity\n' \
+        "${#gaps[@]}" "${#orphans[@]}" "${#stale[@]}" "${#backlog[@]}" "${#probation[@]}" "${#highsev[@]}"
     return 0
 }
 
