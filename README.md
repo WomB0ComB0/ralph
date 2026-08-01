@@ -379,7 +379,8 @@ Common environment variables:
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
-| `RALPH_RESUME_SESSION` | Reuse supported tool sessions within a run. |
+| `RALPH_RESUME_SESSION` | Reuse the supported tool's session across iterations AND across `--once`/cron ticks (claude/opencode/agy); a tick resumes the prior tick's session instead of starting cold. |
+| `RALPH_SESSION_MAX_AGE_SECONDS` | Freshness bound for cross-tick session resume; a persisted session marker older than this (default `3600`) is not resumed. |
 | `RALPH_MAX_BUDGET_USD` | Claude per-call spend cap. |
 | `RALPH_MODEL_FALLBACKS` | Ordered fallback model list. |
 | `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
