@@ -555,8 +555,15 @@ _triage_apply_fix() {
 
     # Idempotency: one open ralph fix PR per finding. Skip (zero work) if one already exists.
     if [[ -n "$finding_key" ]]; then
-        local _dup_list _dup
-        _dup_list=$(_triage_gh_or_transient "checking for an existing fix PR" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix:$finding_key in:body" --json number,body) || _dup_list=""
+        local _dup_list _dup _dup_rc=0
+        _dup_list=$(_triage_gh_or_transient "checking for an existing fix PR" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix:$finding_key in:body" --json number,body) || _dup_rc=$?
+        if [[ "$_dup_rc" -eq 75 ]]; then
+            log_warning "[$repo] deferred autofix: could not check for an existing fix PR (transient GitHub failure)."
+            return 0
+        elif [[ "$_dup_rc" -ne 0 ]]; then
+            log_error "[$repo] failed to check for an existing fix PR: $_dup_list"
+            return 1
+        fi
         _dup=$(printf '%s' "$_dup_list" | jq -r --arg m "<!-- ralph-fix:$finding_key -->" '[.[]? | select(.body // "" | test($m; "")) | .number] | .[0] // empty' 2>/dev/null || true)
         if [[ -n "$_dup" ]]; then
             log_success "[$repo] already has an open fix PR #$_dup for $finding_key — skipping."
@@ -927,10 +934,18 @@ triage_verify_fixes() {
     local list rc=0
     list=$(_triage_gh_or_transient "listing ralph fix PRs" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix in:body" --json number --jq '.[].number') || rc=$?
     if [[ "$rc" -eq 75 ]]; then return 0; elif [[ "$rc" -ne 0 ]]; then log_error "[$repo] verify: failed to list fix PRs."; return 1; fi
-    local ready=0 failing=0 pending=0 n view state merge has_ready has_verified has_failmark
+    local ready=0 failing=0 pending=0 n view state merge has_ready has_verified has_failmark body
     while IFS= read -r n; do
         [[ "$n" =~ ^[0-9]+$ ]] || continue
-        view=$(_triage_gh_or_transient "reading PR #$n" "$repo" gh pr view "$n" --repo "$repo" --json number,statusCheckRollup,mergeable,comments,labels) || continue
+        view=$(_triage_gh_or_transient "reading PR #$n" "$repo" gh pr view "$n" --repo "$repo" --json number,statusCheckRollup,mergeable,comments,labels,body) || continue
+        # SAFETY: the search above is fuzzy full-text (`in:body`) and can return a human PR whose
+        # body merely mentions "ralph-fix" in prose. Only act on PRs that carry the literal
+        # ralph-fix marker (same check `_triage_apply_fix` uses to stamp/find its own PRs) — never
+        # touch a human's PR.
+        body=$(printf '%s' "$view" | jq -r '.body // ""' 2>/dev/null)
+        if [[ "$body" != *"<!-- ralph-fix"* ]]; then
+            continue
+        fi
         # state: FAILURE if any check failed; SUCCESS if all terminal-good; else PENDING.
         state=$(printf '%s' "$view" | jq -r '
             (.statusCheckRollup // []) as $c

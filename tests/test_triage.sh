@@ -370,14 +370,14 @@ printf '%s' "$sdry" | grep -q 'fix(security): js/sql-injection' && ok "dry-run t
 [[ ! -s "$GITLOG3" ]] && ok "fix-security dry-run invoked git ZERO times" || bad "dry-run touched git: $(cat "$GITLOG3")"
 
 WF_ALERT_JSON='{"number":9,"tool":{"name":"zizmor"},"rule":{"id":"zizmor/unpinned-uses","severity":"error","help":"pin actions"},"most_recent_instance":{"analysis_key":".github/workflows/security.yml:zizmor","location":{"path":"security.yml","start_line":24}}}'
-gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts/9*) printf '%s\n' "$WF_ALERT_JSON" ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts/9*) printf '%s\n' "$WF_ALERT_JSON" ;; pr\ list*) printf '[]\n' ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
 wdry=$(triage_autofix_security "o/r" 0 9 2>&1)
 printf '%s' "$wdry" | grep -q 'appears workflow-backed (.github/workflows/security.yml)' && ok "fix-security dry-run flags workflow-backed alert" || bad "workflow-backed warning missing: $wdry"
 printf '%s' "$wdry" | grep -q 'likely workflow-backed alert (.github/workflows/security.yml)' && ok "fix-security dry-run plan labels workflow-backed alert" || bad "workflow-backed plan note missing: $wdry"
 PROMPT_CAPTURE="$TMP/wf-prompt.txt"
 (
     gh() { case "$*" in repo\ view*) echo "main" ;; api\ repos/o/r/code-scanning/alerts/9*) printf '%s
-' "$WF_ALERT_JSON" ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
+' "$WF_ALERT_JSON" ;; pr\ list*) printf '[]\n' ;; *) echo "unexpected gh args: $*" >&2; return 9 ;; esac; }
     _triage_apply_fix() { printf '%s' "$4" > "$PROMPT_CAPTURE"; return 0; }
     triage_autofix_security "o/r" 0 9 >/dev/null 2>&1
 )
@@ -416,6 +416,7 @@ SEC_ALERT_JSON='{"number":8,"rule":{"id":"js/sql-injection","security_severity_l
             repo\ view*) printf 'main\n' ;;
             api\ repos/o/r/code-scanning/alerts/8*) printf '%s\n' "$SEC_ALERT_JSON" ;;
             repo\ clone*) command git clone -q --branch main "$SEC_REMOTE" "$4" ;;
+            pr\ list*) printf '[]\n' ;;
             *) echo "unexpected gh args: $*" >&2; return 9 ;;
         esac
     }
@@ -452,6 +453,7 @@ SEC_FAIL_DIAG_DIR="$TMP/sec-fail-diags"
             repo\ view*) printf 'main\n' ;;
             api\ repos/o/r/code-scanning/alerts/8*) printf '%s\n' "$SEC_ALERT_JSON" ;;
             repo\ clone*) command git clone -q --branch main "$SEC_REMOTE" "$4" ;;
+            pr\ list*) printf '[]\n' ;;
             *) echo "unexpected gh args: $*" >&2; return 9 ;;
         esac
     }
@@ -509,6 +511,7 @@ WF_DIAG_DIR="$TMP/wf-diags"
             repo\ view*) printf 'main\n' ;;
             api\ repos/o/r/code-scanning/alerts/9*) printf '%s\n' "$WF_ALERT_JSON" ;;
             repo\ clone*) command git clone -q --branch main "$WF_REMOTE" "$4" ;;
+            pr\ list*) printf '[]\n' ;;
             *) echo "unexpected gh args: $*" >&2; return 9 ;;
         esac
     }
@@ -679,8 +682,8 @@ gh() {
     echo "gh $*" >> "$GHLOG"
     case "$*" in
         *"pr list"*"ralph-fix"*) printf '10\n11\n' ;;
-        *"pr view 10"*) printf '{"number":10,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","comments":[],"labels":[]}\n' ;;
-        *"pr view 11"*) printf '{"number":11,"statusCheckRollup":[{"conclusion":"FAILURE"}],"mergeable":"MERGEABLE","comments":[],"labels":[{"name":"ralph-ready"}]}\n' ;;
+        *"pr view 10"*) printf '{"number":10,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","comments":[],"labels":[],"body":"x <!-- ralph-fix:ci:o/r -->"}\n' ;;
+        *"pr view 11"*) printf '{"number":11,"statusCheckRollup":[{"conclusion":"FAILURE"}],"mergeable":"MERGEABLE","comments":[],"labels":[{"name":"ralph-ready"}],"body":"y <!-- ralph-fix:ci:o/r -->"}\n' ;;
         *"label create"*) : ;;
         *"pr edit"*|*"pr comment"*) : ;;
         *) printf '\n' ;;
@@ -697,6 +700,71 @@ find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | grep -q . && ok "r
 triage_verify_fixes "o/r" 0 >/dev/null 2>&1
 grep -qE 'pr edit|pr comment|label create' "$GHLOG" && bad "dry-run wrote to GitHub" || ok "dry-run performs no writes"
 unset -f gh; unset SIGNAL_DIR
+
+echo "== triage --verify-fixes: never touches a human PR that merely mentions ralph-fix in prose =="
+unset -f gh
+export SIGNAL_DIR="$TMP/vf-sig2"; rm -rf "$SIGNAL_DIR"; init_signals
+GHLOG="$TMP/gh-verify-human"; : > "$GHLOG"
+# search returns a human PR (#20, body mentions "ralph-fix" in prose but has NO literal marker)
+# plus a properly-marked ralph PR (#21, green) to prove marked PRs still get processed.
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        *"pr list"*"ralph-fix"*) printf '20\n21\n' ;;
+        *"pr view 20"*) printf '{"number":20,"statusCheckRollup":[{"conclusion":"FAILURE"}],"mergeable":"MERGEABLE","comments":[],"labels":[{"name":"ralph-ready"}],"body":"This PR discusses the ralph-fix feature design, no marker here."}\n' ;;
+        *"pr view 21"*) printf '{"number":21,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","comments":[],"labels":[],"body":"z <!-- ralph-fix:ci:o/r -->"}\n' ;;
+        *"label create"*) : ;;
+        *"pr edit"*|*"pr comment"*) : ;;
+        *) printf '\n' ;;
+    esac
+}
+out=$(triage_verify_fixes "o/r" 1 2>&1)
+grep -qE 'pr edit 20|pr comment 20' "$GHLOG" && bad "human PR #20 was written to: $(cat "$GHLOG")" || ok "human PR #20 (no marker) left untouched"
+grep -qE 'pr edit 21 .*--add-label ralph-ready' "$GHLOG" && ok "properly-marked PR #21 still labelled ralph-ready" || bad "marked PR #21 not processed: $(cat "$GHLOG")"
+find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | grep -q . && bad "human PR #20 wrongly triggered an autofix_failed signal" || ok "no signal recorded for the untouched human PR"
+unset -f gh; unset SIGNAL_DIR
+
+echo "== dedup fails CLOSED on a transient GitHub error (does not open a duplicate PR) =="
+unset -f gh run_ai_tool 2>/dev/null || true
+# Real git remote + an agent stub that DOES make a source change, so if dedup fail-open
+# regresses, the flow would actually reach clone/commit/push/pr-create and this test catches it.
+DEDUP_REMOTE="$TMP/dedup-remote.git"
+DEDUP_SRC="$TMP/dedup-src"
+mkdir -p "$DEDUP_SRC"
+git init -q --bare "$DEDUP_REMOTE"
+git -C "$DEDUP_SRC" init -q
+git -C "$DEDUP_SRC" checkout -q -b main
+git -C "$DEDUP_SRC" config user.name test
+git -C "$DEDUP_SRC" config user.email test@example.com
+printf 'x=1\n' > "$DEDUP_SRC/a.txt"
+git -C "$DEDUP_SRC" add a.txt
+git -C "$DEDUP_SRC" commit -q -m init
+git -C "$DEDUP_SRC" remote add origin "$DEDUP_REMOTE"
+git -C "$DEDUP_SRC" push -q origin main
+GHLOG="$TMP/gh-dedup-transient"; : > "$GHLOG"
+(
+    set -u
+    TOOL=opencode AI_RETRY_ATTEMPTS=1
+    gh() {
+        echo "gh $*" >> "$GHLOG"
+        case "$*" in
+            *"pr list"*"ralph-fix:ci:o/r"*) echo "HTTP 503: Service Unavailable" >&2; return 1 ;;
+            *defaultBranchRef*) echo main ;;
+            repo\ clone*) command git clone -q --branch main "$DEDUP_REMOTE" "$4" ;;
+            *) printf '\n' ;;
+        esac
+    }
+    run_ai_tool() {
+        printf 'y=2\n' >> "$PROJECT_DIR/a.txt"
+        return 0
+    }
+    _triage_apply_fix "o/r" main "ralph/fix-ci-1" "prompt" "t" "body" 1 "" "ci:o/r"
+) > "$TMP/dedup-transient.out" 2>&1
+out=$(cat "$TMP/dedup-transient.out")
+printf '%s' "$out" | grep -qi 'deferred' && ok "dedup transient failure logs a defer" || bad "no defer logged: $out"
+grep -qE 'pr create' "$GHLOG" && bad "dedup fail-open: opened a PR despite transient dedup-check failure: $(cat "$GHLOG")" || ok "dedup fail-closed: no PR created on transient error"
+grep -qE 'clone' "$GHLOG" && bad "dedup fail-open: proceeded to clone despite transient dedup-check failure: $(cat "$GHLOG")" || ok "dedup fail-closed: no clone attempted on transient error"
+unset -f gh run_ai_tool 2>/dev/null || true
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
