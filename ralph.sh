@@ -59,5 +59,7 @@ source "$SCRIPT_DIR/lib/resources.sh"
 # signal/skill/lint/swarm/copilot subcommands work on hosts without the full toolchain,
 # and the AI-tool check sees the actual selected tool rather than always defaulting to opencode.
 
+# Self-benchmarking suggestion: Consider caching sourced library paths or utilizing a module registry to speed up initialization when scaling up sub-libraries.
+
 # Run main function
 main "$@"
