@@ -304,6 +304,14 @@ case "$mode" in
         ;;
 esac
 
+# Compounding memory: push verified skills + mined themes into Synapse.
+# Apply-modes only — report/dry modes must stay side-effect-free. Fail-open;
+# a sync failure must never fail the patrol tick.
+case "$mode" in
+    suggest-apply|fix-ci-apply|fix-security-apply)
+        "$ralph_bin" memory --sync || printf 'WARNING: memory --sync failed (non-fatal)\n' >&2 ;;
+esac
+
 if [[ "$resource_history" == "1" ]]; then
     resource_history_file="${RALPH_RESOURCE_HISTORY_FILE:-$log_dir/resource-history.jsonl}"
     resource_rc=0
