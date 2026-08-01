@@ -670,5 +670,33 @@ d=$(_triage_apply_fix "o/r" main "ralph/fix-ci-1" "prompt" "t" "body" 0 "" "ci:o
 printf '%s' "$d" | grep -qi 'DRY-RUN' && ok "no existing PR -> autofix proceeds (dry-run plan shown)" || bad "did not proceed: $d"
 unset -f gh
 
+echo "== triage --verify-fixes: label green, flag red, never merge, idempotent =="
+unset -f gh
+export SIGNAL_DIR="$TMP/vf-sig"; rm -rf "$SIGNAL_DIR"; init_signals
+GHLOG="$TMP/gh-verify"; : > "$GHLOG"
+# one green PR (#10), one red PR (#11), both ralph-fix marked
+gh() {
+    echo "gh $*" >> "$GHLOG"
+    case "$*" in
+        *"pr list"*"ralph-fix"*) printf '10\n11\n' ;;
+        *"pr view 10"*) printf '{"number":10,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","comments":[],"labels":[]}\n' ;;
+        *"pr view 11"*) printf '{"number":11,"statusCheckRollup":[{"conclusion":"FAILURE"}],"mergeable":"MERGEABLE","comments":[],"labels":[{"name":"ralph-ready"}]}\n' ;;
+        *"label create"*) : ;;
+        *"pr edit"*|*"pr comment"*) : ;;
+        *) printf '\n' ;;
+    esac
+}
+out=$(triage_verify_fixes "o/r" 1 2>&1)
+printf '%s' "$out" | grep -qE 'verify: 1 ready, 1 failing' && ok "summary counts green vs red" || bad "bad summary: $out"
+grep -qE 'pr edit 10 .*--add-label ralph-ready' "$GHLOG" && ok "green PR labelled ralph-ready" || bad "green not labelled: $(cat "$GHLOG")"
+grep -qE 'pr edit 11 .*--remove-label ralph-ready' "$GHLOG" && ok "red PR ralph-ready removed" || bad "red label not removed: $(cat "$GHLOG")"
+grep -qi 'pr merge' "$GHLOG" && bad "verify tried to MERGE" || ok "verify never merges"
+find "$SIGNAL_DIR" -name '*.json' -not -path '*/.archive/*' | grep -q . && ok "red fix records an autofix_failed signal" || bad "no failure signal recorded"
+# dry-run writes nothing
+: > "$GHLOG"
+triage_verify_fixes "o/r" 0 >/dev/null 2>&1
+grep -qE 'pr edit|pr comment|label create' "$GHLOG" && bad "dry-run wrote to GitHub" || ok "dry-run performs no writes"
+unset -f gh; unset SIGNAL_DIR
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

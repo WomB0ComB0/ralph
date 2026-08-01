@@ -919,6 +919,52 @@ _triage_delta_comment() {
     return 0
 }
 
+# Verify ralph's OWN open fix PRs against their CI and build a ralph-ready merge queue.
+# Green -> label ralph-ready (+ one-time comment). Red -> remove the label, comment once, and
+# record an autofix_failed signal. NEVER merges. DRY-RUN by default.
+triage_verify_fixes() {
+    local repo="$1" apply="${2:-0}"
+    local list rc=0
+    list=$(_triage_gh_or_transient "listing ralph fix PRs" "$repo" gh pr list --repo "$repo" --state open --search "ralph-fix in:body" --json number --jq '.[].number') || rc=$?
+    if [[ "$rc" -eq 75 ]]; then return 0; elif [[ "$rc" -ne 0 ]]; then log_error "[$repo] verify: failed to list fix PRs."; return 1; fi
+    local ready=0 failing=0 pending=0 n view state merge has_ready has_verified has_failmark
+    while IFS= read -r n; do
+        [[ "$n" =~ ^[0-9]+$ ]] || continue
+        view=$(_triage_gh_or_transient "reading PR #$n" "$repo" gh pr view "$n" --repo "$repo" --json number,statusCheckRollup,mergeable,comments,labels) || continue
+        # state: FAILURE if any check failed; SUCCESS if all terminal-good; else PENDING.
+        state=$(printf '%s' "$view" | jq -r '
+            (.statusCheckRollup // []) as $c
+            | if ($c | any((.conclusion // .state) as $s | $s == "FAILURE" or $s == "CANCELLED" or $s == "TIMED_OUT" or $s == "ERROR")) then "red"
+              elif (($c | length) > 0) and ($c | all((.conclusion // .state) as $s | $s == "SUCCESS" or $s == "NEUTRAL" or $s == "SKIPPED" or $s == "COMPLETED")) then "green"
+              else "pending" end' 2>/dev/null)
+        merge=$(printf '%s' "$view" | jq -r '.mergeable // ""' 2>/dev/null)
+        has_ready=$(printf '%s' "$view" | jq -r '[.labels[]?.name] | index("ralph-ready") // empty' 2>/dev/null)
+        has_verified=$(printf '%s' "$view" | jq -r '[.comments[]?.body] | map(select(test("<!-- ralph-verified -->"))) | length' 2>/dev/null)
+        has_failmark=$(printf '%s' "$view" | jq -r '[.comments[]?.body] | map(select(test("<!-- ralph-fix-failed -->"))) | length' 2>/dev/null)
+        if [[ "$state" == "green" && "$merge" == "MERGEABLE" ]]; then
+            ready=$((ready+1))
+            if [[ "$apply" == "1" ]]; then
+                _triage_gh_or_transient "creating ralph-ready label" "$repo" gh label create ralph-ready --repo "$repo" --color 0E8A16 --description "Ralph autofix: CI green, ready to merge" >/dev/null 2>&1 || true
+                [[ -z "$has_ready" ]] && _triage_gh_or_transient "labelling PR #$n" "$repo" gh pr edit "$n" --repo "$repo" --add-label ralph-ready >/dev/null 2>&1 || true
+                [[ "${has_verified:-0}" == "0" ]] && _triage_gh_or_transient "commenting on PR #$n" "$repo" gh pr comment "$n" --repo "$repo" --body "Ralph verified: CI is green and the PR is mergeable — ready for your review/merge.
+<!-- ralph-verified -->" >/dev/null 2>&1 || true
+            fi
+        elif [[ "$state" == "red" ]]; then
+            failing=$((failing+1))
+            if [[ "$apply" == "1" ]]; then
+                [[ -n "$has_ready" ]] && _triage_gh_or_transient "removing ralph-ready from PR #$n" "$repo" gh pr edit "$n" --repo "$repo" --remove-label ralph-ready >/dev/null 2>&1 || true
+                [[ "${has_failmark:-0}" == "0" ]] && _triage_gh_or_transient "commenting on PR #$n" "$repo" gh pr comment "$n" --repo "$repo" --body "Ralph: CI is failing on this autofix — the fix did not hold. Left open for revision; not merging.
+<!-- ralph-fix-failed -->" >/dev/null 2>&1 || true
+                record_signal autofix_failed "Ralph autofix PR failed CI in $repo" "ralph fix PR #$n in $repo has failing CI" "revise or close the autofix PR" "triage,autofix" high "triage" >/dev/null 2>&1 || true
+            fi
+        else
+            pending=$((pending+1))
+        fi
+    done <<< "$list"
+    log_info "[$repo] verify: $ready ready, $failing failing, $pending pending$([[ "$apply" == "1" ]] || echo ' (dry-run)')"
+    return 0
+}
+
 # Suggest-only mode: digest a repo's findings into ONE GitHub issue (idempotent — comments an
 # existing open ralph-triage issue rather than spamming). Lower blast radius than autofix→PR:
 # it never touches code. DRY-RUN by default.
@@ -1115,6 +1161,7 @@ handle_triage_command() {
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
+            --verify-fixes)    mode="verify-fixes" ;;
         esac
         shift
     done
@@ -1149,6 +1196,12 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing what would be removed — no comments are deleted."
         local r
         for r in "${targets[@]}"; do triage_tidy_issue "$r" "$apply" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "verify-fixes" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): reporting ralph fix PR status only — no labels/comments written."
+        local r
+        for r in "${targets[@]}"; do triage_verify_fixes "$r" "$apply" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then
