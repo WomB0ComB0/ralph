@@ -649,5 +649,16 @@ grep -qE 'comments/(102|103|104)' "$GHLOG" && bad "tidy deleted a delta/human/no
 printf '%s' "$aout" | grep -q 'removed 1 legacy' && ok "tidy reports removed count" || bad "no removed count: $aout"
 unset -f gh
 
+echo "== _triage_map_targets: bounded parallel, ordered output, arg forwarding =="
+targets=(o/a o/b o/c o/d)
+_mt_fn() { printf 'ran %s\n' "$1"; }
+eq "sequential (conc=1) runs all in target order" $'ran o/a\nran o/b\nran o/c\nran o/d' "$(RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _mt_fn)"
+eq "parallel (conc=3) preserves target order in output" $'ran o/a\nran o/b\nran o/c\nran o/d' "$(RALPH_TRIAGE_CONCURRENCY=3 _triage_map_targets _mt_fn)"
+_mt_fn2() { printf '%s|%s|%s\n' "$1" "$2" "$3"; }
+eq "extra args forwarded to every target (parallel)" $'o/a|X|Y\no/b|X|Y\no/c|X|Y\no/d|X|Y' "$(RALPH_TRIAGE_CONCURRENCY=2 _triage_map_targets _mt_fn2 X Y)"
+_mt_fail() { [[ "$1" == o/b ]] && return 1; printf 'ok %s\n' "$1"; }
+eq "a failing target does not abort the rest (parallel)" $'ok o/a\nok o/c\nok o/d' "$(RALPH_TRIAGE_CONCURRENCY=2 _triage_map_targets _mt_fail | grep '^ok')"
+unset -f _mt_fn _mt_fn2 _mt_fail; unset targets
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
