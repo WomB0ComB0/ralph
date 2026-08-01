@@ -54,11 +54,14 @@ memory_sync() {
         done
     fi
 
-    # Mined themes passing the feed gate (freq>=3 AND distinct_runs>=2).
+    # Mined themes passing the feed gate (freq>=RALPH_MINE_MIN_FREQ AND distinct_runs>=2),
+    # same default/env-override as mine_feed so the two gates never diverge.
     local scan qualifying tkey kind tool tier freq runs reg regj
+    local min="${RALPH_MINE_MIN_FREQ:-3}"
+    [[ "$min" =~ ^[0-9]+$ ]] || min=3
     scan=$(_mine_scan 2>/dev/null)
-    qualifying=$(printf '%s' "$scan" | jq -r '
-        .[] | select(.frequency >= 3 and .distinct_runs >= 2)
+    qualifying=$(printf '%s' "$scan" | jq -r --argjson min "$min" '
+        .[] | select(.frequency >= $min and .distinct_runs >= 2)
         | [.theme,.kind,.tool,.tier,(.frequency|tostring),(.distinct_runs|tostring),(.regress|tostring)] | @tsv' 2>/dev/null)
     while IFS=$'\t' read -r tkey kind tool tier freq runs reg; do
         [[ -n "$tkey" ]] || continue

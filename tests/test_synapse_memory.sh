@@ -69,7 +69,7 @@ synapse_ping() { return 0; }
 _synapse_ingest_doc() { return 42; }
 rc=0; out=$(SKILL_DIR="$SKILL_DIR" SIGNAL_DIR="$SIGNAL_DIR" METRICS_FILE="$LEDGER" memory_sync) || rc=$?
 eq "sync fail-open rc 0" "0" "$rc"
-printf '%s' "$out" | grep -q 'failed' && ok "tally reports failures" || bad "no failure tally: $out"
+printf '%s' "$out" | grep -q '2 failed' && ok "tally: 2 failed" || bad "tally wrong: $out"
 ls "$SIGNAL_DIR"/*.json >/dev/null 2>&1 && ok "memory_sync_failed signal recorded" || bad "no failure signal recorded"
 
 echo "== memory_sync: unreachable Synapse is a clean no-op =="
