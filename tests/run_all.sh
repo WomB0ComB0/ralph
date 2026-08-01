@@ -30,6 +30,7 @@ run() {
 echo "Ralph test suites:"
 run now      "$DIR/test_now_tier.sh"
 run next     "$DIR/test_next_tier.sh"
+run session  "$DIR/test_session_resume.sh"
 run manifest "$DIR/test_run_manifest.sh"
 run processes "$DIR/test_processes.sh"
 run cleanup  "$DIR/test_cleanup_stats.sh"

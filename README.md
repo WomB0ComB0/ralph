@@ -398,7 +398,8 @@ Common environment variables:
 | `RALPH_OPENCODE_JSON` | Use `opencode run --format json` and normalize events into plain agent text, default `1`; set `0` to keep opencode's default output. |
 | `AI_RETRY_ATTEMPTS` / `AI_RETRY_BASE_DELAY` | Retry count and base backoff. |
 | `MAX_CONSECUTIVE_FAILURES` | Circuit-breaker threshold. |
-| `RALPH_RESUME_SESSION` | Reuse supported tool sessions within a run. |
+| `RALPH_RESUME_SESSION` | Reuse the supported tool's session across iterations AND across `--once`/cron ticks (claude/opencode/agy); a tick resumes the prior tick's session instead of starting cold. |
+| `RALPH_SESSION_MAX_AGE_SECONDS` | Freshness bound for cross-tick session resume; a persisted session marker older than this (default `3600`) is not resumed. |
 | `RALPH_MAX_BUDGET_USD` | Claude per-call spend cap. |
 | `RALPH_MODEL_FALLBACKS` | Ordered fallback model list. |
 | `RALPH_LOCAL_MODEL` | Preferred local model when no model is pinned. |
@@ -444,6 +445,7 @@ Common environment variables:
 | `RALPH_JULES_POLL_INTERVAL` / `RALPH_JULES_TIMEOUT` | Poll cadence and max wait for a Jules session, defaults `15` seconds and `7200` seconds. |
 | `RALPH_JULES_REQUIRE_PLAN_APPROVAL` | Set to `1` when Jules plans should wait for explicit approval. |
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
+| `RALPH_TRIAGE_CONCURRENCY` | Repos triaged in parallel per run (default `1` = sequential). Higher values fan out across the allowlist and flush each repo's output in order; for `--apply`/autofix modes this means concurrent clones + agent runs, so raise it knowingly. |
 | `RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS` | Optional comma/space/newline-separated `owner/repo` list whose disabled GitHub Issues setting is expected, such as public forks; `--suggest --apply` logs an info skip instead of a warning for those repos. |
 | `RALPH_ORG_CODE_WRITE_TARGETS` | Comma, space, or newline-separated `owner/repo` list required by `scripts/org-patrol` code-changing apply modes (`fix-ci-apply`, `fix-security-apply`); the list is intersected with discovered public org targets before PR-writing triage runs. |
 | `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |

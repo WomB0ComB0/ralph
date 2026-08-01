@@ -1128,11 +1128,57 @@ _apply_tool_env() {
     esac
 }
 
+# --- cross-tick session continuity ------------------------------------------------------
+# The established flag is per-process. To let a `--once`/cron loop resume the tool's own
+# session across ticks (instead of rebuilding a cold prompt each tick), persist a small
+# marker when a session is established and restore it at the next process start — same tool,
+# same project, within a freshness TTL. Opt-in (RALPH_RESUME_SESSION); default off.
+_session_marker_path() { printf '%s\n' "${STATE_DIR:-.ralph/state}/session.json"; }
+
+_persist_session() {
+    [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local tool="$1" f dir now tmp
+    f="$(_session_marker_path)"; dir="$(dirname "$f")"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    now=$(date -u +%s 2>/dev/null || echo 0)
+    tmp=$(mktemp "$dir/.session.XXXXXX" 2>/dev/null) || return 0
+    if jq -nc --arg tool "$tool" --argjson at "${now:-0}" --arg run "${RUN_ID:-}" \
+          '{tool:$tool, established_at:$at, run_id:$run}' > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    else
+        rm -f "$tmp" 2>/dev/null
+    fi
+    return 0
+}
+
+# Pre-establish the session if a fresh, same-tool marker exists from a prior tick, so this
+# process's FIRST call resumes it. TTL-bounded (RALPH_SESSION_MAX_AGE_SECONDS, default 1h)
+# so a long-stale tool session is not blindly resumed.
+_restore_session() {
+    [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] || return 0
+    command_exists jq || return 0
+    local tool="$1" f mtool mat now ttl age
+    f="$(_session_marker_path)"; [[ -f "$f" ]] || return 0
+    mtool=$(jq -r '.tool // ""' "$f" 2>/dev/null)
+    mat=$(jq -r '.established_at // 0' "$f" 2>/dev/null)
+    [[ "$mtool" == "$tool" ]] || return 0
+    [[ "$mat" =~ ^[0-9]+$ ]] || return 0
+    now=$(date -u +%s 2>/dev/null || echo 0)
+    ttl="${RALPH_SESSION_MAX_AGE_SECONDS:-3600}"
+    [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=3600
+    age=$(( now - mat ))
+    if [[ "$now" -gt 0 && "$age" -ge 0 && "$age" -le "$ttl" ]]; then
+        _RALPH_SESSION_ESTABLISHED=1
+        log_info "Resuming ${tool} session from a prior tick (age ${age}s)"
+    fi
+    return 0
+}
+
 # Whether THIS call should resume the tool's prior conversation: opt-in (RALPH_RESUME_SESSION)
-# AND a session already established this run AND a tool with a safe headless resume.
-# NOTE: the established flag is per-process, so resume only spans iterations of ONE run
-# (not across separate `--once`/cron ticks). It's tool-agnostic, which is safe only because
-# TOOL is fixed for a run — revisit if per-iteration tool switching is ever added.
+# AND a session already established (this run, or restored from a prior tick) AND a tool with
+# a safe headless resume. Tool-agnostic, which is safe only because TOOL is fixed for a run —
+# revisit if per-iteration tool switching is ever added.
 _should_resume() {
     [[ "${RALPH_RESUME_SESSION:-0}" == "1" && "${_RALPH_SESSION_ESTABLISHED:-0}" == "1" ]] || return 1
     case "$1" in claude|opencode|agy) return 0 ;; *) return 1 ;; esac
@@ -1370,7 +1416,11 @@ run_ai_tool() {
         log_success "Iteration $iteration: AI Response Received"
         # A successful call establishes a session the next iteration can --continue.
         # Plain global (run_ai_tool runs in-process across iterations); no need to export.
-        [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]] && _RALPH_SESSION_ESTABLISHED=1
+        # Also persist a marker so a later --once/cron tick can resume this same session.
+        if [[ "${RALPH_RESUME_SESSION:-0}" == "1" ]]; then
+            _RALPH_SESSION_ESTABLISHED=1
+            _persist_session "$tool"
+        fi
     elif [[ -n "$executor_failure_reason" ]]; then
         log_error "Iteration $iteration: AI Tool Failed (executor_failure: $executor_failure_reason; Exit $exit_code)"
     else
@@ -2367,6 +2417,10 @@ main() {
     RUN_START_TS=$(date +%s); export RUN_START_TS
     local CONSECUTIVE_FAILURES=0
     local DRAIN_STREAK=0
+
+    # Cross-tick session continuity: if a fresh same-tool session marker exists from a prior
+    # --once/cron tick, resume it on this process's first call (opt-in; TTL-bounded).
+    _restore_session "${TOOL:-}"
 
     # Determine starting iteration
     local start_iter=1
