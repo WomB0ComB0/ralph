@@ -128,12 +128,13 @@ mine_feed() {
         local sev="medium"
         [[ "$kind" == "no_progress" || "$kind" == "token_blowup" ]] && sev="low"
         [[ "$reg" == "true" ]] && sev="high"
-        record_signal ledger_failure \
+        if record_signal ledger_failure \
             "Recurring $kind failures on $tool/$tier ($freq iters, $runs runs)" \
             "ledger failure theme $theme" \
             "$(_mine_action "$kind")" \
-            "mined,$kind" "$sev" "mine" >/dev/null 2>&1 || true
-        fed=$((fed+1))
+            "mined,$kind" "$sev" "mine" >/dev/null 2>&1; then
+            fed=$((fed+1))   # count only signals actually recorded, so the reported total can't overstate
+        fi
     done <<< "$qualifying"
     printf 'mine: fed %s signal(s)\n' "$fed"
     return 0
