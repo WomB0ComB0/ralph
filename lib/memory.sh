@@ -91,3 +91,26 @@ memory_ground() {
     synapse_ground "$query" 2>/dev/null || return 0
     return 0
 }
+
+# CLI entrypoint: ralph memory [--sync] [--ground <query>]
+handle_memory_command() {
+    local do_sync=0 ground_q="" saw=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --sync)   do_sync=1; saw=1 ;;
+            --ground) ground_q="${2:-}"; saw=1; shift ;;
+            -h|--help) saw=0; break ;;
+            *) log_warning "memory: ignoring unknown argument: $1" ;;
+        esac
+        shift
+    done
+    if [[ "$saw" == "0" ]]; then
+        printf 'usage: ralph memory [--sync] [--ground <query>]\n'
+        printf '  --sync            ingest verified skills + mined themes into Synapse (idempotent)\n'
+        printf '  --ground <query>  print a <synapse_context> block for <query> (fail-open)\n'
+        return 0
+    fi
+    [[ "$do_sync" == "1" ]] && memory_sync
+    [[ -n "$ground_q" ]] && memory_ground "$ground_q"
+    return 0
+}

@@ -50,6 +50,9 @@ source "$SCRIPT_DIR/lib/jules.sh"
 # shellcheck source=lib/synapse.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/synapse.sh"
+# shellcheck source=lib/memory.sh
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/memory.sh"
 # shellcheck source=lib/resources.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resources.sh"

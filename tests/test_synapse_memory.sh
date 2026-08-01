@@ -78,5 +78,17 @@ out=$(SKILL_DIR="$SKILL_DIR" SIGNAL_DIR="$TMP/sig3" METRICS_FILE="$LEDGER" memor
 eq "unreachable rc 0" "0" "$rc"
 printf '%s' "$out" | grep -q 'synced 0' && ok "no-op when Synapse down" || bad "not a no-op: $out"
 
+echo "== handle_memory_command dispatch =="
+synapse_ping() { return 1; }   # force clean no-op path
+mkdir -p "$TMP/empty"
+o=$(SKILL_DIR="$TMP/empty" SIGNAL_DIR="$TMP/s4" handle_memory_command --sync 2>&1)
+printf '%s' "$o" | grep -q '^memory: synced' && ok "--sync runs memory_sync" || bad "--sync failed: $o"
+o=$(handle_memory_command 2>&1)
+printf '%s' "$o" | grep -qi 'usage' && ok "bare prints usage" || bad "no usage: $o"
+
+echo "== ralph.sh memory subcommand dispatches =="
+e=$(cd "$R" && SKILL_DIR="$TMP/empty" SYNAPSE_URL="http://127.0.0.1:9" ./ralph.sh memory --sync 2>&1)
+printf '%s' "$e" | grep -q '^memory: synced' && ok "ralph.sh memory dispatches" || bad "dispatch failed: $e"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
