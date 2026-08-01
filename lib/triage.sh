@@ -542,12 +542,25 @@ _triage_alert_workflow_context() {
     printf 'workflow:%s\n' "$workflow_path"
 }
 
+# Prepend a Synapse memory-context block (if any) to a fix prompt. Fail-open:
+# any error or empty result yields the original prompt unchanged.
+_triage_ground_prompt() {
+    local query="$1" prompt="$2" block=""
+    declare -F memory_ground >/dev/null && block=$(memory_ground "$query" 2>/dev/null || true)
+    if [[ -n "$block" ]]; then
+        printf '%s\n\n%s' "$block" "$prompt"
+    else
+        printf '%s' "$prompt"
+    fi
+}
+
 # Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
+    prompt=$(_triage_ground_prompt "$title" "$prompt")
     # iteration is referenced by run_ai_tool (status bar); set so the call is set -u safe standalone.
     local default_branch iteration=1 default_rc=0
     default_branch=$(_triage_default_branch "$repo") || default_rc=$?
