@@ -285,7 +285,10 @@ It can also prepare opt-in fixes:
 ./ralph.sh triage --fix-security
 ./ralph.sh triage --resolve-reviews <pr>
 ./ralph.sh triage --suggest --apply
+./ralph.sh triage --tidy --apply          # remove legacy full-body history comments from triage issues
 ```
+
+`--suggest` keeps ONE idempotent digest issue per repo: it edits the body in place when findings change and, only then, posts a compact `+N new, -M resolved` delta comment (never the full digest), so the issue stays quiet when nothing changes. `--tidy` is a one-time cleanup that deletes Ralph's own pre-delta full-body history comments (dry-run by default; leaves human and delta comments untouched).
 
 Triage is scoped by `RALPH_TARGETS` or a `ralph.targets` file. Autofix paths use `ralph/fix-*` branches and are designed to avoid pushing directly to default branches. Untrusted GitHub content (PR review comments, CI logs, code-scanning descriptions) is fenced as data before it enters any prompt, and self-triage can never rewrite Ralph's own control surface (`lib/`, `ralph.sh`, `scripts/`, config/allowlist).
 

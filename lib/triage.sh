@@ -874,6 +874,36 @@ _triage_clean_body() {
     echo "<!-- ralph-triage -->"
 }
 
+# Deterministic TOTAL order over findings (severity-rank desc, then every column).
+# Without this, findings sharing a severity fall back to the gh API's return order,
+# which varies run to run — so the digest body flaps and the issue is edited +
+# commented on every patrol tick even when the finding SET is unchanged.
+_triage_sort_findings() {
+    local sev repo cat summary url
+    while IFS=$'\t' read -r sev repo cat summary url; do
+        [[ -z "$repo" ]] && continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(_triage_sev_rank "$sev")" "$sev" "$repo" "$cat" "$summary" "$url"
+    done | sort -t$'\t' -k1,1rn -k2,2 -k3,3 -k4,4 -k5,5 -k6,6 | cut -f2-
+}
+
+# Extract the triage finding lines from an issue body, checkbox-normalized and
+# sorted, so a human ticking a box does not register as a finding change.
+_triage_finding_set() {
+    grep -E '^- \[[ x]\] ' | sed -E 's/^- \[[ x]\] /- /' | sort
+}
+
+# Build a COMPACT delta comment (never the whole digest) from added/removed lines.
+_triage_delta_comment() {
+    local added="$1" removed="$2" na nr
+    na=$(printf '%s' "$added"   | grep -cE '^- ' || true)
+    nr=$(printf '%s' "$removed" | grep -cE '^- ' || true)
+    printf 'Ralph triage update: +%s new, -%s resolved.\n' "$na" "$nr"
+    [[ -n "$added" ]]   && printf '\n**New:**\n%s\n' "$added"
+    [[ -n "$removed" ]] && printf '\n**Resolved:**\n%s\n' "$removed"
+    printf '\n<!-- ralph-triage-delta -->\n'
+    return 0
+}
+
 # Suggest-only mode: digest a repo's findings into ONE GitHub issue (idempotent — comments an
 # existing open ralph-triage issue rather than spamming). Lower blast radius than autofix→PR:
 # it never touches code. DRY-RUN by default.
@@ -953,6 +983,8 @@ triage_suggest() {
     fi
 
     local title body; title="Ralph triage: $count item(s) needing attention"
+    # Normalize finding order so an unchanged set renders a byte-identical body.
+    if _triage_sort_findings < "$all" > "$all.sorted" 2>/dev/null; then mv -f "$all.sorted" "$all"; else rm -f "$all.sorted"; fi
     body=$(_triage_suggest_body < "$all")
     rm -f "$all"
 
@@ -978,12 +1010,22 @@ triage_suggest() {
             elif [[ "$edit_rc" -ne 0 ]]; then
                 log_error "[$repo] failed to update triage issue #$existing: $edit_out"; return 1
             fi
-            comment_out=$(_triage_gh_or_transient "commenting on triage issue #$existing" "$repo" gh issue comment "$existing" --repo "$repo" --body "$body") || comment_rc=$?
-            if [[ "$comment_rc" -eq 75 ]]; then
-                log_warning "[$repo] deferred triage issue history comment #$existing due to transient GitHub failure."
-                return 0
-            elif [[ "$comment_rc" -ne 0 ]]; then
-                log_error "[$repo] failed to comment on triage issue #$existing: $comment_out"; return 1
+            # Post a COMPACT delta (added/resolved findings), not the whole digest,
+            # and only when the finding set actually changed — so the issue does not
+            # accumulate a long repetitive thread across patrol ticks.
+            local _old _new added removed
+            _old=$(printf '%s\n' "$current_body" | _triage_finding_set)
+            _new=$(printf '%s\n' "$body" | _triage_finding_set)
+            added=$(comm -13 <(printf '%s\n' "$_old") <(printf '%s\n' "$_new") | grep -E '^- ' || true)
+            removed=$(comm -23 <(printf '%s\n' "$_old") <(printf '%s\n' "$_new") | grep -E '^- ' || true)
+            if [[ -n "$added" || -n "$removed" ]]; then
+                comment_out=$(_triage_gh_or_transient "commenting on triage issue #$existing" "$repo" gh issue comment "$existing" --repo "$repo" --body "$(_triage_delta_comment "$added" "$removed")") || comment_rc=$?
+                if [[ "$comment_rc" -eq 75 ]]; then
+                    log_warning "[$repo] deferred triage issue history comment #$existing due to transient GitHub failure."
+                    return 0
+                elif [[ "$comment_rc" -ne 0 ]]; then
+                    log_error "[$repo] failed to comment on triage issue #$existing: $comment_out"; return 1
+                fi
             fi
             log_success "[$repo] updated triage issue #$existing."
         fi
@@ -1002,6 +1044,49 @@ triage_suggest() {
 }
 
 # Orchestrate the read-only triage across the allowlist; record each finding as a signal.
+# One-time cleanup for the pre-delta noise: remove Ralph's OLD full-body triage
+# "history" comments. Scoped to comments authored by THIS gh identity that carry the
+# full `<!-- ralph-triage -->` marker but NOT the `<!-- ralph-triage-delta -->` marker,
+# so human comments and the new compact delta comments are left intact. DRY-RUN default.
+triage_tidy_issue() {
+    local repo="$1" apply="${2:-0}"
+    local num num_rc=0
+    num=$(_triage_gh_or_transient "inspecting triage issues" "$repo" gh issue list --repo "$repo" --state open --search 'ralph-triage in:body' --json number --jq '.[0].number // empty') || num_rc=$?
+    if [[ "$num_rc" -eq 75 ]]; then return 0; elif [[ "$num_rc" -ne 0 ]]; then log_error "[$repo] tidy: failed to find triage issue."; return 1; fi
+    if [[ -z "$num" ]]; then log_info "[$repo] tidy: no open ralph-triage issue."; return 0; fi
+
+    local login login_rc=0
+    login=$(_triage_gh_or_transient "reading gh identity" "$repo" gh api user --jq '.login') || login_rc=$?
+    if [[ "$login_rc" -eq 75 ]]; then return 0; elif [[ "$login_rc" -ne 0 || -z "$login" ]]; then log_error "[$repo] tidy: could not resolve gh identity."; return 1; fi
+
+    local ids ids_rc=0
+    ids=$(_triage_gh_or_transient "listing triage issue comments" "$repo" gh api "repos/$repo/issues/$num/comments" --paginate --jq "[.[] | select(.user.login==\"$login\" and (.body|contains(\"<!-- ralph-triage -->\")) and ((.body|contains(\"<!-- ralph-triage-delta -->\"))|not)) | .id] | .[]") || ids_rc=$?
+    if [[ "$ids_rc" -eq 75 ]]; then return 0; elif [[ "$ids_rc" -ne 0 ]]; then log_error "[$repo] tidy: failed to list comments."; return 1; fi
+
+    local count; count=$(printf '%s' "$ids" | grep -c . || true)
+    if [[ "$count" -eq 0 ]]; then log_success "[$repo#$num] tidy: no legacy history comments to remove."; return 0; fi
+    if [[ "$apply" != "1" ]]; then
+        log_info "[$repo#$num] DRY-RUN — would delete $count legacy full-body history comment(s). Re-run with --apply."
+        return 0
+    fi
+
+    local id removed=0 del_rc
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        del_rc=0
+        _triage_gh_or_transient "deleting comment $id" "$repo" gh api -X DELETE "repos/$repo/issues/comments/$id" >/dev/null || del_rc=$?
+        if [[ "$del_rc" -eq 0 ]]; then
+            removed=$((removed+1))
+        elif [[ "$del_rc" -eq 75 ]]; then
+            log_warning "[$repo#$num] tidy: deferred remaining deletions due to transient GitHub failure."; break
+        else
+            log_error "[$repo#$num] tidy: failed to delete comment $id."
+        fi
+    done <<< "$ids"
+    log_success "[$repo#$num] tidy: removed $removed legacy history comment(s)."
+    return 0
+}
+
 handle_triage_command() {
     # Flags: --fix-ci switches from the read-only report to the CI-autofix path; --apply turns
     # the (default) dry-run into a real clone+fix+PR. Read-only report is the default — no flags.
@@ -1011,6 +1096,7 @@ handle_triage_command() {
             --fix-ci)          mode="fix-ci" ;;
             --fix-security)    mode="fix-security"; [[ "${2:-}" =~ ^[0-9]+$ ]] && { sec_alert="$2"; shift; } ;;
             --suggest)         mode="suggest" ;;
+            --tidy)            mode="tidy" ;;
             --apply)           apply=1 ;;
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
@@ -1042,6 +1128,12 @@ handle_triage_command() {
         [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing the issue(s) only — nothing is created."
         local r
         for r in "${targets[@]}"; do triage_suggest "$r" "$apply" || true; done
+        return 0
+    fi
+    if [[ "$mode" == "tidy" ]]; then
+        [[ "$apply" == "1" ]] || log_warning "DRY-RUN (no --apply): showing what would be removed — no comments are deleted."
+        local r
+        for r in "${targets[@]}"; do triage_tidy_issue "$r" "$apply" || true; done
         return 0
     fi
     if [[ "$mode" == "resolve-reviews" ]]; then
