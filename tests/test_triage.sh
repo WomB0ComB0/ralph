@@ -802,5 +802,19 @@ else
   ok "reap test skipped (no /proc on this host)"
 fi
 
+echo "== _triage_mktemp_workdir clones to a disk-backed dir, honors override, falls back =="
+_wd_base=$(mktemp -d)
+w=$(RALPH_TRIAGE_WORKDIR="$_wd_base/work" _triage_mktemp_workdir)
+{ [[ "$w" == "$_wd_base/work/"* ]] && [[ -d "$w" ]]; } && ok "workdir created under RALPH_TRIAGE_WORKDIR" || bad "not under override: $w"
+[[ -d "$w" ]] && rmdir "$w" 2>/dev/null
+w2=$( unset RALPH_TRIAGE_WORKDIR; XDG_CACHE_HOME="$_wd_base/xdg" _triage_mktemp_workdir )
+{ [[ "$w2" == "$_wd_base/xdg/ralph/work/"* ]] && [[ -d "$w2" ]]; } && ok "default workdir under XDG_CACHE_HOME/ralph/work" || bad "default not disk-backed: $w2"
+[[ -d "$w2" ]] && rmdir "$w2" 2>/dev/null
+w3=$(RALPH_TRIAGE_WORKDIR="/proc/nope/cannot-create" _triage_mktemp_workdir)
+{ [[ -n "$w3" ]] && [[ -d "$w3" ]]; } && ok "falls back to a usable temp dir when base unusable" || bad "no fallback dir: $w3"
+[[ -d "$w3" ]] && rm -rf "$w3" 2>/dev/null
+rm -rf "$_wd_base" 2>/dev/null
+unset _wd_base w w2 w3
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

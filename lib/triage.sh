@@ -583,6 +583,23 @@ _triage_reap_workspace_procs() {
     return 0
 }
 
+# Create a fresh clone workspace on a DISK-BACKED filesystem, not the RAM tmpfs that
+# `mktemp -d` defaults to (/tmp is tmpfs on many hosts). Clones + agent builds
+# (npm install, tsc, cargo) are disk-heavy and RAM-precious, and a full tmpfs makes
+# git checkouts fail with ENOSPC ("unable to write file" / "unable to checkout working
+# tree"). Base dir: $RALPH_TRIAGE_WORKDIR, else $XDG_CACHE_HOME/ralph/work, else
+# ~/.cache/ralph/work. Falls back to the system default `mktemp -d` if that base can't
+# be created/written — placement must never block a fix.
+_triage_mktemp_workdir() {
+    local base="${RALPH_TRIAGE_WORKDIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ralph/work}"
+    local d
+    if mkdir -p "$base" 2>/dev/null && d=$(mktemp -d -p "$base" 2>/dev/null) && [[ -d "$d" ]]; then
+        printf '%s\n' "$d"
+        return 0
+    fi
+    mktemp -d
+}
+
 # Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
@@ -650,7 +667,7 @@ _triage_apply_fix() {
         return "$rc"
     }
     trap '_triage_apply_fix_cleanup' RETURN
-    work=$(mktemp -d) || { log_error "[$repo] mktemp -d failed."; _triage_apply_fix_return 1; return $?; }
+    work=$(_triage_mktemp_workdir) || { log_error "[$repo] workspace creation failed."; _triage_apply_fix_return 1; return $?; }
     lf=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
     of=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
     log_info "[$repo] cloning $base_branch ..."
@@ -861,7 +878,7 @@ triage_resolve_reviews() {
     fi
 
     command_exists git || { log_error "git required for --apply."; return 1; }
-    local work lf of; work=$(mktemp -d); lf=$(mktemp); of=$(mktemp)
+    local work lf of; work=$(_triage_mktemp_workdir); lf=$(mktemp); of=$(mktemp)
     # shellcheck disable=SC2064
     trap "rm -rf '$work' '$lf' '$of'" RETURN
     log_info "[$repo#$pr] cloning $head to address $n conversation(s) ..."
