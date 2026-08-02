@@ -777,5 +777,30 @@ _mt_fail() { [[ "$1" == o/b ]] && return 1; printf 'ok %s\n' "$1"; }
 eq "a failing target does not abort the rest (parallel)" $'ok o/a\nok o/c\nok o/d' "$(RALPH_TRIAGE_CONCURRENCY=2 _triage_map_targets _mt_fail | grep '^ok')"
 unset -f _mt_fn _mt_fn2 _mt_fail; unset targets
 
+echo "== _triage_reap_workspace_procs kills procs rooted in the workspace, spares outsiders =="
+if [[ -d /proc ]]; then
+  _rwp=$(mktemp -d)
+  # A victim whose cwd is INSIDE the workspace (the orphaned-tsc analogue).
+  ( cd "$_rwp" && exec sleep 300 ) & _rwp_victim=$!
+  # A control whose cwd is OUTSIDE (parent of) the workspace — must be spared.
+  ( cd /tmp && exec sleep 300 ) & _rwp_bystander=$!
+  sleep 0.3
+  kill -0 "$_rwp_victim" 2>/dev/null && ok "victim running before reap" || bad "victim failed to start"
+  _triage_reap_workspace_procs "$_rwp"
+  sleep 0.5
+  kill -0 "$_rwp_victim" 2>/dev/null && bad "victim SURVIVED reap (orphan would leak)" || ok "reap killed the workspace-rooted process"
+  kill -0 "$_rwp_bystander" 2>/dev/null && ok "outside process spared" || bad "reap killed an UNRELATED process"
+  # Safety: an empty/root arg must be a no-op (never a system-wide sweep).
+  ( cd /tmp && exec sleep 300 ) & _rwp_safe=$!
+  sleep 0.2
+  _triage_reap_workspace_procs ""; _triage_reap_workspace_procs "/"
+  kill -0 "$_rwp_safe" 2>/dev/null && ok "empty/root arg is a no-op" || bad "reap swept for empty/root arg!"
+  kill "$_rwp_bystander" "$_rwp_safe" 2>/dev/null
+  rm -rf "$_rwp"
+  unset _rwp _rwp_victim _rwp_bystander _rwp_safe
+else
+  ok "reap test skipped (no /proc on this host)"
+fi
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
