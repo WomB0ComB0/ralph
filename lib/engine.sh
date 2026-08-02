@@ -2247,6 +2247,11 @@ main() {
         handle_mine_command "$@"
         exit $?
     fi
+    if [[ "${1:-}" == "memory" ]]; then
+        shift
+        handle_memory_command "$@"
+        exit $?
+    fi
     if [[ "${1:-}" == "resource" ]]; then
         shift
         handle_resource_command "$@"

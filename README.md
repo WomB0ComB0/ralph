@@ -309,6 +309,24 @@ Knobs: `RALPH_MINE_MIN_FREQ` (3), `RALPH_MINE_WINDOW` (50), `RALPH_MINE_BASELINE
 `RALPH_MINE_TOP` (5), `RALPH_MINE_STALL` (3), `RALPH_MINE_TOKEN_P` (95),
 `RALPH_MINE_MAX_LINES` (5000 — caps how many trailing ledger lines are scanned, so the read stays O(N) as `metrics.json` grows).
 
+### `ralph memory` — compounding memory via Synapse
+
+Ralph's verified skills and mined failure themes can compound **across repos** through
+Synapse (the org-brain retrieval service):
+
+- `ralph memory --sync` ingests every verified skill and every qualifying mined theme
+  (`frequency ≥ 3` across `≥ 2` runs) into Synapse as idempotent documents (stable
+  `doc_id`; unchanged items are `replayed`, not re-embedded). The org patrol runs this
+  after each **apply-mode** tick (`suggest-apply`, `fix-ci-apply`, `fix-security-apply`);
+  read-only modes stay side-effect-free.
+- `ralph memory --ground "<query>"` prints a `<synapse_context>` block of prior lessons.
+  Fix agents (CI, security, mine-propose) are automatically grounded with this context
+  before they act, via `_triage_apply_fix`.
+
+Everything is **fail-open**: if Synapse is unset, unreachable, or erroring, `memory`
+does nothing and never blocks a run. Knowledge stays scoped to the current
+`SYNAPSE_TENANT`, respecting Synapse's multi-tenant isolation.
+
 ### Public Org Patrol
 
 Ralph can run a scheduled local patrol for any GitHub org that the authenticated `gh` user can read. The patrol refreshes a public repo allowlist, checks Synapse, and runs GitHub triage:

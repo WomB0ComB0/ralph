@@ -162,6 +162,14 @@ grep -q 'triage --verify-fixes' "$RALPH_CALL_LOG" && ok "apply-mode patrol runs 
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check --no-resource-history >/dev/null 2>&1
 grep -q 'triage --verify-fixes' "$RALPH_CALL_LOG" && bad "report mode wrongly ran verify-fixes" || ok "report mode does not verify"
 
+echo "== org-patrol syncs ralph memory in apply modes only =="
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode suggest-apply --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check --no-resource-history >/dev/null 2>&1
+grep -q 'memory --sync' "$RALPH_CALL_LOG" && ok "apply-mode patrol runs memory --sync" || bad "memory --sync not run: $(cat "$RALPH_CALL_LOG")"
+: > "$RALPH_CALL_LOG"
+RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode report --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check --no-resource-history >/dev/null 2>&1
+grep -q 'memory --sync' "$RALPH_CALL_LOG" && bad "report mode wrongly ran memory --sync" || ok "report mode does not sync memory"
+
 RALPH_BIN="$TMP/ralph.sh" "$R/scripts/org-patrol" --mode bogus --org demo-org --targets-file "$TMP/patrol.targets" --no-synapse-check >"$TMP/patrol-invalid.out" 2>&1; rc=$?
 [[ "$rc" -ne 0 ]] && ok "invalid patrol mode rejected" || bad "invalid patrol mode accepted"
 tail -n 1 "$summary_file" | jq -e '.result.ok == false and .result.exit_code == 2 and .timing.elapsed_source == "monotonic" and (.elapsed_seconds | type == "number") and (.wall_elapsed_seconds | type == "number") and .synapse.enabled == false and .synapse.rc == null and .triage.rc == null and .resource.band == null and (.log_file | test("/state/ralph/demo-org/patrol-"))' >/dev/null && ok "failed patrol still records soak summary exit status" || bad "bad failed-patrol soak summary: $(tail -n 1 "$summary_file" 2>/dev/null)"

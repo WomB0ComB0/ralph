@@ -143,6 +143,16 @@ synapse_run_start()    { _synapse_call POST /runs.start    "$(_syn_principal "${
 # POST /runs.resume <json> [principal]
 synapse_run_resume()   { _synapse_call POST /runs.resume   "$(_syn_principal "${2:-}")" "$1"; }
 
+# POST /documents.ingest — ingest one document. Injects tenant_id; expects the
+# caller to supply doc_id/source_uri/title/content/metadata/owners. Prints the raw
+# response JSON (contains {"status":"ingested"|"replayed", ...}); returns _synapse_call rc.
+_synapse_ingest_doc() {
+    local doc="$1" principal; principal="$(_syn_principal)"
+    command_exists jq || return 1
+    local body; body=$(jq -c --arg t "$(_syn_tenant)" '. + {tenant_id:$t}' <<<"$doc") || return 1
+    _synapse_call POST /documents.ingest "$principal" "$body"
+}
+
 # --- per-agent LIVE TEST ----------------------------------------------------------------------------
 
 # One end-to-end smoke step. Reads caller locals (U, why) via bash dynamic scope. Args: name jq method path [body]

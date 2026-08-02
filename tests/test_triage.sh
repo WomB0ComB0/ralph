@@ -777,6 +777,14 @@ _mt_fail() { [[ "$1" == o/b ]] && return 1; printf 'ok %s\n' "$1"; }
 eq "a failing target does not abort the rest (parallel)" $'ok o/a\nok o/c\nok o/d' "$(RALPH_TRIAGE_CONCURRENCY=2 _triage_map_targets _mt_fail | grep '^ok')"
 unset -f _mt_fn _mt_fn2 _mt_fail; unset targets
 
+echo "== _triage_ground_prompt prepends memory context when present =="
+memory_ground() { printf '<synapse_context>\n- prior lesson\n</synapse_context>\n'; }
+p=$(_triage_ground_prompt "fix the CI typecheck" "original prompt body")
+printf '%s' "$p" | grep -q '<synapse_context>' && ok "context prepended" || bad "no context: $p"
+printf '%s' "$p" | grep -q 'original prompt body' && ok "original prompt retained" || bad "prompt lost: $p"
+memory_ground() { return 0; }
+p=$(_triage_ground_prompt "q" "just the body")
+eq "empty ground leaves prompt intact" "just the body" "$p"
 echo "== _triage_reap_workspace_procs kills procs rooted in the workspace, spares outsiders =="
 if [[ -d /proc ]]; then
   _rwp=$(mktemp -d)
