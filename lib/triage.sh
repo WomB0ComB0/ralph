@@ -552,6 +552,8 @@ _triage_ground_prompt() {
     else
         printf '%s' "$prompt"
     fi
+}
+
 # Kill any lingering process whose CWD is inside $dir, so removing the throwaway
 # workspace never yanks the filesystem out from under a still-running process. The
 # fix agent may run verify commands (e.g. `timeout 60 npx tsc`) that leak grandchild
