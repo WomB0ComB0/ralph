@@ -552,6 +552,62 @@ _triage_ground_prompt() {
     else
         printf '%s' "$prompt"
     fi
+# Kill any lingering process whose CWD is inside $dir, so removing the throwaway
+# workspace never yanks the filesystem out from under a still-running process. The
+# fix agent may run verify commands (e.g. `timeout 60 npx tsc`) that leak grandchild
+# processes: `timeout` signals npx, npx does not forward it to the tsc it spawned, so
+# tsc gets reparented to init OUTSIDE the agent's process group — our process-group
+# kill misses it. Left running with its CWD deleted, such a type-check on a large
+# monorepo balloons to many GB. Reaping by CWD catches exactly those orphans
+# regardless of process group. Linux-only (needs /proc); a no-op elsewhere.
+# HARD SAFETY: an empty or root $dir is a no-op — never a system-wide sweep.
+_triage_reap_workspace_procs() {
+    local dir="${1:-}"
+    [[ -n "$dir" ]] || return 0
+    # Canonicalize; bail on anything that resolves to empty or "/".
+    local canon; canon=$(cd "$dir" 2>/dev/null && pwd -P) || return 0
+    [[ -n "$canon" && "$canon" != "/" ]] || return 0
+    [[ -d /proc ]] || return 0
+    local self=$$ pid cwd d
+    local victims=()
+    for d in /proc/[0-9]*; do
+        pid=${d#/proc/}
+        [[ "$pid" == "$self" || "$pid" == 1 ]] && continue
+        cwd=$(readlink "$d/cwd" 2>/dev/null) || continue
+        cwd=${cwd% (deleted)}   # /proc appends " (deleted)" once the dir is gone
+        case "$cwd" in
+            "$canon"|"$canon"/*) victims+=("$pid") ;;
+        esac
+    done
+    [[ ${#victims[@]} -gt 0 ]] || return 0
+    log_warning "[reap] terminating ${#victims[@]} orphaned process(es) rooted in $canon before cleanup"
+    kill -TERM "${victims[@]}" 2>/dev/null || true
+    local waited=0 alive
+    while [[ $waited -lt 3 ]]; do
+        alive=0
+        for pid in "${victims[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+        [[ "$alive" -eq 0 ]] && break
+        sleep 1; waited=$((waited+1))
+    done
+    for pid in "${victims[@]}"; do kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true; done
+    return 0
+}
+
+# Create a fresh clone workspace on a DISK-BACKED filesystem, not the RAM tmpfs that
+# `mktemp -d` defaults to (/tmp is tmpfs on many hosts). Clones + agent builds
+# (npm install, tsc, cargo) are disk-heavy and RAM-precious, and a full tmpfs makes
+# git checkouts fail with ENOSPC ("unable to write file" / "unable to checkout working
+# tree"). Base dir: $RALPH_TRIAGE_WORKDIR, else $XDG_CACHE_HOME/ralph/work, else
+# ~/.cache/ralph/work. Falls back to the system default `mktemp -d` if that base can't
+# be created/written — placement must never block a fix.
+_triage_mktemp_workdir() {
+    local base="${RALPH_TRIAGE_WORKDIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ralph/work}"
+    local d
+    if mkdir -p "$base" 2>/dev/null && d=$(mktemp -d -p "$base" 2>/dev/null) && [[ -d "$d" ]]; then
+        printf '%s\n' "$d"
+        return 0
+    fi
+    mktemp -d
 }
 
 # Shared apply engine for every autofix mode: DRY-RUN prints the plan; --apply clones $base_branch
@@ -606,6 +662,10 @@ _triage_apply_fix() {
     # early-return path must clear the trap before the locals disappear under set -u.
     local work="" lf="" of=""
     _triage_apply_fix_cleanup() {
+        # Reap orphaned agent processes rooted in the workspace BEFORE deleting it,
+        # so a leaked verify command (e.g. an orphaned `tsc`) can't survive with a
+        # deleted CWD and balloon in memory.
+        [[ -n "${work:-}" ]] && _triage_reap_workspace_procs "$work"
         [[ -n "${work:-}" ]] && rm -rf "$work"
         [[ -n "${lf:-}" ]] && rm -f "$lf"
         [[ -n "${of:-}" ]] && rm -f "$of"
@@ -618,7 +678,7 @@ _triage_apply_fix() {
         return "$rc"
     }
     trap '_triage_apply_fix_cleanup' RETURN
-    work=$(mktemp -d) || { log_error "[$repo] mktemp -d failed."; _triage_apply_fix_return 1; return $?; }
+    work=$(_triage_mktemp_workdir) || { log_error "[$repo] workspace creation failed."; _triage_apply_fix_return 1; return $?; }
     lf=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
     of=$(mktemp)     || { log_error "[$repo] mktemp failed.";    _triage_apply_fix_return 1; return $?; }
     log_info "[$repo] cloning $base_branch ..."
@@ -829,7 +889,7 @@ triage_resolve_reviews() {
     fi
 
     command_exists git || { log_error "git required for --apply."; return 1; }
-    local work lf of; work=$(mktemp -d); lf=$(mktemp); of=$(mktemp)
+    local work lf of; work=$(_triage_mktemp_workdir); lf=$(mktemp); of=$(mktemp)
     # shellcheck disable=SC2064
     trap "rm -rf '$work' '$lf' '$of'" RETURN
     log_info "[$repo#$pr] cloning $head to address $n conversation(s) ..."

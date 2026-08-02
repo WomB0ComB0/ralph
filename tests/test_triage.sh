@@ -785,6 +785,44 @@ printf '%s' "$p" | grep -q 'original prompt body' && ok "original prompt retaine
 memory_ground() { return 0; }
 p=$(_triage_ground_prompt "q" "just the body")
 eq "empty ground leaves prompt intact" "just the body" "$p"
+echo "== _triage_reap_workspace_procs kills procs rooted in the workspace, spares outsiders =="
+if [[ -d /proc ]]; then
+  _rwp=$(mktemp -d)
+  # A victim whose cwd is INSIDE the workspace (the orphaned-tsc analogue).
+  ( cd "$_rwp" && exec sleep 300 ) & _rwp_victim=$!
+  # A control whose cwd is OUTSIDE (parent of) the workspace — must be spared.
+  ( cd /tmp && exec sleep 300 ) & _rwp_bystander=$!
+  sleep 0.3
+  kill -0 "$_rwp_victim" 2>/dev/null && ok "victim running before reap" || bad "victim failed to start"
+  _triage_reap_workspace_procs "$_rwp"
+  sleep 0.5
+  kill -0 "$_rwp_victim" 2>/dev/null && bad "victim SURVIVED reap (orphan would leak)" || ok "reap killed the workspace-rooted process"
+  kill -0 "$_rwp_bystander" 2>/dev/null && ok "outside process spared" || bad "reap killed an UNRELATED process"
+  # Safety: an empty/root arg must be a no-op (never a system-wide sweep).
+  ( cd /tmp && exec sleep 300 ) & _rwp_safe=$!
+  sleep 0.2
+  _triage_reap_workspace_procs ""; _triage_reap_workspace_procs "/"
+  kill -0 "$_rwp_safe" 2>/dev/null && ok "empty/root arg is a no-op" || bad "reap swept for empty/root arg!"
+  kill "$_rwp_bystander" "$_rwp_safe" 2>/dev/null
+  rm -rf "$_rwp"
+  unset _rwp _rwp_victim _rwp_bystander _rwp_safe
+else
+  ok "reap test skipped (no /proc on this host)"
+fi
+
+echo "== _triage_mktemp_workdir clones to a disk-backed dir, honors override, falls back =="
+_wd_base=$(mktemp -d)
+w=$(RALPH_TRIAGE_WORKDIR="$_wd_base/work" _triage_mktemp_workdir)
+{ [[ "$w" == "$_wd_base/work/"* ]] && [[ -d "$w" ]]; } && ok "workdir created under RALPH_TRIAGE_WORKDIR" || bad "not under override: $w"
+[[ -d "$w" ]] && rmdir "$w" 2>/dev/null
+w2=$( unset RALPH_TRIAGE_WORKDIR; XDG_CACHE_HOME="$_wd_base/xdg" _triage_mktemp_workdir )
+{ [[ "$w2" == "$_wd_base/xdg/ralph/work/"* ]] && [[ -d "$w2" ]]; } && ok "default workdir under XDG_CACHE_HOME/ralph/work" || bad "default not disk-backed: $w2"
+[[ -d "$w2" ]] && rmdir "$w2" 2>/dev/null
+w3=$(RALPH_TRIAGE_WORKDIR="/proc/nope/cannot-create" _triage_mktemp_workdir)
+{ [[ -n "$w3" ]] && [[ -d "$w3" ]]; } && ok "falls back to a usable temp dir when base unusable" || bad "no fallback dir: $w3"
+[[ -d "$w3" ]] && rm -rf "$w3" 2>/dev/null
+rm -rf "$_wd_base" 2>/dev/null
+unset _wd_base w w2 w3
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
