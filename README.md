@@ -4,6 +4,11 @@ Ralph is a long-running autonomous agent loop for software projects. It keeps an
 
 Use Ralph when you want an agent to keep working from a persistent plan instead of a single prompt.
 
+> **Contributing or curious about the *why*?** See [docs/DESIGN.md](docs/DESIGN.md) — the
+> design decisions, the reasoning, the recurring principles (fail-open vs fail-closed,
+> verification gates, the "autonomous up to the merge" trust boundary), and the lessons
+> learned the hard way.
+
 ## What Ralph Does
 
 - Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, `jules-cli`, and GitHub Copilot.
