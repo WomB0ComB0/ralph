@@ -444,6 +444,26 @@ unset CI ANTHROPIC_BASE_URL 2>/dev/null
 ( _apply_tool_env opencode ); [[ -z "${CI:-}" ]] && ok "opencode CI=true does not leak to parent" || bad "CI leaked to parent"
 ( _apply_tool_env claude ); [[ -z "${ANTHROPIC_BASE_URL:-}" ]] && ok "claude ANTHROPIC_BASE_URL does not leak" || bad "ANTHROPIC_BASE_URL leaked to parent"
 
+echo "== opencode scratch (TMPDIR) is kept OFF the RAM tmpfs =="
+# opencode writes all session temp under \$TMPDIR/opencode (node os.tmpdir()). On
+# hosts where /tmp is a RAM tmpfs, sessions accumulate (not always reaped) until
+# /tmp exhausts; opencode's writes then fail with ENOSPC and it dies emitting zero
+# output -> autofix records "provider_failure: tool exited 74". _apply_tool_env must
+# point TMPDIR at a disk-backed dir with room, honoring RALPH_TMPDIR, without leaking.
+_tt_base="$(mktemp -d)/ralph-tmp"
+tmp_in_subshell=$( unset TMPDIR; RALPH_TMPDIR="$_tt_base" _apply_tool_env opencode; printf '%s' "${TMPDIR:-UNSET}" )
+[[ "$tmp_in_subshell" == "$_tt_base" ]] && ok "opencode TMPDIR honors RALPH_TMPDIR override" || bad "opencode TMPDIR not RALPH_TMPDIR (got: $tmp_in_subshell)"
+[[ -d "$_tt_base" ]] && ok "opencode TMPDIR base is created" || bad "opencode TMPDIR base not created"
+# default (no RALPH_TMPDIR / XDG_CACHE_HOME) must derive from HOME/.cache — a disk
+# path on the real host, never the bare system /tmp. Assert the exact derivation.
+_tt_home="$(mktemp -d)"
+def_tmp=$( unset TMPDIR RALPH_TMPDIR XDG_CACHE_HOME; HOME="$_tt_home"; _apply_tool_env opencode; printf '%s' "${TMPDIR:-UNSET}" )
+[[ "$def_tmp" == "$_tt_home/.cache/ralph/tmp" ]] && ok "opencode default TMPDIR derives from HOME/.cache/ralph/tmp" || bad "opencode default TMPDIR unexpected ($def_tmp)"
+rm -rf "$_tt_home"
+_tt_before="${TMPDIR:-UNSET}"; ( RALPH_TMPDIR="$_tt_base" _apply_tool_env opencode ) >/dev/null 2>&1; _tt_after="${TMPDIR:-UNSET}"
+[[ "$_tt_before" == "$_tt_after" ]] && ok "opencode TMPDIR change does not leak to parent" || bad "TMPDIR leaked to parent ($_tt_before -> $_tt_after)"
+rm -rf "${_tt_base%/ralph-tmp}"
+
 echo "== capture: stderr -> log only; stdout (the answer) -> output_file =="
 cdir=$(mktemp -d); lf="$cdir/log"; of="$cdir/out"
 # exact redirection run_ai_tool uses: 2>>log | tee -a log > out
