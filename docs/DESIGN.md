@@ -98,6 +98,18 @@ command output, not adjectives. This document's companion discipline is: never s
 The loop is: **ground → run the tool under a supervised boundary → validate → analyze →
 persist or correct → repeat**, until a completion gate opens or a limit is hit.
 
+```mermaid
+flowchart TD
+    G["Ground<br/>instructions + tasks + git diff + signals/memory"] --> R["Run AI tool<br/>under supervised process boundary"]
+    R --> V["Validate<br/>run declared verification commands"]
+    V --> A{"Progress? lazy? looping?"}
+    A -->|"no-op / repeated loop"| RX["Inject corrective<br/>(reflexion) prompt"]
+    RX --> G
+    A -->|"made progress"| C{"Completion gate<br/>tasks closed + verify pass + quality gate?"}
+    C -->|"not yet"| G
+    C -->|"earned"| DONE(["Run completed"])
+```
+
 ### 2.1 Grounding
 Each iteration re-grounds the agent in the instructions file (`AGENTS.md`/`CLAUDE.md`),
 the ready Beads tasks, `git diff`, run artifacts, and prior signals/memory. **Reasoning:**
@@ -165,6 +177,18 @@ decision.
   **bounded** (`RALPH_MINE_MAX_LINES`) because the ledger grows unbounded across runs
   (§1.7).
 
+A candidate skill is not trusted until it has *earned* it — the verification gate as a
+state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> candidate: a resolved signal becomes a candidate fix
+    candidate --> verified: survived the probation window (signal never regressed)
+    candidate --> rejected: signal regressed during probation
+    verified --> [*]: promoted — grounds future runs + eligible for Synapse ingest
+    rejected --> [*]: discarded
+```
+
 The pipeline is a ratchet: problems compound into signals, signals into verified skills,
 skills into guidance the next run is grounded in.
 
@@ -185,6 +209,24 @@ them.**
 Everything in §3 is *per-repository local JSON*. A lesson learned patrolling one repo
 could never inform another. The Synapse bridge (`lib/memory.sh`, `ralph memory`) closes
 that loop.
+
+```mermaid
+flowchart LR
+    subgraph local["Per-repo local memory (§3)"]
+        SK["Verified skills"]
+        TH["Mined themes<br/>(freq ≥ 3, ≥ 2 runs)"]
+    end
+    subgraph syn["Synapse — org brain, per-tenant (RLS)"]
+        DOC["Idempotent documents<br/>stable doc_id → unchanged = replayed"]
+    end
+    SK -->|"ralph memory --sync (verified-only)"| DOC
+    TH -->|"qualifying-only"| DOC
+    DOC -->|"memory_ground: retrieve prior lessons"| FIX["Fix agents grounded<br/>before they act"]
+    FIX -.->|"new signals / failures"| local
+```
+
+*Fail-open:* every arrow above is best-effort — if Synapse is unset or down, the bridge
+is inert and the loop proceeds unchanged.
 
 - **Ingest:** `ralph memory --sync` pushes **verified** skills and **qualifying** mined
   themes into Synapse (an org-brain retrieval service) as **idempotent documents** (stable
@@ -232,6 +274,22 @@ invariants (§1.6) are enforced *once* for all of them:
 - On cleanup, **reap any process rooted in the workspace** before deleting it
   (`_triage_reap_workspace_procs`), then remove the workspace.
 
+```mermaid
+flowchart TD
+    F["Finding<br/>(CI red / security alert)"] --> D{"Open ralph-fix PR<br/>already exists?"}
+    D -- "yes (marker found)" --> SKIP(["Skip — idempotent"])
+    D -- "can't confirm (transient)" --> DEFER(["Defer — fail closed"])
+    D -- "no" --> CL["Clone base branch to<br/>DISK-backed workspace"]
+    CL --> GR["Ground prompt with<br/>Synapse memory"]
+    GR --> AG["Run fix agent"]
+    AG --> SO["Keep SOURCE-ONLY<br/>(discard dep/lockfile/CI churn)"]
+    SO --> CH{"Tree changed?"}
+    CH -- "no" --> RP
+    CH -- "yes" --> PU["Push ralph/fix-* branch<br/>(never default) + marker-stamped PR"]
+    PU --> RP["Reap orphaned<br/>workspace processes"]
+    RP --> RM(["Delete workspace"])
+```
+
 Concentrating all of this in one function is deliberate: safety invariants enforced in one
 place cannot be forgotten by one caller.
 
@@ -262,6 +320,21 @@ boundary sits.** The answer:
 Ralph observes → decides what to fix → fixes → verifies → opens a PR unattended, on an
 explicit allowlist. Then it **stops** — at the merge, and at anything security-sensitive
 or outward-facing. A human merges.
+
+```mermaid
+flowchart LR
+    subgraph auto["🤖 Autonomous — unattended, on a 30-min timer"]
+        direction LR
+        OBS["Observe<br/>(patrol the allowlist)"] --> DEC["Decide<br/>what to fix"]
+        DEC --> FIX["Fix<br/>(source-only, ralph/fix-* branch)"]
+        FIX --> VER["Verify<br/>(CI green + mergeable?)"]
+        VER --> LBL["Label<br/>ralph-ready"]
+    end
+    subgraph human["👤 Human"]
+        MRG["Review + click Merge"]
+    end
+    LBL ==>|"STOP at the merge button"| MRG
+```
 
 **Reasoning:** the merge is where an autonomous mistake becomes durable and hard to
 reverse. Keeping a human on exactly that button preserves the entire safety posture while
