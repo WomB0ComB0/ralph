@@ -154,6 +154,22 @@ jq '{run_id, status, reason, phase, heartbeat_at, heartbeat_sequence, current_it
 | `failed` | A model, provider, stall, budget, or unexpected process failure stopped the run. |
 | `interrupted` | HUP, INT, TERM, or a stale active manifest from an unclean exit. |
 
+```mermaid
+stateDiagram-v2
+    [*] --> initializing
+    initializing --> running
+    running --> completed: gates passed / backlog drained
+    running --> paused: --once handoff
+    running --> incomplete: iteration ceiling reached
+    running --> failed: model / provider / stall / budget failure
+    running --> interrupted: HUP / INT / TERM / stale manifest
+    paused --> running: resumed
+    completed --> [*]
+    incomplete --> [*]
+    failed --> [*]
+    interrupted --> [*]
+```
+
 Writes use same-directory temporary files and atomic renames. Heartbeat replacements are serialized, and `heartbeat_sequence` starts at `0` and increments exactly once for each persisted heartbeat. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected`, preserves its final heartbeat sequence, and records the recovering run ID.
 
 ### Executor Boundaries
@@ -221,6 +237,22 @@ Supported AI tools:
 ```
 
 ### Signals, Skills, and Lint
+
+Ralph's memory is a **ratchet**: recurring problems compound into deduped *signals*,
+signals that stay resolved become *candidate* skills, candidates that survive a probation
+window become **verified** skills, and failure themes are mined across the whole run
+ledger. Verified knowledge grounds every future run — so Ralph gets better at your project
+the longer it runs.
+
+```mermaid
+flowchart LR
+    P["Recurring problem"] --> S["Signal<br/>(deduped by theme)"]
+    S -->|"stays resolved"| K["Candidate skill"]
+    K -->|"survives probation"| V["Verified skill"]
+    LG["Run ledger"] --> M["Mine<br/>(cross-run failure themes)"]
+    M --> S
+    V -->|"grounds the next run"| P
+```
 
 ```bash
 ./ralph.sh signal ls
@@ -294,6 +326,21 @@ It can also prepare opt-in fixes:
 ./ralph.sh triage --resolve-reviews <pr>
 ./ralph.sh triage --suggest --apply
 ./ralph.sh triage --tidy --apply          # remove legacy full-body history comments from triage issues
+```
+
+**Autonomous up to the merge.** In apply modes (typically on the [org patrol](#public-org-patrol)),
+Ralph opens verified `ralph/fix-*` PRs unattended and labels the green, mergeable ones
+`ralph-ready` — then **stops**. It never merges, never touches a default branch, and only
+ever writes source-only changes on an allowlist. The merge stays your call.
+
+```mermaid
+flowchart LR
+    subgraph auto["🤖 Autonomous — allowlisted, unattended"]
+        direction LR
+        O["Observe<br/>red CI"] --> X["Fix on ralph/fix-*<br/>(source-only)"]
+        X --> V["Verify<br/>green + mergeable"] --> R["Label<br/>ralph-ready"]
+    end
+    R ==>|"⛔ never merges"| H["👤 You<br/>review + merge"]
 ```
 
 `--suggest` keeps ONE idempotent digest issue per repo: it edits the body in place when findings change and, only then, posts a compact `+N new, -M resolved` delta comment (never the full digest), so the issue stays quiet when nothing changes. `--tidy` is a one-time cleanup that deletes Ralph's own pre-delta full-body history comments (dry-run by default; leaves human and delta comments untouched).
