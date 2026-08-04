@@ -837,5 +837,29 @@ prov_rc=0
 ) || prov_rc=$?
 eq "agent failure returns the classified provider-failure rc" "69" "$prov_rc"
 
+echo "== autofix circuit-breaker (sequential) =="
+_bk_all_fail() { printf 'call %s\n' "$1" >>"$BK_LOG"; return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}"; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+eq "breaker stops after the threshold (3 calls, not 4)" 3 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_mixed() { printf 'call %s\n' "$1" >>"$BK_LOG"; case "$1" in o/c) return 0;; *) return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}";; esac; }
+targets=(o/a o/b o/c o/d o/e); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_mixed >/dev/null 2>&1
+eq "a success resets the consecutive counter (all 5 run)" 5 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_err() { printf 'call %s\n' "$1" >>"$BK_LOG"; return 1; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_err >/dev/null 2>&1
+eq "non-provider errors do not trip the breaker (all 4 run)" 4 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+targets=(o/a o/b o/c o/d); BK_SIG=$(mktemp -d)
+SIGNAL_DIR="$BK_SIG" RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+grep -rql 'autofix_circuit_open' "$BK_SIG" 2>/dev/null && ok "breaker records an autofix_circuit_open signal" || bad "no autofix_circuit_open signal in $BK_SIG"
+rm -rf "$BK_SIG"; unset -f _bk_all_fail _bk_mixed _bk_err
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

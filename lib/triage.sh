@@ -1255,7 +1255,23 @@ _triage_map_targets() {
     [[ "$conc" =~ ^[0-9]+$ && "$conc" -ge 1 ]] || conc=1
     local r
     if [[ "$conc" -eq 1 ]]; then
-        for r in "${targets[@]}"; do "$fn" "$r" ${extra[@]+"${extra[@]}"} || true; done
+        local _consec=0 _rc _thr="${RALPH_AUTOFIX_BREAKER_THRESHOLD:-3}"
+        [[ "$_thr" =~ ^[0-9]+$ && "$_thr" -ge 1 ]] || _thr=3
+        for r in "${targets[@]}"; do
+            _rc=0
+            "$fn" "$r" ${extra[@]+"${extra[@]}"} || _rc=$?
+            if [[ "$_rc" -eq "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-69}" ]]; then
+                _consec=$((_consec + 1))
+                if [[ "$_consec" -ge "$_thr" ]]; then
+                    log_error "autofix circuit-breaker: $_consec consecutive provider failures — likely environmental (e.g. exhausted scratch fs, auth, connectivity), not a per-repo bug. Skipping remaining autofix targets this run."
+                    declare -F record_signal >/dev/null 2>&1 && \
+                        record_signal autofix_circuit_open "autofix circuit-breaker tripped after $_consec consecutive provider failures" "the agent provider failed to produce a usable result on $_consec repos in a row" "inspect the provider/environment (scratch filesystem, auth, connectivity) before the next run" "triage,autofix" high "triage" >/dev/null 2>&1 || true
+                    break
+                fi
+            else
+                _consec=0
+            fi
+        done
         return 0
     fi
     local tmpdir
