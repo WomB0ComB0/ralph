@@ -1,4 +1,4 @@
-# Autofix circuit-breaker + scratch-filesystem resource check
+# Autofix resilience: scratch-fs monitor + circuit-breaker + quality gate
 
 **Date:** 2026-08-03
 **Status:** Approved (design)
@@ -20,9 +20,24 @@ behind a green dashboard:
    *environmental* fault common to every repo produced 177 identical silent
    failures instead of one loud "stop, this is the environment" signal.
 
-PR #69 fixes the root cause. This change makes the **class** of failure
+PR #69 fixes the root cause. Parts A and B make the **class** of failure
 observable and self-limiting, so a future environmental fault surfaces on the
 first run instead of churning invisibly.
+
+A separate weakness surfaced when the loop *did* start producing PRs again:
+**fix quality is highly variable**. Hand-review of three `ralph-ready` PRs
+found one surgical, correct fix (viz #143: a one-line `bun.lock` re-sync to a
+patched `postcss`) alongside two that reached green CI without fixing anything:
+
+- **dotnet-sdk #84** — 910 files / +29k lines, almost entirely committed
+  `bin/Release` + `obj/Release` **build artifacts**, "resolving" a
+  duplicate-code check by brute force.
+- **docs #116** — a **new, empty `.lycheecache`** for a "broken external links"
+  failure: it suppresses/caches the check without repairing a single link.
+
+The trust boundary (human merges) caught these, but nothing in the loop flags
+them. Part C adds a quality gate so bad-but-green fixes are rejected before a PR
+is ever opened.
 
 Non-goals: cross-tool (opencode→claude) provider fallback — it would not help a
 shared-`/tmp` fault (all tools write scratch there) and is out of scope. A
@@ -114,7 +129,50 @@ that internal meaning at the loop boundary. Implementation defines
 `triage_autofix_ci` maps only the `provider_failure` outcome to it, and that the
 dedup path returns a different, non-tripping code. Pick an unused code in the
 64–113 `sysexits` range (candidate: 69 `EX_UNAVAILABLE`); the constant, not the
-literal, is what the loop compares.
+literal, is what the loop compares. Part C adds a second, distinct constant
+`RALPH_TRIAGE_RC_QUALITY_REJECT` — the two must not collide with each other or
+with the internal `rc75`.
+
+## C. Autofix quality gate (`lib/triage.sh`)
+
+`_triage_apply_fix` already keeps a fix "source-only" via a **path denylist**
+(reverting `package.json`, lockfiles, `.github/`, and the self-control surface
+at lines ~714–723). A denylist must be extended forever and silently misses new
+categories — which is how #84's `bin/`/`obj/` artifacts reached a PR. Part C
+adds an **assertion on the final staged changeset**, evaluated *after* the
+existing source filter and *before* commit/push/PR. It fails safe: if the diff
+looks pathological, no PR is opened.
+
+Reject the fix if any rule fails:
+
+- **R1 — scope budget.** Reject if the changeset touches more than
+  `RALPH_AUTOFIX_MAX_FILES` (**default 25**) files or more than
+  `RALPH_AUTOFIX_MAX_LINES` (**default 800**) changed lines. A CI fix is
+  surgical; a 910-file / +29k-line diff is pathological. (Blocks #84.)
+- **R2 — build-artifact / ignored paths.** Reject if any changed path is
+  (a) matched by the target repo's own ignore rules (`git check-ignore`), or
+  (b) under a known build-output directory (`bin/`, `obj/`, `node_modules/`,
+  `dist/`, `build/`, `target/`, `.venv/`, `__pycache__/`, `.next/`,
+  `coverage/`), or (c) has a build-artifact extension (`.dll`, `.exe`, `.pdb`,
+  `.class`, `.o`). (Blocks #84 with certainty.)
+- **R3 — no-op / empty suppression.** Reject if the effective diff is empty or
+  its only additions are newly-created **empty** files. (Flags #116's empty
+  `.lycheecache`.)
+
+On rejection:
+1. **No commit / push / PR.** The workspace is discarded as usual.
+2. Record an `autofix_rejected` **signal** (`reason=budget|artifact|noop`, repo,
+   file/line counts) so it appears in `signals`/`mine`.
+3. Log a loud `WARNING` naming the rule and the offending paths/counts.
+4. Return `RALPH_TRIAGE_RC_QUALITY_REJECT` — a **distinct** classified rc that is
+   NOT the provider-failure code, so a bad-but-non-environmental fix does **not**
+   increment the Part B circuit-breaker's consecutive-failure counter.
+
+Verified against the three hand-reviewed PRs: viz #143 (+1/−1 `bun.lock`, a
+non-empty existing file) passes all three rules; dotnet-sdk #84 fails R1 and R2;
+docs #116 fails R3. Good surgical fixes are not over-blocked.
+
+The gate augments — does not replace — the existing source-only denylist.
 
 ## Testing (TDD, RED→GREEN)
 
@@ -137,12 +195,30 @@ literal, is what the loop compares.
 - Tripping records the `autofix_circuit_open` signal.
 - Verify/memory phases are unaffected by a tripped breaker.
 
+**`tests/test_triage.sh` — quality gate (Part C)**
+- R1: a changeset over the file budget and one over the line budget are each
+  rejected; a small diff under both passes.
+- R2: a path under `bin/`/`obj/` (and a `git check-ignore`-matched path) is
+  rejected; an artifact extension is rejected.
+- R3: an empty-file-only addition is rejected; a modification to an existing
+  non-empty file (the #143 shape) passes.
+- A rejected fix opens **no PR**, records the `autofix_rejected` signal, and
+  returns `RALPH_TRIAGE_RC_QUALITY_REJECT`.
+- The reject rc is distinct from the provider-failure rc and does **not**
+  increment the circuit-breaker counter (a rejected fix followed by more
+  rejections never trips the environmental breaker).
+
 Full suite must stay green (run with `TMPDIR` on disk to avoid tmpfs-exhaustion
 noise in the harness itself).
 
 ## Delivery
 
-One PR, branch `feat/autofix-circuit-breaker-scratch-monitor`, base `main`.
+One PR, branch `feat/autofix-circuit-breaker-scratch-monitor`, base `main`,
+covering all three parts (A scratch monitor, B circuit-breaker, C quality gate).
 Independent of PR #69 (no file overlap: #69 touches `lib/engine.sh` +
 `tests/test_ai_tools.sh`; this touches `lib/resources.sh`, `lib/triage.sh`,
 `tests/test_resource.sh`, `tests/test_triage.sh`).
+
+Parts B and C both add classified return codes to the autofix path and both are
+tested in `test_triage.sh`; keeping them in one PR avoids splitting the rc
+constants and the `_triage_map_targets` boundary across two changes.
