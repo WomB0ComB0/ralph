@@ -468,7 +468,7 @@ SEC_FAIL_DIAG_DIR="$TMP/sec-fail-diags"
     }
     triage_autofix_security "o/r" 1 8
 ) >"$SEC_FAIL_OUT" 2>&1
-eq "fix-security executor failure returns nonzero" "1" "$?"
+eq "fix-security executor failure returns the classified provider-failure rc" "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" "$?"
 if printf '%s\n' "$(cat "$GHLOG_SEC_FAIL")" | grep -q 'pr create'; then bad "executor failure opened PR: $(cat "$GHLOG_SEC_FAIL")"; else ok "executor failure opens no PR"; fi
 grep -q 'autofix failed before producing a usable agent result: executor_failure: executor sandbox startup failure' "$SEC_FAIL_OUT" && ok "executor failure emits explicit diagnostic reason" || bad "missing executor failure reason: $(cat "$SEC_FAIL_OUT")"
 SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
@@ -823,6 +823,106 @@ w3=$(RALPH_TRIAGE_WORKDIR="/proc/nope/cannot-create" _triage_mktemp_workdir)
 [[ -d "$w3" ]] && rm -rf "$w3" 2>/dev/null
 rm -rf "$_wd_base" 2>/dev/null
 unset _wd_base w w2 w3
+
+echo "== classified provider-failure rc =="
+eq "provider-failure rc constant is 69" 69 "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-unset}"
+eq "quality-reject rc constant is 65" 65 "${RALPH_TRIAGE_RC_QUALITY_REJECT:-unset}"
+# Drive _triage_apply_fix down the agent-failure branch: stub clone (git-init the work dir) + a failing agent.
+prov_rc=0
+(  # subshell isolates the stubs; empty SELECTED_MODEL/RALPH_LOCAL_MODEL forces the selfselect path
+  gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "repo view") echo main ;; esac; return 0; }
+  run_ai_tool() { return 3; }
+  TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+    _triage_apply_fix "o/r" main ralph/fix-ci-1 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+) || prov_rc=$?
+eq "agent failure returns the classified provider-failure rc" "69" "$prov_rc"
+
+echo "== autofix circuit-breaker (sequential) =="
+_bk_all_fail() { printf 'call %s\n' "$1" >>"$BK_LOG"; return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}"; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+eq "breaker stops after the threshold (3 calls, not 4)" 3 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_mixed() { printf 'call %s\n' "$1" >>"$BK_LOG"; case "$1" in o/c) return 0;; *) return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}";; esac; }
+targets=(o/a o/b o/c o/d o/e); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_mixed >/dev/null 2>&1
+eq "a success resets the consecutive counter (all 5 run)" 5 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_err() { printf 'call %s\n' "$1" >>"$BK_LOG"; return 1; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_err >/dev/null 2>&1
+eq "non-provider errors do not trip the breaker (all 4 run)" 4 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+targets=(o/a o/b o/c o/d); BK_SIG=$(mktemp -d)
+SIGNAL_DIR="$BK_SIG" RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+grep -rql 'autofix_circuit_open' "$BK_SIG" 2>/dev/null && ok "breaker records an autofix_circuit_open signal" || bad "no autofix_circuit_open signal in $BK_SIG"
+rm -rf "$BK_SIG"; unset -f _bk_all_fail _bk_mixed _bk_err
+
+echo "== quality-gate path classifiers =="
+_triage_is_lockfile "src/app/uv.lock"          && ok "uv.lock is a lockfile"            || bad "uv.lock not detected"
+_triage_is_lockfile "a/b/bun.lock"             && ok "nested bun.lock is a lockfile"    || bad "nested bun.lock not detected"
+_triage_is_lockfile "Cargo.lock"               && ok "Cargo.lock is a lockfile"         || bad "Cargo.lock not detected"
+_triage_is_lockfile "src/main.rs"              && bad "main.rs wrongly a lockfile"      || ok "main.rs is not a lockfile"
+RALPH_AUTOFIX_LOCKFILE_NAMES="my.lock" _triage_is_lockfile "x/my.lock" && ok "env-added lockfile name honored" || bad "RALPH_AUTOFIX_LOCKFILE_NAMES ignored"
+_triage_is_artifact_path "tests/T/bin/Release/net9.0/x.dll" && ok "bin/ path is an artifact"    || bad "bin/ not detected"
+_triage_is_artifact_path "obj/Release/a.json"               && ok "obj/ path is an artifact"    || bad "obj/ not detected"
+_triage_is_artifact_path "node_modules/x/y.js"             && ok "node_modules is an artifact" || bad "node_modules not detected"
+_triage_is_artifact_path "src/app/main.ts"                 && bad "source wrongly an artifact" || ok "source is not an artifact"
+_triage_is_artifact_path "build/lib.o"                     && ok ".o extension is an artifact" || bad ".o not detected"
+
+echo "== _triage_quality_gate =="
+_qg_repo() {
+    local d; d=$(mktemp -d)
+    ( cd "$d" && git init -q && git config user.email t@t && git config user.name t \
+      && mkdir -p src && printf 'base\n' > src/keep.txt && git add -A && git commit -q -m base ) >/dev/null 2>&1
+    printf '%s' "$d"
+}
+# PASS: small source edit
+d=$(_qg_repo); ( cd "$d" && printf 'fix\n' >> src/keep.txt )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "small source edit passes (rc 0)" 0 "$rc"; eq "small source edit no reason" "" "$reason"; rm -rf "$d"
+# PASS: large lockfile-only diff (the #79 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "line $i"; done; } > pkg/uv.lock )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "3000-line uv.lock-only diff passes" 0 "$rc"; rm -rf "$d"
+# REJECT: artifact path (the #84 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p tests/T/bin/Release/net9.0 && printf 'x\n' > tests/T/bin/Release/net9.0/a.json )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "bin/ artifact rejected (rc 1)" 1 "$rc"; eq "artifact reason" "artifact" "$reason"; rm -rf "$d"
+# REJECT: over line budget (non-lockfile)
+d=$(_qg_repo); ( cd "$d" && { for i in $(seq 1 900); do echo "l$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "over line budget rejected" 1 "$rc"; eq "budget reason" "budget" "$reason"; rm -rf "$d"
+# REJECT: no-op / empty new file (the #116 shape)
+d=$(_qg_repo); ( cd "$d" && : > .lycheecache )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "empty-file-only diff rejected" 1 "$rc"; eq "noop reason" "noop" "$reason"; rm -rf "$d"
+# lockfile exemption does NOT rescue an over-budget NON-lockfile change alongside a big lockfile
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "l$i"; done; } > pkg/uv.lock && { for i in $(seq 1 900); do echo "s$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "big lockfile + over-budget source still rejected" 1 "$rc"; rm -rf "$d"
+unset -f _qg_repo
+
+echo "== quality gate wired into _triage_apply_fix =="
+GATE_LOG=$(mktemp); export SIGNAL_DIR=$(mktemp -d)
+_tt_gate() {
+    gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "pr create") echo "PR-CREATED" >>"$GATE_LOG" ;; esac; return 0; }
+    run_ai_tool() { mkdir -p "$PROJECT_DIR/bin/Release" && printf 'junk\n' > "$PROJECT_DIR/bin/Release/x.dll"; return 0; }
+    _triage_safe_push_branch() { echo "PUSHED" >>"$GATE_LOG"; return 0; }
+    _triage_default_branch() { echo main; }
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+      _triage_apply_fix "o/r" main ralph/fix-ci-9 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+    echo "rc=$?"
+}
+gate_rc=$( _tt_gate | sed -n 's/^rc=//p' )
+eq "artifact fix returns the quality-reject rc" "65" "$gate_rc"
+grep -q 'PR-CREATED' "$GATE_LOG" 2>/dev/null && bad "rejected fix still opened a PR" || ok "rejected fix opened no PR"
+grep -rql 'autofix_rejected' "$SIGNAL_DIR" 2>/dev/null && ok "rejected fix records autofix_rejected signal" || bad "no autofix_rejected signal"
+[[ "$RALPH_TRIAGE_RC_QUALITY_REJECT" != "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" ]] && ok "reject rc != provider-failure rc (won't trip breaker)" || bad "reject rc collides with provider-failure rc"
+rm -f "$GATE_LOG"; rm -rf "$SIGNAL_DIR"; unset SIGNAL_DIR; unset -f _tt_gate
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -11,6 +11,11 @@ __ralph_triage_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$__ralph_triage_lib_dir/github.sh"
 
+# Classified autofix return codes, distinct from 0=ok, 1=error, 75=transient/deferred.
+# Plain assignment (NOT readonly) so re-sourcing under the test harness does not error.
+RALPH_TRIAGE_RC_PROVIDER_FAILURE=69   # EX_UNAVAILABLE: agent provider failed to produce a usable result
+RALPH_TRIAGE_RC_QUALITY_REJECT=65     # EX_DATAERR: fix diff rejected by the quality gate
+
 # Severity ordering for the report (higher = more urgent). Maps GitHub's two scales
 # (critical/high/medium/low and error/warning/note) onto one rank.
 _triage_sev_rank() {
@@ -616,6 +621,69 @@ _triage_mktemp_workdir() {
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
+# True (rc 0) if PATH's basename is a recognized lockfile (config-of-record, legitimately
+# large — exempt from the quality gate's scope budget). Extend via RALPH_AUTOFIX_LOCKFILE_NAMES.
+_triage_is_lockfile() {
+    local base names n
+    base=$(basename -- "$1")
+    names="${RALPH_AUTOFIX_LOCKFILE_NAMES:-} uv.lock package-lock.json bun.lock pnpm-lock.yaml yarn.lock poetry.lock Cargo.lock Gemfile.lock composer.lock go.sum flake.lock"
+    for n in $names; do [[ "$base" == "$n" ]] && return 0; done
+    return 1
+}
+
+# True (rc 0) if PATH is under a known build-output directory or has a build-artifact extension.
+_triage_is_artifact_path() {
+    case "$1" in
+        bin/*|*/bin/*|obj/*|*/obj/*|node_modules/*|*/node_modules/*|dist/*|*/dist/*|\
+        build/*|*/build/*|target/*|*/target/*|.venv/*|*/.venv/*|__pycache__/*|*/__pycache__/*|\
+        .next/*|*/.next/*|coverage/*|*/coverage/*) return 0 ;;
+        *.dll|*.exe|*.pdb|*.class|*.o) return 0 ;;
+    esac
+    return 1
+}
+
+# Assert on the FINAL staged changeset before a fix is committed. Prints a one-word reason
+# (artifact|budget|noop) and returns 1 on reject; prints nothing and returns 0 on pass.
+# Fail-safe: an unreadable/unmeasurable diff is rejected, not merged.
+_triage_quality_gate() {
+    local work="$1" repo="$2"
+    local max_files="${RALPH_AUTOFIX_MAX_FILES:-25}" max_lines="${RALPH_AUTOFIX_MAX_LINES:-800}"
+    [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=25
+    [[ "$max_lines" =~ ^[0-9]+$ ]] || max_lines=800
+    git -C "$work" add -A >/dev/null 2>&1 || { printf 'noop'; return 1; }
+    local numstat
+    numstat=$(git -C "$work" diff --cached --numstat HEAD 2>/dev/null) || { printf 'noop'; return 1; }
+    [[ -z "$numstat" ]] && { printf 'noop'; return 1; }   # nothing staged -> no-op
+    local add del path nonlock_files=0 nonlock_lines=0 sum_changed=0 lock_lines=0
+    # numstat lines: "<added>\t<deleted>\t<path>"; binary files use "-" for counts.
+    while IFS=$'\t' read -r add del path; do
+        [[ -z "$path" ]] && continue
+        # R2: artifact path or repo-ignored -> reject immediately
+        if _triage_is_artifact_path "$path" || git -C "$work" check-ignore -q "$path" 2>/dev/null; then
+            printf 'artifact'; return 1
+        fi
+        if _triage_is_lockfile "$path"; then
+            [[ "$add" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + add))
+            [[ "$del" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + del))
+            continue                                   # exempt from the scope budget
+        fi
+        nonlock_files=$((nonlock_files + 1))
+        [[ "$add" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + add)); sum_changed=$((sum_changed + add)); }
+        [[ "$del" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + del)); sum_changed=$((sum_changed + del)); }
+    done <<EOF
+$numstat
+EOF
+    # R1: scope budget on non-lockfile changes
+    if [[ "$nonlock_files" -gt "$max_files" || "$nonlock_lines" -gt "$max_lines" ]]; then
+        printf 'budget'; return 1
+    fi
+    # R3: no-op / empty — staged files exist but zero net line change anywhere (source AND lockfile)
+    if [[ "$sum_changed" -eq 0 && "$lock_lines" -eq 0 ]]; then
+        printf 'noop'; return 1
+    fi
+    return 0
+}
+
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     prompt=$(_triage_ground_prompt "$title" "$prompt")
@@ -708,7 +776,7 @@ _triage_apply_fix() {
       fi ) || ai_rc=$?
     if [[ "$ai_rc" -ne 0 ]]; then
         _triage_write_autofix_failure_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$ai_rc" "$filter_context"
-        _triage_apply_fix_return 1; return $?
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_PROVIDER_FAILURE"; return $?
     fi
 
     # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
@@ -727,6 +795,13 @@ _triage_apply_fix() {
         _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status" "$filter_context"
         _triage_apply_fix_return 0; return $?
     fi
+    local gate_reason=""
+    gate_reason=$(_triage_quality_gate "$work" "$repo") || {
+        log_warning "[$repo] autofix rejected by quality gate ($gate_reason) — no PR opened."
+        declare -F record_signal >/dev/null 2>&1 && \
+            record_signal autofix_rejected "Ralph autofix produced a low-quality diff for $repo" "quality gate: $gate_reason" "inspect the rejected diff; tighten the fix prompt or adjust RALPH_AUTOFIX_MAX_FILES/LINES" "triage,autofix" medium "triage" >/dev/null 2>&1 || true
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_QUALITY_REJECT"; return $?
+    }
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
         log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-*/ralph/mine-fix-* branch off '$default_branch'."
@@ -1250,7 +1325,23 @@ _triage_map_targets() {
     [[ "$conc" =~ ^[0-9]+$ && "$conc" -ge 1 ]] || conc=1
     local r
     if [[ "$conc" -eq 1 ]]; then
-        for r in "${targets[@]}"; do "$fn" "$r" ${extra[@]+"${extra[@]}"} || true; done
+        local _consec=0 _rc _thr="${RALPH_AUTOFIX_BREAKER_THRESHOLD:-3}"
+        [[ "$_thr" =~ ^[0-9]+$ && "$_thr" -ge 1 ]] || _thr=3
+        for r in "${targets[@]}"; do
+            _rc=0
+            "$fn" "$r" ${extra[@]+"${extra[@]}"} || _rc=$?
+            if [[ "$_rc" -eq "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-69}" ]]; then
+                _consec=$((_consec + 1))
+                if [[ "$_consec" -ge "$_thr" ]]; then
+                    log_error "autofix circuit-breaker: $_consec consecutive provider failures — likely environmental (e.g. exhausted scratch fs, auth, connectivity), not a per-repo bug. Skipping remaining autofix targets this run."
+                    declare -F record_signal >/dev/null 2>&1 && \
+                        record_signal autofix_circuit_open "autofix circuit-breaker tripped after $_consec consecutive provider failures" "the agent provider failed to produce a usable result on $_consec repos in a row" "inspect the provider/environment (scratch filesystem, auth, connectivity) before the next run" "triage,autofix" high "triage" >/dev/null 2>&1 || true
+                    break
+                fi
+            else
+                _consec=0
+            fi
+        done
         return 0
     fi
     local tmpdir
