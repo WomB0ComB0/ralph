@@ -621,6 +621,27 @@ _triage_mktemp_workdir() {
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
+# True (rc 0) if PATH's basename is a recognized lockfile (config-of-record, legitimately
+# large — exempt from the quality gate's scope budget). Extend via RALPH_AUTOFIX_LOCKFILE_NAMES.
+_triage_is_lockfile() {
+    local base names n
+    base=$(basename -- "$1")
+    names="${RALPH_AUTOFIX_LOCKFILE_NAMES:-} uv.lock package-lock.json bun.lock pnpm-lock.yaml yarn.lock poetry.lock Cargo.lock Gemfile.lock composer.lock go.sum flake.lock"
+    for n in $names; do [[ "$base" == "$n" ]] && return 0; done
+    return 1
+}
+
+# True (rc 0) if PATH is under a known build-output directory or has a build-artifact extension.
+_triage_is_artifact_path() {
+    case "$1" in
+        bin/*|*/bin/*|obj/*|*/obj/*|node_modules/*|*/node_modules/*|dist/*|*/dist/*|\
+        build/*|*/build/*|target/*|*/target/*|.venv/*|*/.venv/*|__pycache__/*|*/__pycache__/*|\
+        .next/*|*/.next/*|coverage/*|*/coverage/*) return 0 ;;
+        *.dll|*.exe|*.pdb|*.class|*.o) return 0 ;;
+    esac
+    return 1
+}
+
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     prompt=$(_triage_ground_prompt "$title" "$prompt")

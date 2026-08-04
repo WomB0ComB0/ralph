@@ -861,5 +861,17 @@ SIGNAL_DIR="$BK_SIG" RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=
 grep -rql 'autofix_circuit_open' "$BK_SIG" 2>/dev/null && ok "breaker records an autofix_circuit_open signal" || bad "no autofix_circuit_open signal in $BK_SIG"
 rm -rf "$BK_SIG"; unset -f _bk_all_fail _bk_mixed _bk_err
 
+echo "== quality-gate path classifiers =="
+_triage_is_lockfile "src/app/uv.lock"          && ok "uv.lock is a lockfile"            || bad "uv.lock not detected"
+_triage_is_lockfile "a/b/bun.lock"             && ok "nested bun.lock is a lockfile"    || bad "nested bun.lock not detected"
+_triage_is_lockfile "Cargo.lock"               && ok "Cargo.lock is a lockfile"         || bad "Cargo.lock not detected"
+_triage_is_lockfile "src/main.rs"              && bad "main.rs wrongly a lockfile"      || ok "main.rs is not a lockfile"
+RALPH_AUTOFIX_LOCKFILE_NAMES="my.lock" _triage_is_lockfile "x/my.lock" && ok "env-added lockfile name honored" || bad "RALPH_AUTOFIX_LOCKFILE_NAMES ignored"
+_triage_is_artifact_path "tests/T/bin/Release/net9.0/x.dll" && ok "bin/ path is an artifact"    || bad "bin/ not detected"
+_triage_is_artifact_path "obj/Release/a.json"               && ok "obj/ path is an artifact"    || bad "obj/ not detected"
+_triage_is_artifact_path "node_modules/x/y.js"             && ok "node_modules is an artifact" || bad "node_modules not detected"
+_triage_is_artifact_path "src/app/main.ts"                 && bad "source wrongly an artifact" || ok "source is not an artifact"
+_triage_is_artifact_path "build/lib.o"                     && ok ".o extension is an artifact" || bad ".o not detected"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
