@@ -906,5 +906,23 @@ reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
 eq "big lockfile + over-budget source still rejected" 1 "$rc"; rm -rf "$d"
 unset -f _qg_repo
 
+echo "== quality gate wired into _triage_apply_fix =="
+GATE_LOG=$(mktemp); export SIGNAL_DIR=$(mktemp -d)
+_tt_gate() {
+    gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "pr create") echo "PR-CREATED" >>"$GATE_LOG" ;; esac; return 0; }
+    run_ai_tool() { mkdir -p "$PROJECT_DIR/bin/Release" && printf 'junk\n' > "$PROJECT_DIR/bin/Release/x.dll"; return 0; }
+    _triage_safe_push_branch() { echo "PUSHED" >>"$GATE_LOG"; return 0; }
+    _triage_default_branch() { echo main; }
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+      _triage_apply_fix "o/r" main ralph/fix-ci-9 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+    echo "rc=$?"
+}
+gate_rc=$( _tt_gate | sed -n 's/^rc=//p' )
+eq "artifact fix returns the quality-reject rc" "65" "$gate_rc"
+grep -q 'PR-CREATED' "$GATE_LOG" 2>/dev/null && bad "rejected fix still opened a PR" || ok "rejected fix opened no PR"
+grep -rql 'autofix_rejected' "$SIGNAL_DIR" 2>/dev/null && ok "rejected fix records autofix_rejected signal" || bad "no autofix_rejected signal"
+[[ "$RALPH_TRIAGE_RC_QUALITY_REJECT" != "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" ]] && ok "reject rc != provider-failure rc (won't trip breaker)" || bad "reject rc collides with provider-failure rc"
+rm -f "$GATE_LOG"; rm -rf "$SIGNAL_DIR"; unset SIGNAL_DIR; unset -f _tt_gate
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

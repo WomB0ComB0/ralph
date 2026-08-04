@@ -795,6 +795,13 @@ _triage_apply_fix() {
         _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status" "$filter_context"
         _triage_apply_fix_return 0; return $?
     fi
+    local gate_reason=""
+    gate_reason=$(_triage_quality_gate "$work" "$repo") || {
+        log_warning "[$repo] autofix rejected by quality gate ($gate_reason) — no PR opened."
+        declare -F record_signal >/dev/null 2>&1 && \
+            record_signal autofix_rejected "Ralph autofix produced a low-quality diff for $repo" "quality gate: $gate_reason" "inspect the rejected diff; tighten the fix prompt or adjust RALPH_AUTOFIX_MAX_FILES/LINES" "triage,autofix" medium "triage" >/dev/null 2>&1 || true
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_QUALITY_REJECT"; return $?
+    }
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
         log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-*/ralph/mine-fix-* branch off '$default_branch'."
