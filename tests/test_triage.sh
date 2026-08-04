@@ -468,7 +468,7 @@ SEC_FAIL_DIAG_DIR="$TMP/sec-fail-diags"
     }
     triage_autofix_security "o/r" 1 8
 ) >"$SEC_FAIL_OUT" 2>&1
-eq "fix-security executor failure returns nonzero" "1" "$?"
+eq "fix-security executor failure returns the classified provider-failure rc" "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" "$?"
 if printf '%s\n' "$(cat "$GHLOG_SEC_FAIL")" | grep -q 'pr create'; then bad "executor failure opened PR: $(cat "$GHLOG_SEC_FAIL")"; else ok "executor failure opens no PR"; fi
 grep -q 'autofix failed before producing a usable agent result: executor_failure: executor sandbox startup failure' "$SEC_FAIL_OUT" && ok "executor failure emits explicit diagnostic reason" || bad "missing executor failure reason: $(cat "$SEC_FAIL_OUT")"
 SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
@@ -823,6 +823,19 @@ w3=$(RALPH_TRIAGE_WORKDIR="/proc/nope/cannot-create" _triage_mktemp_workdir)
 [[ -d "$w3" ]] && rm -rf "$w3" 2>/dev/null
 rm -rf "$_wd_base" 2>/dev/null
 unset _wd_base w w2 w3
+
+echo "== classified provider-failure rc =="
+eq "provider-failure rc constant is 69" 69 "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-unset}"
+eq "quality-reject rc constant is 65" 65 "${RALPH_TRIAGE_RC_QUALITY_REJECT:-unset}"
+# Drive _triage_apply_fix down the agent-failure branch: stub clone (git-init the work dir) + a failing agent.
+prov_rc=0
+(  # subshell isolates the stubs; empty SELECTED_MODEL/RALPH_LOCAL_MODEL forces the selfselect path
+  gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "repo view") echo main ;; esac; return 0; }
+  run_ai_tool() { return 3; }
+  TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+    _triage_apply_fix "o/r" main ralph/fix-ci-1 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+) || prov_rc=$?
+eq "agent failure returns the classified provider-failure rc" "69" "$prov_rc"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

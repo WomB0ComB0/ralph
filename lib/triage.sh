@@ -11,6 +11,11 @@ __ralph_triage_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$__ralph_triage_lib_dir/github.sh"
 
+# Classified autofix return codes, distinct from 0=ok, 1=error, 75=transient/deferred.
+# Plain assignment (NOT readonly) so re-sourcing under the test harness does not error.
+RALPH_TRIAGE_RC_PROVIDER_FAILURE=69   # EX_UNAVAILABLE: agent provider failed to produce a usable result
+RALPH_TRIAGE_RC_QUALITY_REJECT=65     # EX_DATAERR: fix diff rejected by the quality gate
+
 # Severity ordering for the report (higher = more urgent). Maps GitHub's two scales
 # (critical/high/medium/low and error/warning/note) onto one rank.
 _triage_sev_rank() {
@@ -708,7 +713,7 @@ _triage_apply_fix() {
       fi ) || ai_rc=$?
     if [[ "$ai_rc" -ne 0 ]]; then
         _triage_write_autofix_failure_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$ai_rc" "$filter_context"
-        _triage_apply_fix_return 1; return $?
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_PROVIDER_FAILURE"; return $?
     fi
 
     # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
