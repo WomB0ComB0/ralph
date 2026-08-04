@@ -873,5 +873,38 @@ _triage_is_artifact_path "node_modules/x/y.js"             && ok "node_modules i
 _triage_is_artifact_path "src/app/main.ts"                 && bad "source wrongly an artifact" || ok "source is not an artifact"
 _triage_is_artifact_path "build/lib.o"                     && ok ".o extension is an artifact" || bad ".o not detected"
 
+echo "== _triage_quality_gate =="
+_qg_repo() {
+    local d; d=$(mktemp -d)
+    ( cd "$d" && git init -q && git config user.email t@t && git config user.name t \
+      && mkdir -p src && printf 'base\n' > src/keep.txt && git add -A && git commit -q -m base ) >/dev/null 2>&1
+    printf '%s' "$d"
+}
+# PASS: small source edit
+d=$(_qg_repo); ( cd "$d" && printf 'fix\n' >> src/keep.txt )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "small source edit passes (rc 0)" 0 "$rc"; eq "small source edit no reason" "" "$reason"; rm -rf "$d"
+# PASS: large lockfile-only diff (the #79 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "line $i"; done; } > pkg/uv.lock )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "3000-line uv.lock-only diff passes" 0 "$rc"; rm -rf "$d"
+# REJECT: artifact path (the #84 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p tests/T/bin/Release/net9.0 && printf 'x\n' > tests/T/bin/Release/net9.0/a.json )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "bin/ artifact rejected (rc 1)" 1 "$rc"; eq "artifact reason" "artifact" "$reason"; rm -rf "$d"
+# REJECT: over line budget (non-lockfile)
+d=$(_qg_repo); ( cd "$d" && { for i in $(seq 1 900); do echo "l$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "over line budget rejected" 1 "$rc"; eq "budget reason" "budget" "$reason"; rm -rf "$d"
+# REJECT: no-op / empty new file (the #116 shape)
+d=$(_qg_repo); ( cd "$d" && : > .lycheecache )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "empty-file-only diff rejected" 1 "$rc"; eq "noop reason" "noop" "$reason"; rm -rf "$d"
+# lockfile exemption does NOT rescue an over-budget NON-lockfile change alongside a big lockfile
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "l$i"; done; } > pkg/uv.lock && { for i in $(seq 1 900); do echo "s$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "big lockfile + over-budget source still rejected" 1 "$rc"; rm -rf "$d"
+unset -f _qg_repo
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

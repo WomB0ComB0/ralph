@@ -642,6 +642,48 @@ _triage_is_artifact_path() {
     return 1
 }
 
+# Assert on the FINAL staged changeset before a fix is committed. Prints a one-word reason
+# (artifact|budget|noop) and returns 1 on reject; prints nothing and returns 0 on pass.
+# Fail-safe: an unreadable/unmeasurable diff is rejected, not merged.
+_triage_quality_gate() {
+    local work="$1" repo="$2"
+    local max_files="${RALPH_AUTOFIX_MAX_FILES:-25}" max_lines="${RALPH_AUTOFIX_MAX_LINES:-800}"
+    [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=25
+    [[ "$max_lines" =~ ^[0-9]+$ ]] || max_lines=800
+    git -C "$work" add -A >/dev/null 2>&1 || { printf 'noop'; return 1; }
+    local numstat
+    numstat=$(git -C "$work" diff --cached --numstat HEAD 2>/dev/null) || { printf 'noop'; return 1; }
+    [[ -z "$numstat" ]] && { printf 'noop'; return 1; }   # nothing staged -> no-op
+    local add del path nonlock_files=0 nonlock_lines=0 sum_changed=0 lock_lines=0
+    # numstat lines: "<added>\t<deleted>\t<path>"; binary files use "-" for counts.
+    while IFS=$'\t' read -r add del path; do
+        [[ -z "$path" ]] && continue
+        # R2: artifact path or repo-ignored -> reject immediately
+        if _triage_is_artifact_path "$path" || git -C "$work" check-ignore -q "$path" 2>/dev/null; then
+            printf 'artifact'; return 1
+        fi
+        if _triage_is_lockfile "$path"; then
+            [[ "$add" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + add))
+            [[ "$del" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + del))
+            continue                                   # exempt from the scope budget
+        fi
+        nonlock_files=$((nonlock_files + 1))
+        [[ "$add" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + add)); sum_changed=$((sum_changed + add)); }
+        [[ "$del" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + del)); sum_changed=$((sum_changed + del)); }
+    done <<EOF
+$numstat
+EOF
+    # R1: scope budget on non-lockfile changes
+    if [[ "$nonlock_files" -gt "$max_files" || "$nonlock_lines" -gt "$max_lines" ]]; then
+        printf 'budget'; return 1
+    fi
+    # R3: no-op / empty — staged files exist but zero net line change anywhere (source AND lockfile)
+    if [[ "$sum_changed" -eq 0 && "$lock_lines" -eq 0 ]]; then
+        printf 'noop'; return 1
+    fi
+    return 0
+}
+
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     prompt=$(_triage_ground_prompt "$title" "$prompt")
