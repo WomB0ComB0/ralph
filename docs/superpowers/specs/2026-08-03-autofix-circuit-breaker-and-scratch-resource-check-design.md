@@ -145,10 +145,24 @@ looks pathological, no PR is opened.
 
 Reject the fix if any rule fails:
 
-- **R1 — scope budget.** Reject if the changeset touches more than
-  `RALPH_AUTOFIX_MAX_FILES` (**default 25**) files or more than
-  `RALPH_AUTOFIX_MAX_LINES` (**default 800**) changed lines. A CI fix is
-  surgical; a 910-file / +29k-line diff is pathological. (Blocks #84.)
+- **R1 — scope budget (lockfile-aware).** Reject if the **non-lockfile** part of
+  the changeset touches more than `RALPH_AUTOFIX_MAX_FILES` (**default 25**)
+  files or more than `RALPH_AUTOFIX_MAX_LINES` (**default 800**) changed lines. A
+  CI fix's *hand-written* footprint is surgical; a 910-file / +29k-line diff is
+  pathological. **Recognized lockfiles are exempt from the line/file budget** —
+  they are config-of-record, legitimately large, and regenerating one is a valid
+  fix (see #79 below). Lockfile basenames: `uv.lock`, `package-lock.json`,
+  `bun.lock`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `Cargo.lock`,
+  `Gemfile.lock`, `composer.lock`, `go.sum`, `flake.lock` (matched at any depth,
+  env-extendable via `RALPH_AUTOFIX_LOCKFILE_NAMES`). A diff consisting *only* of
+  recognized lockfiles always passes R1. (Blocks #84's `bin/obj`; permits #79's
+  3094-line `uv.lock` and #143's nested `bun.lock`.)
+
+  Note: the existing source-only filter (lines ~714–723) *reverts* some top-level
+  lockfiles as "churn", which is in tension with legitimate lockfile fixes like
+  #79/#143 (both survived only because they were `uv.lock` / a nested `bun.lock`
+  the denylist misses). Reconciling that filter is out of scope here; the gate
+  simply does not count lockfiles against the budget.
 - **R2 — build-artifact / ignored paths.** Reject if any changed path is
   (a) matched by the target repo's own ignore rules (`git check-ignore`), or
   (b) under a known build-output directory (`bin/`, `obj/`, `node_modules/`,
@@ -168,9 +182,10 @@ On rejection:
    NOT the provider-failure code, so a bad-but-non-environmental fix does **not**
    increment the Part B circuit-breaker's consecutive-failure counter.
 
-Verified against the three hand-reviewed PRs: viz #143 (+1/−1 `bun.lock`, a
-non-empty existing file) passes all three rules; dotnet-sdk #84 fails R1 and R2;
-docs #116 fails R3. Good surgical fixes are not over-blocked.
+Verified against the four hand-reviewed PRs: viz #143 (+1/−1 `bun.lock`) and
+pypi #79 (a 3094-line but legitimate `uv.lock`) both pass; dotnet-sdk #84 fails
+R1 and R2; docs #116 fails R3. Good surgical *and* good lockfile-regen fixes are
+not over-blocked.
 
 The gate augments — does not replace — the existing source-only denylist.
 
@@ -198,6 +213,9 @@ The gate augments — does not replace — the existing source-only denylist.
 **`tests/test_triage.sh` — quality gate (Part C)**
 - R1: a changeset over the file budget and one over the line budget are each
   rejected; a small diff under both passes.
+- R1 lockfile exemption: a 3000-line `uv.lock`-only diff passes (the #79 shape);
+  a diff with a huge lockfile *plus* an over-budget non-lockfile change still
+  fails; `RALPH_AUTOFIX_LOCKFILE_NAMES` can add a name.
 - R2: a path under `bin/`/`obj/` (and a `git check-ignore`-matched path) is
   rejected; an artifact extension is rejected.
 - R3: an empty-file-only addition is rejected; a modification to an existing
