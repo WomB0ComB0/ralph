@@ -58,6 +58,21 @@ _resource_synapse_json() {
     jq -n --argjson count "${count:-0}" --argjson rss "${rss:-0}" --argjson cpu "${cpu:-0}" '{process_count:$count,rss_kib:$rss,cpu_percent:$cpu}'
 }
 
+# Filesystem backing $TMPDIR (default /tmp). On hosts where /tmp is a RAM tmpfs this is the
+# scratch surface that exhausts and silently breaks providers; the monitor watches it so a
+# full scratch fs flips the band off "normal". Fail-open: unmeasurable -> null, no warning.
+_resource_scratch_json() {
+    local dir="${TMPDIR:-/tmp}" used="null" inode="null" v
+    if command -v df >/dev/null 2>&1 && [[ -d "$dir" ]]; then
+        v=$(df -kP "$dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5+0; f=1} END{if(!f) print "null"}')
+        [[ "$v" =~ ^[0-9]+$ ]] && used="$v"
+        v=$(df -iP "$dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5+0; f=1} END{if(!f) print "null"}')
+        [[ "$v" =~ ^[0-9]+$ ]] && inode="$v"
+    fi
+    jq -n --arg path "$dir" --argjson used "$used" --argjson inode "$inode" \
+        '{path:$path,used_percent:$used,inode_used_percent:$inode}'
+}
+
 _resource_is_number() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 _resource_is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
@@ -156,6 +171,7 @@ handle_resource_report_command() {
     command -v jq >/dev/null 2>&1 || { echo "resource report requires jq" >&2; return 1; }
     local max_load1="${RALPH_RESOURCE_MAX_LOAD1:-}"
     local max_memory_pct="${RALPH_RESOURCE_MAX_MEMORY_USED_PCT:-}"
+    local max_scratch_pct="${RALPH_RESOURCE_MAX_SCRATCH_PCT:-90}"
     local max_ralph_bytes="${RALPH_RESOURCE_MAX_RALPH_BYTES:-${RALPH_RESOURCE_MAX_DISK_BYTES:-}}"
     local max_run_dirs="${RALPH_RESOURCE_MAX_RUN_DIRS:-}"
     local max_growth_pct="${RALPH_RESOURCE_MAX_GROWTH_PCT:-}"
@@ -172,6 +188,8 @@ handle_resource_report_command() {
             --max-load1=*) max_load1="${1#*=}"; shift ;;
             --max-memory-used-pct) max_memory_pct="${2:?--max-memory-used-pct requires a value}"; shift 2 ;;
             --max-memory-used-pct=*) max_memory_pct="${1#*=}"; shift ;;
+            --max-scratch-pct) max_scratch_pct="${2:?--max-scratch-pct requires a value}"; shift 2 ;;
+            --max-scratch-pct=*) max_scratch_pct="${1#*=}"; shift ;;
             --max-ralph-bytes|--max-disk-bytes) max_ralph_bytes="${2:?$1 requires a value}"; shift 2 ;;
             --max-ralph-bytes=*|--max-disk-bytes=*) max_ralph_bytes="${1#*=}"; shift ;;
             --max-run-dirs) max_run_dirs="${2:?--max-run-dirs requires a value}"; shift 2 ;;
@@ -198,6 +216,10 @@ handle_resource_report_command() {
     fi
     if [[ -n "$max_memory_pct" ]] && ! _resource_is_number "$max_memory_pct"; then
         echo "invalid --max-memory-used-pct: $max_memory_pct" >&2
+        return 2
+    fi
+    if [[ -n "$max_scratch_pct" ]] && ! _resource_is_number "$max_scratch_pct"; then
+        echo "invalid --max-scratch-pct: $max_scratch_pct" >&2
         return 2
     fi
     if [[ -n "$max_run_dirs" ]] && ! _resource_is_int "$max_run_dirs"; then
@@ -261,7 +283,9 @@ handle_resource_report_command() {
         --argjson memory "$(_resource_memory_json)" \
         --argjson timers "$(_resource_timer_json)" \
         --argjson synapse "$(_resource_synapse_json)" \
+        --argjson scratch "$(_resource_scratch_json)" \
         --argjson max_load1 "$(_resource_budget_json_number "$max_load1")" \
+        --argjson max_scratch_pct "$(_resource_budget_json_number "$max_scratch_pct")" \
         --argjson max_memory_pct "$(_resource_budget_json_number "$max_memory_pct")" \
         --argjson max_ralph_bytes "$(_resource_budget_json_number "$max_ralph_bytes")" \
         --argjson max_run_dirs "$(_resource_budget_json_number "$max_run_dirs")" \
@@ -271,8 +295,8 @@ handle_resource_report_command() {
          def delta($current;$old): if $current == null or $old == null then null else $current - $old end;
          {schema_version:1, artifact:$artifact, generated_at:$generated_at,
           disk:{ralph_bytes:$ralph_bytes,runs_bytes:$runs_bytes,signals_bytes:$signals_bytes,beads_bytes:$beads_bytes,org_state_bytes:$org_state_bytes,org_config_bytes:$org_config_bytes,signal_files:$signal_files,run_dirs:$run_dirs,latest_patrol_log_bytes:$latest_patrol_log_bytes,latest_patrol_log:(if $latest_patrol_log == "" then null else $latest_patrol_log end)},
-          system:{load:$load,memory:$memory,timers:$timers,synapse:$synapse},
-          budgets:{max_load1:$max_load1,max_memory_used_percent:$max_memory_pct,max_ralph_bytes:$max_ralph_bytes,max_run_dirs:$max_run_dirs,max_growth_percent:$max_growth_pct},
+          system:{load:$load,memory:$memory,timers:$timers,synapse:$synapse,scratch:$scratch},
+          budgets:{max_load1:$max_load1,max_memory_used_percent:$max_memory_pct,max_scratch_used_percent:$max_scratch_pct,max_ralph_bytes:$max_ralph_bytes,max_run_dirs:$max_run_dirs,max_growth_percent:$max_growth_pct},
           history:{file:(if $history_file == "" then null else $history_file end), retention:$history_retention, recorded:false, error:null}}
          | .system.memory.used_percent = (if .system.memory.total_kib != null and .system.memory.total_kib > 0 then ((.system.memory.used_kib / .system.memory.total_kib * 10000 | round) / 100) else null end)
          | .trend = (if $previous == null then {previous_at:null,deltas:{},growth_percent:{}} else {
@@ -287,7 +311,9 @@ handle_resource_report_command() {
              if .budgets.max_run_dirs != null and .disk.run_dirs > .budgets.max_run_dirs then warn("runs";"disk.run_dirs";.disk.run_dirs;.budgets.max_run_dirs;"retained run directory count exceeds budget") else empty end,
              if .budgets.max_growth_percent != null and .trend.growth_percent.ralph_bytes != null and .trend.growth_percent.ralph_bytes > .budgets.max_growth_percent then warn("trend";"trend.growth_percent.ralph_bytes";.trend.growth_percent.ralph_bytes;.budgets.max_growth_percent;"Ralph disk footprint growth exceeds trend budget") else empty end,
              if .budgets.max_growth_percent != null and .trend.growth_percent.run_dirs != null and .trend.growth_percent.run_dirs > .budgets.max_growth_percent then warn("trend";"trend.growth_percent.run_dirs";.trend.growth_percent.run_dirs;.budgets.max_growth_percent;"retained run directory growth exceeds trend budget") else empty end,
-             if .budgets.max_growth_percent != null and .trend.growth_percent.memory_used_percent != null and .trend.growth_percent.memory_used_percent > .budgets.max_growth_percent then warn("trend";"trend.growth_percent.memory_used_percent";.trend.growth_percent.memory_used_percent;.budgets.max_growth_percent;"used memory percentage growth exceeds trend budget") else empty end
+             if .budgets.max_growth_percent != null and .trend.growth_percent.memory_used_percent != null and .trend.growth_percent.memory_used_percent > .budgets.max_growth_percent then warn("trend";"trend.growth_percent.memory_used_percent";.trend.growth_percent.memory_used_percent;.budgets.max_growth_percent;"used memory percentage growth exceeds trend budget") else empty end,
+             if .budgets.max_scratch_used_percent != null and .system.scratch.used_percent != null and .system.scratch.used_percent > .budgets.max_scratch_used_percent then warn("scratch";"system.scratch.used_percent";.system.scratch.used_percent;.budgets.max_scratch_used_percent;"scratch filesystem usage exceeds budget") else empty end,
+             if .budgets.max_scratch_used_percent != null and .system.scratch.inode_used_percent != null and .system.scratch.inode_used_percent > .budgets.max_scratch_used_percent then warn("scratch";"system.scratch.inode_used_percent";.system.scratch.inode_used_percent;.budgets.max_scratch_used_percent;"scratch filesystem inode usage exceeds budget") else empty end
            ]
          | .ok = (.warnings | length == 0)') || return 1
 
