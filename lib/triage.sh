@@ -709,6 +709,19 @@ _triage_workflow_prompt_clause() {
     fi
 }
 
+# Git author identity for Ralph's automated commits. Configurable via RALPH_BOT_NAME /
+# RALPH_BOT_EMAIL so an operator can point it at a dedicated bot account they actually control
+# (e.g. an org machine user). The DEFAULT must never be a real third-party account: the email
+# uses the RFC-2606 reserved `.invalid` TLD so it can never map to or impersonate any GitHub user
+# (the previous hardcoded `ralph-bot@users.noreply.github.com` attributed every commit to the real
+# https://github.com/ralph-bot account). Usage: _triage_bot_identity name | _triage_bot_identity email
+_triage_bot_identity() {
+    case "${1:-name}" in
+        email) printf '%s\n' "${RALPH_BOT_EMAIL:-ralph-autofix@ralph.invalid}" ;;
+        *)     printf '%s\n' "${RALPH_BOT_NAME:-ralph-autofix}" ;;
+    esac
+}
+
 # Keep a fix SOURCE-ONLY: discard the dep/lockfile/CI churn an agent picks up along the way, so a PR
 # opens only on a real, intended change. Under workflow autofix mode, .github/workflows/ is spared.
 _triage_filter_ci_churn() {
@@ -927,7 +940,7 @@ _triage_apply_fix() {
         _triage_apply_fix_return 1; return $?
     fi
     if ! ( cd "$work" \
-            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git config user.name "$(_triage_bot_identity name)" && git config user.email "$(_triage_bot_identity email)" \
             && git add -A && git commit -q -m "$title" \
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
         log_error "[$repo] commit/push failed."; _triage_apply_fix_return 1; return $?
@@ -1122,7 +1135,7 @@ triage_resolve_reviews() {
         log_error "[$repo#$pr] refusing to push '$head'."; return 1
     fi
     if ! ( cd "$work" \
-            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git config user.name "$(_triage_bot_identity name)" && git config user.email "$(_triage_bot_identity email)" \
             && git add -A && git commit -q -m "fix: address review comments on #$pr (automated)" \
             && git push origin HEAD >/dev/null 2>&1 ); then
         log_error "[$repo#$pr] commit/push failed."; return 1

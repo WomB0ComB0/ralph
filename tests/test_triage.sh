@@ -1000,6 +1000,14 @@ printf 'c\na\nb\n' > "$CC4/.lycheecache"
 eq "opt-out keeps the cache change" ".lycheecache" "$(git -C "$CC4" status --porcelain 2>/dev/null | awk '{print $2}')"
 unset -f _tt_cache_repo
 
+echo "== _triage_bot_identity: configurable, never impersonates the real ralph-bot account =="
+eq "default name is not 'ralph-bot'" "ralph-autofix" "$(_triage_bot_identity name)"
+eq "default email cannot map to any real GitHub account (.invalid TLD)" "ralph-autofix@ralph.invalid" "$(_triage_bot_identity email)"
+[[ "$(_triage_bot_identity email)" != *"ralph-bot@users.noreply.github.com"* ]] && ok "default email is NOT the real ralph-bot noreply" || bad "default still impersonates ralph-bot"
+eq "RALPH_BOT_NAME override wins" "resq-sw-bot" "$(RALPH_BOT_NAME=resq-sw-bot _triage_bot_identity name)"
+eq "RALPH_BOT_EMAIL override wins" "bot@resq.software" "$(RALPH_BOT_EMAIL=bot@resq.software _triage_bot_identity email)"
+grep -q 'user.name "ralph-bot"' "$R/lib/triage.sh" && bad "a hardcoded ralph-bot identity still remains in triage.sh" || ok "no hardcoded ralph-bot identity remains in triage.sh"
+
 echo "== _triage_strip_self_control_surface: workflows are part of Ralph's own control surface =="
 SELF="$TMP/selfwf"; mkdir -p "$SELF/lib" "$SELF/.github/workflows"
 printf '#!/bin/bash\n' > "$SELF/ralph.sh"; printf 'execute_iteration() { :; }\n' > "$SELF/lib/engine.sh"
