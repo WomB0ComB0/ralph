@@ -730,7 +730,17 @@ _triage_filter_ci_churn() {
       else
           git checkout -- .github 2>/dev/null
           git clean -fd -- .github 2>/dev/null
-      fi ) || true
+      fi
+      # Generated cache files (link-checker etc.) are machine-rewritten churn, not a fix: an agent
+      # that only regenerates/reorders one yields a semantically-null PR (e.g. a reordered
+      # .lycheecache). Discard them like lockfile/CI churn, at ANY depth, per-path (bare + **/ glob
+      # separately so a no-match on one never aborts the other). Replace/extend the list via
+      # RALPH_TRIAGE_CACHE_FILES (space-separated basenames); set it empty to disable.
+      for _c in ${RALPH_TRIAGE_CACHE_FILES-.lycheecache}; do
+          git checkout -- "$_c" 2>/dev/null || true
+          git checkout -- ":(glob)**/$_c" 2>/dev/null || true
+          git clean -fd -- "$_c" ":(glob)**/$_c" 2>/dev/null || true
+      done ) || true
     return 0
 }
 

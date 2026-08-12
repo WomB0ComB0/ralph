@@ -965,6 +965,41 @@ on_status=$(git -C "$CH_ON" status --porcelain 2>/dev/null | awk '{print $2}' | 
 eq "mode ON: workflows (incl. untracked) + source survive; CODEOWNERS/lockfile reverted" \
    ".github/workflows/added.yml|.github/workflows/ci.yml|src/a.js" "$on_status"
 
+echo "== _triage_filter_ci_churn: generated cache files (.lycheecache) are churn =="
+_tt_cache_repo() {
+    local d="$1"
+    mkdir -p "$d/src"
+    printf 'a\nb\nc\n'   > "$d/.lycheecache"
+    printf 'let a = 1\n' > "$d/src/a.js"
+    git -C "$d" init -q 2>/dev/null
+    git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    git -C "$d" add -A >/dev/null 2>&1; git -C "$d" commit -qm base >/dev/null 2>&1
+}
+# reordered cache + a real source edit -> source survives, cache reverted
+CC1="$TMP/cache-mixed"; _tt_cache_repo "$CC1"
+printf 'c\na\nb\n' > "$CC1/.lycheecache"; printf 'let a: number = 1\n' > "$CC1/src/a.js"
+( _triage_filter_ci_churn "$CC1" )
+eq "cache reverted, source survives" "src/a.js" "$(git -C "$CC1" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)"
+# cache-only change (the #122 shape) -> filtered to a no-op
+CC2="$TMP/cache-only"; _tt_cache_repo "$CC2"
+printf 'c\nb\na\n' > "$CC2/.lycheecache"
+( _triage_filter_ci_churn "$CC2" )
+eq "cache-only change filtered to no-op" "" "$(git -C "$CC2" status --porcelain 2>/dev/null)"
+# nested tracked cache file -> reverted (the **/ glob catches any depth)
+CC3="$TMP/cache-nested"; mkdir -p "$CC3/sub"
+printf 'a\n' > "$CC3/sub/.lycheecache"; printf 'x\n' > "$CC3/keep.txt"
+git -C "$CC3" init -q 2>/dev/null; git -C "$CC3" config user.email t@t; git -C "$CC3" config user.name t
+git -C "$CC3" add -A >/dev/null 2>&1; git -C "$CC3" commit -qm base >/dev/null 2>&1
+printf 'b\n' > "$CC3/sub/.lycheecache"
+( _triage_filter_ci_churn "$CC3" )
+eq "nested tracked cache reverted" "" "$(git -C "$CC3" status --porcelain 2>/dev/null)"
+# opt-out: RALPH_TRIAGE_CACHE_FILES empty -> cache survives
+CC4="$TMP/cache-optout"; _tt_cache_repo "$CC4"
+printf 'c\na\nb\n' > "$CC4/.lycheecache"
+( RALPH_TRIAGE_CACHE_FILES=""; export RALPH_TRIAGE_CACHE_FILES; _triage_filter_ci_churn "$CC4" )
+eq "opt-out keeps the cache change" ".lycheecache" "$(git -C "$CC4" status --porcelain 2>/dev/null | awk '{print $2}')"
+unset -f _tt_cache_repo
+
 echo "== _triage_strip_self_control_surface: workflows are part of Ralph's own control surface =="
 SELF="$TMP/selfwf"; mkdir -p "$SELF/lib" "$SELF/.github/workflows"
 printf '#!/bin/bash\n' > "$SELF/ralph.sh"; printf 'execute_iteration() { :; }\n' > "$SELF/lib/engine.sh"
