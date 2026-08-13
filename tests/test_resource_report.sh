@@ -56,6 +56,25 @@ jq -e '.ok == false and (.warnings | length) == 1' <<<"$out" >/dev/null && ok "f
 handle_resource_command report --max-run-dirs nope >/dev/null 2>&1 && bad "invalid run budget accepted" || ok "invalid run budget rejected"
 handle_resource_command report --max-ralph-bytes nope >/dev/null 2>&1 && bad "invalid disk budget accepted" || ok "invalid disk budget rejected"
 
+echo "== run-dir retention prune =="
+PR=$(mktemp -d)
+for t in 20260101T000000-1-a 20260102T000000-2-b 20260103T000000-3-c 20260104T000000-4-d; do mkdir -p "$PR/$t"; done
+eq "prunes oldest beyond keep=2" 2 "$(_resource_prune_run_dirs "$PR" 2)"
+eq "keeps the 2 newest by name" "20260103T000000-3-c 20260104T000000-4-d" "$(ls "$PR" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+PR2=$(mktemp -d); mkdir -p "$PR2/a" "$PR2/b"
+eq "keep >= count prunes nothing" 0 "$(_resource_prune_run_dirs "$PR2" 5)"
+eq "keep=0 disables" 0 "$(_resource_prune_run_dirs "$PR2" 0)"
+eq "missing dir is a no-op" 0 "$(_resource_prune_run_dirs "$PR/nope" 2)"
+rm -rf "$PR" "$PR2"
+# wiring: the report command prunes when --prune-runs / RALPH_RESOURCE_RUN_RETENTION is set
+RRB=$(mktemp -d); RR="$RRB/runs"; mkdir -p "$RR"
+for t in 20260101T0-a 20260102T0-b 20260103T0-c 20260104T0-d 20260105T0-e; do mkdir -p "$RR/$t"; done
+out=$(RALPH_RUN_ROOT="$RR" handle_resource_command report --prune-runs 3)
+jq -e '.disk.run_dirs_pruned == 2' <<<"$out" >/dev/null && ok "report --prune-runs records run_dirs_pruned" || bad "wrong run_dirs_pruned: $(jq -c '.disk.run_dirs_pruned' <<<"$out")"
+eq "report --prune-runs keeps newest 3 on disk" 3 "$(ls "$RR" 2>/dev/null | wc -l | tr -d ' ')"
+handle_resource_command report --prune-runs nope >/dev/null 2>&1 && bad "invalid --prune-runs accepted" || ok "invalid --prune-runs rejected"
+rm -rf "$RRB"
+
 echo "== scratch filesystem awareness =="
 out=$(handle_resource_command report)
 jq -e '.system.scratch.used_percent == 50 and .system.scratch.inode_used_percent == 40 and .system.scratch.path == "/tmp"' <<<"$out" >/dev/null \
