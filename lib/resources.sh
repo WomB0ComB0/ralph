@@ -73,6 +73,20 @@ _resource_scratch_json() {
         '{path:$path,used_percent:$used,inode_used_percent:$inode}'
 }
 
+# Prune the oldest run directories under RUN_ROOT, keeping the newest KEEP (run dirs are
+# timestamp-prefixed, so a name sort is chronological). Echoes the count pruned. KEEP<=0, a
+# non-numeric KEEP, or a missing RUN_ROOT is a no-op. Only immediate subdirectories are removed.
+_resource_prune_run_dirs() {
+    local run_root="${1:-}" keep="${2:-0}" pruned=0 d
+    [[ "$keep" =~ ^[0-9]+$ && "$keep" -gt 0 ]] || { echo 0; return 0; }
+    [[ -n "$run_root" && -d "$run_root" ]] || { echo 0; return 0; }
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        rm -rf -- "$run_root/$d" 2>/dev/null && pruned=$((pruned + 1))
+    done < <(find "$run_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | head -n -"$keep" 2>/dev/null || true)
+    echo "$pruned"
+}
+
 _resource_is_number() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 _resource_is_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
@@ -174,6 +188,7 @@ handle_resource_report_command() {
     local max_scratch_pct="${RALPH_RESOURCE_MAX_SCRATCH_PCT:-90}"
     local max_ralph_bytes="${RALPH_RESOURCE_MAX_RALPH_BYTES:-${RALPH_RESOURCE_MAX_DISK_BYTES:-}}"
     local max_run_dirs="${RALPH_RESOURCE_MAX_RUN_DIRS:-}"
+    local run_retention="${RALPH_RESOURCE_RUN_RETENTION:-0}"
     local max_growth_pct="${RALPH_RESOURCE_MAX_GROWTH_PCT:-}"
     local max_slope_pct="${RALPH_RESOURCE_MAX_SLOPE_PCT:-}"
     local slope_window="${RALPH_RESOURCE_SLOPE_WINDOW:-6}"
@@ -194,6 +209,8 @@ handle_resource_report_command() {
             --max-ralph-bytes=*|--max-disk-bytes=*) max_ralph_bytes="${1#*=}"; shift ;;
             --max-run-dirs) max_run_dirs="${2:?--max-run-dirs requires a value}"; shift 2 ;;
             --max-run-dirs=*) max_run_dirs="${1#*=}"; shift ;;
+            --prune-runs) run_retention="${2:?--prune-runs requires a value}"; shift 2 ;;
+            --prune-runs=*) run_retention="${1#*=}"; shift ;;
             --max-growth-pct) max_growth_pct="${2:?--max-growth-pct requires a value}"; shift 2 ;;
             --max-growth-pct=*) max_growth_pct="${1#*=}"; shift ;;
             --max-slope-pct) max_slope_pct="${2:?--max-slope-pct requires a value}"; shift 2 ;;
@@ -224,6 +241,10 @@ handle_resource_report_command() {
     fi
     if [[ -n "$max_run_dirs" ]] && ! _resource_is_int "$max_run_dirs"; then
         echo "invalid --max-run-dirs: $max_run_dirs" >&2
+        return 2
+    fi
+    if ! _resource_is_int "$run_retention"; then
+        echo "invalid --prune-runs: $run_retention" >&2
         return 2
     fi
     if [[ -n "$max_growth_pct" ]] && ! _resource_is_number "$max_growth_pct"; then
@@ -340,6 +361,14 @@ handle_resource_report_command() {
              if .budgets.max_slope_percent_per_sample != null and .trend.slope.percent_per_sample.memory_used_percent != null and .trend.slope.percent_per_sample.memory_used_percent > .budgets.max_slope_percent_per_sample then warn("slope";"trend.slope.percent_per_sample.memory_used_percent";.trend.slope.percent_per_sample.memory_used_percent;.budgets.max_slope_percent_per_sample;"used memory percentage slope exceeds trend budget") else empty end
            ]
          | .ok = (.warnings | length == 0)' <<<"$report") || return 1
+
+    # Opt-in run-dir retention: keep the newest N run directories, deleting older ones so
+    # .ralph/runs can't grow unbounded across ticks. Off by default (RALPH_RESOURCE_RUN_RETENTION=0
+    # / --prune-runs 0). Records how many were pruned in .disk.run_dirs_pruned.
+    if [[ "$run_retention" -gt 0 ]]; then
+        local _pruned; _pruned=$(_resource_prune_run_dirs "$run_root" "$run_retention")
+        report=$(jq --argjson pruned "${_pruned:-0}" '.disk.run_dirs_pruned = $pruned' <<<"$report") || true
+    fi
 
     if [[ -n "$history_file" ]]; then
         if _resource_write_history "$history_file" "$history_retention" "$report"; then

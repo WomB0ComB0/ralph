@@ -722,6 +722,16 @@ _triage_bot_identity() {
     esac
 }
 
+# Effective total tool timeout (seconds) for the autofix agent. Heavy repos (slow .NET/CI builds)
+# legitimately need longer than the main-loop default; RALPH_TRIAGE_TIMEOUT lets an operator raise
+# it for the patrol WITHOUT changing the main loop. Falls back to RALPH_TOOL_TIMEOUT, then 1800;
+# a non-numeric value falls back too.
+_triage_autofix_timeout() {
+    local t="${RALPH_TRIAGE_TIMEOUT:-${RALPH_TOOL_TIMEOUT:-1800}}"
+    [[ "$t" =~ ^[0-9]+$ ]] || t=1800
+    echo "$t"
+}
+
 # Keep a fix SOURCE-ONLY: discard the dep/lockfile/CI churn an agent picks up along the way, so a PR
 # opens only on a real, intended change. Under workflow autofix mode, .github/workflows/ is spared.
 _triage_filter_ci_churn() {
@@ -893,7 +903,7 @@ _triage_apply_fix() {
     local fix_model_source="fallback"
     [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]] && fix_model_source="selfselect"
     local ai_rc=0
-    ( cd "$work" && export PROJECT_DIR="$work"
+    ( cd "$work" && export PROJECT_DIR="$work" RALPH_TOOL_TIMEOUT="$(_triage_autofix_timeout)"
       git checkout -b "$branch" >/dev/null 2>&1   # already on $base_branch from the clone
       if [[ "$fix_model_source" == "selfselect" ]]; then
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool "${TOOL:-opencode}" "" "$prompt" "$lf" "$of"
@@ -1116,7 +1126,7 @@ triage_resolve_reviews() {
     # can write anything into an agent that then pushes) — fence them as data.
     comments=$(_triage_sanitize_untrusted "pr-review-comments" "$comments")
     prompt=$(printf 'Address these unresolved pull-request review comments with MINIMAL source-code changes (one fix per comment):\n%s\n\nEdit only the source files referenced. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$comments")
-    ( cd "$work" && export PROJECT_DIR="$work"
+    ( cd "$work" && export PROJECT_DIR="$work" RALPH_TOOL_TIMEOUT="$(_triage_autofix_timeout)"
       if [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]]; then
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool opencode "" "$prompt" "$lf" "$of"
       else
