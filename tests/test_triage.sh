@@ -924,5 +924,141 @@ grep -rql 'autofix_rejected' "$SIGNAL_DIR" 2>/dev/null && ok "rejected fix recor
 [[ "$RALPH_TRIAGE_RC_QUALITY_REJECT" != "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" ]] && ok "reject rc != provider-failure rc (won't trip breaker)" || bad "reject rc collides with provider-failure rc"
 rm -f "$GATE_LOG"; rm -rf "$SIGNAL_DIR"; unset SIGNAL_DIR; unset -f _tt_gate
 
+echo "== _triage_workflow_fix_enabled: opt-in gate, default OFF =="
+unset RALPH_TRIAGE_ALLOW_WORKFLOW
+eq "unset -> disabled" "1" "$(_triage_workflow_fix_enabled; echo $?)"
+for v in 1 true TRUE yes on ON; do
+    eq "RALPH_TRIAGE_ALLOW_WORKFLOW=$v -> enabled" "0" "$(RALPH_TRIAGE_ALLOW_WORKFLOW=$v _triage_workflow_fix_enabled; echo $?)"
+done
+for v in 0 false no off wat ""; do
+    eq "RALPH_TRIAGE_ALLOW_WORKFLOW='$v' -> disabled" "1" "$(RALPH_TRIAGE_ALLOW_WORKFLOW="$v" _triage_workflow_fix_enabled; echo $?)"
+done
+
+echo "== _triage_filter_ci_churn: source-only vs opt-in workflow mode =="
+# Build a repo whose HEAD has a workflow, a non-workflow .github file, a lockfile and a source file,
+# then dirty all four + add an untracked workflow — exactly the shape a real autofix produces.
+_tt_churn_repo() {
+    local d="$1"
+    mkdir -p "$d/.github/workflows" "$d/src"
+    printf 'name: ci\n'      > "$d/.github/workflows/ci.yml"
+    printf '* @owner\n'      > "$d/.github/CODEOWNERS"
+    printf '{"v":1}\n'       > "$d/package-lock.json"
+    printf 'let a = 1\n'     > "$d/src/a.js"
+    git -C "$d" init -q 2>/dev/null
+    git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    git -C "$d" add -A >/dev/null 2>&1; git -C "$d" commit -qm base >/dev/null 2>&1
+    # the agent's edits
+    printf 'name: ci\n# fixed flag\n'    > "$d/.github/workflows/ci.yml"
+    printf '* @owner\n* @other\n'        > "$d/.github/CODEOWNERS"
+    printf '{"v":2}\n'                   > "$d/package-lock.json"
+    printf 'let a: number = 1\n'         > "$d/src/a.js"
+    printf 'name: new\n'                 > "$d/.github/workflows/added.yml"   # untracked
+}
+CH_OFF="$TMP/churn-off"; _tt_churn_repo "$CH_OFF"
+( unset RALPH_TRIAGE_ALLOW_WORKFLOW; _triage_filter_ci_churn "$CH_OFF" )
+off_status=$(git -C "$CH_OFF" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)
+eq "mode OFF: only the source file survives" "src/a.js" "$off_status"
+
+CH_ON="$TMP/churn-on"; _tt_churn_repo "$CH_ON"
+( RALPH_TRIAGE_ALLOW_WORKFLOW=1; export RALPH_TRIAGE_ALLOW_WORKFLOW; _triage_filter_ci_churn "$CH_ON" )
+on_status=$(git -C "$CH_ON" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)
+eq "mode ON: workflows (incl. untracked) + source survive; CODEOWNERS/lockfile reverted" \
+   ".github/workflows/added.yml|.github/workflows/ci.yml|src/a.js" "$on_status"
+
+echo "== _triage_filter_ci_churn: generated cache files (.lycheecache) are churn =="
+_tt_cache_repo() {
+    local d="$1"
+    mkdir -p "$d/src"
+    printf 'a\nb\nc\n'   > "$d/.lycheecache"
+    printf 'let a = 1\n' > "$d/src/a.js"
+    git -C "$d" init -q 2>/dev/null
+    git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    git -C "$d" add -A >/dev/null 2>&1; git -C "$d" commit -qm base >/dev/null 2>&1
+}
+# reordered cache + a real source edit -> source survives, cache reverted
+CC1="$TMP/cache-mixed"; _tt_cache_repo "$CC1"
+printf 'c\na\nb\n' > "$CC1/.lycheecache"; printf 'let a: number = 1\n' > "$CC1/src/a.js"
+( _triage_filter_ci_churn "$CC1" )
+eq "cache reverted, source survives" "src/a.js" "$(git -C "$CC1" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)"
+# cache-only change (the #122 shape) -> filtered to a no-op
+CC2="$TMP/cache-only"; _tt_cache_repo "$CC2"
+printf 'c\nb\na\n' > "$CC2/.lycheecache"
+( _triage_filter_ci_churn "$CC2" )
+eq "cache-only change filtered to no-op" "" "$(git -C "$CC2" status --porcelain 2>/dev/null)"
+# nested tracked cache file -> reverted (the **/ glob catches any depth)
+CC3="$TMP/cache-nested"; mkdir -p "$CC3/sub"
+printf 'a\n' > "$CC3/sub/.lycheecache"; printf 'x\n' > "$CC3/keep.txt"
+git -C "$CC3" init -q 2>/dev/null; git -C "$CC3" config user.email t@t; git -C "$CC3" config user.name t
+git -C "$CC3" add -A >/dev/null 2>&1; git -C "$CC3" commit -qm base >/dev/null 2>&1
+printf 'b\n' > "$CC3/sub/.lycheecache"
+( _triage_filter_ci_churn "$CC3" )
+eq "nested tracked cache reverted" "" "$(git -C "$CC3" status --porcelain 2>/dev/null)"
+# opt-out: RALPH_TRIAGE_CACHE_FILES empty -> cache survives
+CC4="$TMP/cache-optout"; _tt_cache_repo "$CC4"
+printf 'c\na\nb\n' > "$CC4/.lycheecache"
+( RALPH_TRIAGE_CACHE_FILES=""; export RALPH_TRIAGE_CACHE_FILES; _triage_filter_ci_churn "$CC4" )
+eq "opt-out keeps the cache change" ".lycheecache" "$(git -C "$CC4" status --porcelain 2>/dev/null | awk '{print $2}')"
+unset -f _tt_cache_repo
+
+echo "== _triage_bot_identity: configurable, never impersonates the real ralph-bot account =="
+eq "default name is not 'ralph-bot'" "ralph-autofix" "$(_triage_bot_identity name)"
+eq "default email cannot map to any real GitHub account (.invalid TLD)" "ralph-autofix@ralph.invalid" "$(_triage_bot_identity email)"
+[[ "$(_triage_bot_identity email)" != *"ralph-bot@users.noreply.github.com"* ]] && ok "default email is NOT the real ralph-bot noreply" || bad "default still impersonates ralph-bot"
+eq "RALPH_BOT_NAME override wins" "resq-sw-bot" "$(RALPH_BOT_NAME=resq-sw-bot _triage_bot_identity name)"
+eq "RALPH_BOT_EMAIL override wins" "bot@resq.software" "$(RALPH_BOT_EMAIL=bot@resq.software _triage_bot_identity email)"
+grep -q 'user.name "ralph-bot"' "$R/lib/triage.sh" && bad "a hardcoded ralph-bot identity still remains in triage.sh" || ok "no hardcoded ralph-bot identity remains in triage.sh"
+
+echo "== _triage_strip_self_control_surface: workflows are part of Ralph's own control surface =="
+SELF="$TMP/selfwf"; mkdir -p "$SELF/lib" "$SELF/.github/workflows"
+printf '#!/bin/bash\n' > "$SELF/ralph.sh"; printf 'execute_iteration() { :; }\n' > "$SELF/lib/engine.sh"
+printf 'name: ok\n' > "$SELF/.github/workflows/ci.yml"
+git -C "$SELF" init -q 2>/dev/null; git -C "$SELF" config user.email t@t; git -C "$SELF" config user.name t
+git -C "$SELF" add -A >/dev/null 2>&1; git -C "$SELF" commit -qm base >/dev/null 2>&1
+printf 'name: pwned\n' > "$SELF/.github/workflows/ci.yml"
+printf 'name: backdoor\n' > "$SELF/.github/workflows/evil.yml"
+RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_strip_self_control_surface "$SELF" "o/ralph" >/dev/null 2>&1
+eq "self-repo: workflow edits discarded even in workflow mode" "" \
+   "$(git -C "$SELF" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)"
+
+echo "== _triage_remote_branch_exists: stale-finding pre-check =="
+gh() { case "$*" in *repos/o/r/branches/live*) echo "live" ;; *repos/o/r/branches/gone*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;; *) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; esac; }
+eq "existing branch -> 0"                 "0"  "$(_triage_remote_branch_exists o/r live; echo $?)"
+eq "deleted branch (404) -> 1 (stale)"    "1"  "$(_triage_remote_branch_exists o/r gone; echo $?)"
+eq "transient failure -> 75 (proceed)"    "75" "$(_triage_remote_branch_exists o/r flaky; echo $?)"
+unset -f gh
+
+echo "== _triage_apply_fix: a vanished head branch is a clean skip, not an error =="
+SKIP_LOG="$TMP/skip.log"; : > "$SKIP_LOG"
+gh() {
+    echo "gh $*" >> "$SKIP_LOG"
+    case "$*" in
+        repo\ view*)                   echo "main" ;;
+        pr\ list*)                     printf '[]\n' ;;
+        api\ repos/o/r/branches/*)     echo "gh: Not Found (HTTP 404)" >&2; return 1 ;;
+        *)                             echo "unexpected gh args: $*" >&2; return 9 ;;
+    esac
+}
+skip_rc=0
+TOOL=opencode _triage_apply_fix "o/r" "dependabot/npm_and_yarn/gone" ralph/fix-ci-1 "p" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1 || skip_rc=$?
+eq "stale branch -> rc 0 (skip, not failure)" "0" "$skip_rc"
+grep -q 'repo clone' "$SKIP_LOG" 2>/dev/null && bad "stale branch still attempted a clone" || ok "stale branch skipped before cloning"
+unset -f gh; rm -f "$SKIP_LOG"
+
+echo "== _triage_gc_workdirs: reclaim workspaces orphaned by SIGKILL/reboot =="
+GCB="$TMP/gcwork"; mkdir -p "$GCB/tmp.old" "$GCB/tmp.young" "$GCB/keepme" "$GCB/tmp.old/nested"
+touch -d '30 hours ago' "$GCB/tmp.old" "$GCB/keepme" 2>/dev/null || touch -A -3000 "$GCB/tmp.old" "$GCB/keepme" 2>/dev/null
+RALPH_TRIAGE_WORKDIR="$GCB" _triage_gc_workdirs >/dev/null 2>&1
+eq "old tmp.* workspace reclaimed"        "0" "$([[ -d "$GCB/tmp.old"   ]] && echo 1 || echo 0)"
+eq "young tmp.* workspace kept"           "1" "$([[ -d "$GCB/tmp.young" ]] && echo 1 || echo 0)"
+eq "non-workspace dir never touched"      "1" "$([[ -d "$GCB/keepme"    ]] && echo 1 || echo 0)"
+eq "missing base dir is a clean no-op"    "0" "$(RALPH_TRIAGE_WORKDIR="$TMP/nope-gc" _triage_gc_workdirs >/dev/null 2>&1; echo $?)"
+eq "non-numeric TTL falls back to default" "0" "$(RALPH_TRIAGE_WORKDIR="$GCB" RALPH_TRIAGE_WORKDIR_TTL_HOURS=abc _triage_gc_workdirs >/dev/null 2>&1; echo $?)"
+
+echo "== fix-ci prompt clause tracks the mode =="
+unset RALPH_TRIAGE_ALLOW_WORKFLOW
+printf '%s' "$(_triage_workflow_prompt_clause)" | grep -q 'Do NOT' && ok "mode OFF: prompt forbids workflow edits" || bad "mode OFF: prompt lost the workflow prohibition"
+printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -qi 'workflow' && ok "mode ON: prompt mentions workflow files" || bad "mode ON: prompt missing workflow guidance"
+printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -q 'Do NOT change dependency versions' && ok "mode ON: dependency prohibition retained" || bad "mode ON: lost the dependency prohibition"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
