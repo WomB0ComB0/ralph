@@ -1008,6 +1008,12 @@ eq "RALPH_BOT_NAME override wins" "resq-sw-bot" "$(RALPH_BOT_NAME=resq-sw-bot _t
 eq "RALPH_BOT_EMAIL override wins" "bot@resq.software" "$(RALPH_BOT_EMAIL=bot@resq.software _triage_bot_identity email)"
 grep -q 'user.name "ralph-bot"' "$R/lib/triage.sh" && bad "a hardcoded ralph-bot identity still remains in triage.sh" || ok "no hardcoded ralph-bot identity remains in triage.sh"
 
+echo "== _triage_autofix_timeout: RALPH_TRIAGE_TIMEOUT knob for heavy repos =="
+eq "RALPH_TRIAGE_TIMEOUT wins" 2700 "$(RALPH_TRIAGE_TIMEOUT=2700 _triage_autofix_timeout)"
+eq "falls back to RALPH_TOOL_TIMEOUT" 900 "$(unset RALPH_TRIAGE_TIMEOUT; RALPH_TOOL_TIMEOUT=900 _triage_autofix_timeout)"
+eq "default is 1800" 1800 "$(unset RALPH_TRIAGE_TIMEOUT RALPH_TOOL_TIMEOUT; _triage_autofix_timeout)"
+eq "non-numeric falls back to 1800" 1800 "$(RALPH_TRIAGE_TIMEOUT=abc _triage_autofix_timeout)"
+
 echo "== _triage_strip_self_control_surface: workflows are part of Ralph's own control surface =="
 SELF="$TMP/selfwf"; mkdir -p "$SELF/lib" "$SELF/.github/workflows"
 printf '#!/bin/bash\n' > "$SELF/ralph.sh"; printf 'execute_iteration() { :; }\n' > "$SELF/lib/engine.sh"
