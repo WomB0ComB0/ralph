@@ -1066,5 +1066,20 @@ printf '%s' "$(_triage_workflow_prompt_clause)" | grep -q 'Do NOT' && ok "mode O
 printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -qi 'workflow' && ok "mode ON: prompt mentions workflow files" || bad "mode ON: prompt missing workflow guidance"
 printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -q 'Do NOT change dependency versions' && ok "mode ON: dependency prohibition retained" || bad "mode ON: lost the dependency prohibition"
 
+echo "== CI-autofix prompt tells the agent to work in-place (no /tmp scratch) =="
+CIP="$TMP/ci-prompt.txt"
+(
+    gh() { case "$*" in
+             run\ list*) printf '[{"databaseId":42,"url":"https://x/run/42","headBranch":"main"}]\n' ;;
+             run\ view*--log-failed*) printf 'ERROR: build failed\nTS2304: cannot find name X\n' ;;
+             repo\ view*) echo "main" ;;
+             *) printf '' ;;
+           esac; }
+    _triage_apply_fix() { printf '%s' "$4" > "$CIP"; return 0; }
+    triage_autofix_ci "o/r" 1 >/dev/null 2>&1
+)
+grep -qiE 'not create.*under /tmp|work inside the current director' "$CIP" 2>/dev/null && ok "CI-autofix prompt forbids /tmp scratch" || bad "no-/tmp instruction missing from CI-autofix prompt: $(cat "$CIP" 2>/dev/null)"
+rm -f "$CIP"
+
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
