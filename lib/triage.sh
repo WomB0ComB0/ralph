@@ -1005,7 +1005,7 @@ triage_autofix_ci() {
         fi
         # CI logs are attacker-influenceable (a malicious test can print anything) — fence them.
         logs=$(_triage_sanitize_untrusted "ci-failure-log" "$logs")
-        prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL change (e.g. a type annotation, an import, or a renamed API) to the files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. %s (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs" "$(_triage_workflow_prompt_clause)")
+        prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL change (e.g. a type annotation, an import, or a renamed API) to the files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do ALL work inside the current directory; do NOT create scratch directories or clones under /tmp (it is a small RAM disk that fills up). %s (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs" "$(_triage_workflow_prompt_clause)")
     fi
     _triage_apply_fix "$repo" "$base_branch" "$branch" "$prompt" \
         "fix: resolve failing CI (run $run_id)" \
