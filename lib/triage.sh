@@ -129,13 +129,13 @@ _triage_parse_alerts() {
     case "$kind" in
         dependabot)
             jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
-                | "\((.security_advisory.severity // "low"))\t\($r)\tdependabot\t\((.dependency.package.name // "?")): \((.security_advisory.summary // "vulnerable dependency"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
+                | "\((.security_advisory.severity // "low"))\t\($r)\tdependabot\t\((.dependency.package.name // "?")): \(((.security_advisory.summary | select(length > 0)) // "vulnerable dependency"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
         code-scanning)
             jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
-                | "\((.rule.security_severity_level // .rule.severity // "warning"))\t\($r)\tcode-scan\t\((.rule.description // .rule.id // "code scanning alert"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
+                | "\((.rule.security_severity_level // .rule.severity // "warning"))\t\($r)\tcode-scan\t\(((.rule.description | select(length > 0)) // (.rule.name | select(length > 0)) // .rule.id // "code scanning alert"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
         secret-scanning)
             jq -r --arg r "$repo" 'arrays[] | select((.state // "open")=="open")
-                | "high\t\($r)\tsecret\t\((.secret_type_display_name // .secret_type // "leaked secret"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
+                | "high\t\($r)\tsecret\t\(((.secret_type_display_name | select(length > 0)) // (.secret_type | select(length > 0)) // "leaked secret"))\t\((.html_url // ""))"' 2>/dev/null || true ;;
     esac
 }
 _triage_is_transient_gh_error() {
@@ -217,8 +217,11 @@ _triage_report() {
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(_triage_sev_rank "$sev")" "$sev" "$repo" "$cat" "$summary" "$url"
     done < "$f" | sort -t$'\t' -k1,1rn -k3,3 | while IFS=$'\t' read -r rank sev repo cat summary url; do
         printf '  [%-8s] %-26s %-12s %s\n' "$sev" "$repo" "$cat" "$summary"
-        [[ -n "$url" ]] && printf '             %s\n' "$url"
+        if [[ -n "$url" ]]; then
+            printf '             %s\n' "$url"
+        fi
     done
+    return 0
 }
 
 
@@ -1363,7 +1366,9 @@ handle_triage_command() {
     while IFS=$'\t' read -r sev repo2 cat summary url; do
         [[ -z "$repo2" ]] && continue
         key=$(_triage_signal_key "$sev" "$repo2" "$cat" "$summary" "$url" 2>/dev/null || true)
-        [[ -n "$key" ]] && printf '%s\n' "$key" >> "$current_keys"
+        if [[ -n "${key:-}" ]]; then
+            printf '%s\n' "$key" >> "$current_keys"
+        fi
         record_signal "$(_triage_signal_type "$cat" "$repo2")" "$cat finding in $repo2" "$summary${url:+ ($url)}" "review and resolve: $summary" "triage" "$sev" >/dev/null 2>&1 || true
     done < "$all"
     if [[ "$incomplete" == "0" ]]; then

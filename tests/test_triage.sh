@@ -72,6 +72,16 @@ code='[{"state":"open","rule":{"security_severity_level":"critical","description
 eq "code-scanning uses security_severity_level" "critical	o/r	code-scan	SQL injection	https://x/c1" "$(printf '%s' "$code" | _triage_parse_alerts "o/r" code-scanning)"
 sec='[{"state":"open","secret_type_display_name":"AWS Access Key","html_url":"https://x/s1"}]'
 eq "secret-scanning -> high severity" "high	o/r	secret	AWS Access Key	https://x/s1" "$(printf '%s' "$sec" | _triage_parse_alerts "o/r" secret-scanning)"
+code_empty_desc='[{"state":"open","rule":{"security_severity_level":"low","description":"","name":"template-injection","id":"zizmor/template-injection"},"html_url":"https://x/c2"}]'
+eq "code-scanning falls back from empty description to name" "low	o/r	code-scan	template-injection	https://x/c2" "$(printf '%s' "$code_empty_desc" | _triage_parse_alerts "o/r" code-scanning)"
+
+echo "== _triage_report: set -e safe with empty url =="
+tmp_rep="$TMP/triage_rep_test.tsv"
+printf "low\to/r\tcode-scan\ttemplate-injection\t\n" > "$tmp_rep"
+rep_rc=0
+_triage_report "$tmp_rep" >/dev/null 2>&1 || rep_rc=$?
+eq "_triage_report exits 0 when url is empty" "0" "$rep_rc"
+rm -f "$tmp_rep"
 
 
 echo "== triage signal reconciliation: complete scans clear absent findings =="
