@@ -39,6 +39,7 @@ handle_resource_command wat >/dev/null 2>&1 && bad "invalid resource subcommand 
 
 _resource_load_json() { printf '{"load1":2.5,"load5":1.0,"load15":0.5}'; }
 _resource_memory_json() { printf '{"total_kib":1000,"used_kib":700,"available_kib":300}'; }
+_resource_scratch_json() { printf '{"path":"/tmp","used_percent":50,"inode_used_percent":40}'; }
 
 out=$(handle_resource_command report --max-load1 1 --max-memory-used-pct 60 --max-ralph-bytes 1 --max-run-dirs 0); rc=$?
 eq "budgeted resource report exits 0" 0 "$rc"
@@ -54,6 +55,45 @@ eq "fail-on-warning exits 3" 3 "$rc"
 jq -e '.ok == false and (.warnings | length) == 1' <<<"$out" >/dev/null && ok "fail-on-warning still prints report JSON" || bad "fail-on-warning lost JSON: $out"
 handle_resource_command report --max-run-dirs nope >/dev/null 2>&1 && bad "invalid run budget accepted" || ok "invalid run budget rejected"
 handle_resource_command report --max-ralph-bytes nope >/dev/null 2>&1 && bad "invalid disk budget accepted" || ok "invalid disk budget rejected"
+
+echo "== run-dir retention prune =="
+PR=$(mktemp -d)
+for t in 20260101T000000-1-a 20260102T000000-2-b 20260103T000000-3-c 20260104T000000-4-d; do mkdir -p "$PR/$t"; done
+eq "prunes oldest beyond keep=2" 2 "$(_resource_prune_run_dirs "$PR" 2)"
+eq "keeps the 2 newest by name" "20260103T000000-3-c 20260104T000000-4-d" "$(ls "$PR" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+PR2=$(mktemp -d); mkdir -p "$PR2/a" "$PR2/b"
+eq "keep >= count prunes nothing" 0 "$(_resource_prune_run_dirs "$PR2" 5)"
+eq "keep=0 disables" 0 "$(_resource_prune_run_dirs "$PR2" 0)"
+eq "missing dir is a no-op" 0 "$(_resource_prune_run_dirs "$PR/nope" 2)"
+rm -rf "$PR" "$PR2"
+# wiring: the report command prunes when --prune-runs / RALPH_RESOURCE_RUN_RETENTION is set
+RRB=$(mktemp -d); RR="$RRB/runs"; mkdir -p "$RR"
+for t in 20260101T0-a 20260102T0-b 20260103T0-c 20260104T0-d 20260105T0-e; do mkdir -p "$RR/$t"; done
+out=$(RALPH_RUN_ROOT="$RR" handle_resource_command report --prune-runs 3)
+jq -e '.disk.run_dirs_pruned == 2' <<<"$out" >/dev/null && ok "report --prune-runs records run_dirs_pruned" || bad "wrong run_dirs_pruned: $(jq -c '.disk.run_dirs_pruned' <<<"$out")"
+eq "report --prune-runs keeps newest 3 on disk" 3 "$(ls "$RR" 2>/dev/null | wc -l | tr -d ' ')"
+handle_resource_command report --prune-runs nope >/dev/null 2>&1 && bad "invalid --prune-runs accepted" || ok "invalid --prune-runs rejected"
+rm -rf "$RRB"
+
+echo "== scratch filesystem awareness =="
+out=$(handle_resource_command report)
+jq -e '.system.scratch.used_percent == 50 and .system.scratch.inode_used_percent == 40 and .system.scratch.path == "/tmp"' <<<"$out" >/dev/null \
+  && ok "report includes the system.scratch block" || bad "missing/incorrect system.scratch: $out"
+jq -e '.budgets.max_scratch_used_percent == 90' <<<"$out" >/dev/null \
+  && ok "scratch budget defaults to 90" || bad "scratch budget default wrong: $(jq -c .budgets <<<"$out")"
+out=$(handle_resource_command report --max-scratch-pct 0)
+jq -e '[.warnings[]?.kind] | any(.=="scratch")' <<<"$out" >/dev/null \
+  && ok "over-budget scratch emits a scratch warning" || bad "no scratch warning at budget 0: $(jq -c .warnings <<<"$out")"
+jq -e '.ok == false' <<<"$out" >/dev/null \
+  && ok "scratch warning drops ok to false" || bad "ok not false with scratch warning"
+out=$(handle_resource_command report --max-scratch-pct 100)
+jq -e '[.warnings[]?.kind] | any(.=="scratch") | not' <<<"$out" >/dev/null \
+  && ok "under-budget scratch emits no warning" || bad "unexpected scratch warning at budget 100"
+out=$(handle_resource_command report --max-scratch-pct 30)
+jq -e '[.warnings[]?.metric] | any(.=="system.scratch.inode_used_percent")' <<<"$out" >/dev/null \
+  && ok "inode over-budget emits an inode scratch warning" || bad "no inode scratch warning at budget 30"
+handle_resource_command report --max-scratch-pct nope >/dev/null 2>&1 \
+  && bad "invalid scratch budget accepted" || ok "invalid scratch budget rejected"
 
 summary_json='{"ok":false,"disk":{"ralph_bytes":3400000,"run_dirs":307},"system":{"memory":{"used_percent":19.5},"load":{"load1":2.8}},"history":{"file":"/tmp/history.jsonl"},"trend":{"slope":{"percent_per_sample":{"ralph_bytes":0,"load1":23.3}}},"warnings":[{"kind":"slope"},{"kind":"disk"}]}'
 out=$(handle_resource_command summary --history "$TMP/history.jsonl" <<<"$summary_json"); rc=$?

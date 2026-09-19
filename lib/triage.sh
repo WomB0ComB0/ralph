@@ -11,6 +11,11 @@ __ralph_triage_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$__ralph_triage_lib_dir/github.sh"
 
+# Classified autofix return codes, distinct from 0=ok, 1=error, 75=transient/deferred.
+# Plain assignment (NOT readonly) so re-sourcing under the test harness does not error.
+RALPH_TRIAGE_RC_PROVIDER_FAILURE=69   # EX_UNAVAILABLE: agent provider failed to produce a usable result
+RALPH_TRIAGE_RC_QUALITY_REJECT=65     # EX_DATAERR: fix diff rejected by the quality gate
+
 # Severity ordering for the report (higher = more urgent). Maps GitHub's two scales
 # (critical/high/medium/low and error/warning/note) onto one rank.
 _triage_sev_rank() {
@@ -80,13 +85,16 @@ _triage_strip_self_control_surface() {
     # check out each path independently. `git clean` is per-path safe (exits 0
     # regardless) and is what removes NEWLY injected files under these paths — the
     # primary attack vector.
+    # .github is in this list unconditionally: workflow autofix mode may let an agent edit CI
+    # definitions on a TARGET repo, but Ralph's own workflows are part of the surface that decides
+    # what Ralph does, so they stay off-limits even when that mode is on.
     ( cd "$work" || exit 0
-      for p in ralph.sh lib scripts tests install.sh benchmark.sh benchmark_analyzer.py .ralphrc ralph.json ralph.targets; do
+      for p in ralph.sh lib scripts tests install.sh benchmark.sh benchmark_analyzer.py .ralphrc ralph.json ralph.targets .github; do
           git checkout -- "$p" 2>/dev/null || true
       done
-      git clean -fd -- lib scripts tests install.sh benchmark.sh benchmark_analyzer.py 2>/dev/null || true
+      git clean -fd -- lib scripts tests install.sh benchmark.sh benchmark_analyzer.py .github 2>/dev/null || true
     ) || true
-    log_warning "[$repo] target looks like the Ralph harness — discarded changes to its own control surface (lib/, ralph.sh, scripts/, tests/, install.sh, benchmark*, config/allowlist)."
+    log_warning "[$repo] target looks like the Ralph harness — discarded changes to its own control surface (lib/, ralph.sh, scripts/, tests/, install.sh, benchmark*, .github/, config/allowlist)."
 }
 
 # Load the explicit repo allowlist (owner/repo per line). RALPH_TARGETS (comma/space/newline
@@ -619,6 +627,182 @@ _triage_mktemp_workdir() {
 # to a throwaway worktree, runs the agent with $prompt, keeps the change SOURCE-ONLY (discards
 # dep/lockfile/CI churn), and — only if the tree changed — pushes the ralph/fix-* branch and opens
 # a PR ($title/$body) against $base_branch. Never pushes a default/base branch directly.
+# True (rc 0) if PATH's basename is a recognized lockfile (config-of-record, legitimately
+# large — exempt from the quality gate's scope budget). Extend via RALPH_AUTOFIX_LOCKFILE_NAMES.
+_triage_is_lockfile() {
+    local base names n
+    base=$(basename -- "$1")
+    names="${RALPH_AUTOFIX_LOCKFILE_NAMES:-} uv.lock package-lock.json bun.lock pnpm-lock.yaml yarn.lock poetry.lock Cargo.lock Gemfile.lock composer.lock go.sum flake.lock"
+    for n in $names; do [[ "$base" == "$n" ]] && return 0; done
+    return 1
+}
+
+# True (rc 0) if PATH is under a known build-output directory or has a build-artifact extension.
+_triage_is_artifact_path() {
+    case "$1" in
+        bin/*|*/bin/*|obj/*|*/obj/*|node_modules/*|*/node_modules/*|dist/*|*/dist/*|\
+        build/*|*/build/*|target/*|*/target/*|.venv/*|*/.venv/*|__pycache__/*|*/__pycache__/*|\
+        .next/*|*/.next/*|coverage/*|*/coverage/*) return 0 ;;
+        *.dll|*.exe|*.pdb|*.class|*.o) return 0 ;;
+    esac
+    return 1
+}
+
+# Assert on the FINAL staged changeset before a fix is committed. Prints a one-word reason
+# (artifact|budget|noop) and returns 1 on reject; prints nothing and returns 0 on pass.
+# Fail-safe: an unreadable/unmeasurable diff is rejected, not merged.
+_triage_quality_gate() {
+    local work="$1" repo="$2"
+    local max_files="${RALPH_AUTOFIX_MAX_FILES:-25}" max_lines="${RALPH_AUTOFIX_MAX_LINES:-800}"
+    [[ "$max_files" =~ ^[0-9]+$ ]] || max_files=25
+    [[ "$max_lines" =~ ^[0-9]+$ ]] || max_lines=800
+    git -C "$work" add -A >/dev/null 2>&1 || { printf 'noop'; return 1; }
+    local numstat
+    numstat=$(git -C "$work" diff --cached --numstat HEAD 2>/dev/null) || { printf 'noop'; return 1; }
+    [[ -z "$numstat" ]] && { printf 'noop'; return 1; }   # nothing staged -> no-op
+    local add del path nonlock_files=0 nonlock_lines=0 sum_changed=0 lock_lines=0
+    # numstat lines: "<added>\t<deleted>\t<path>"; binary files use "-" for counts.
+    while IFS=$'\t' read -r add del path; do
+        [[ -z "$path" ]] && continue
+        # R2: artifact path or repo-ignored -> reject immediately
+        if _triage_is_artifact_path "$path" || git -C "$work" check-ignore -q "$path" 2>/dev/null; then
+            printf 'artifact'; return 1
+        fi
+        if _triage_is_lockfile "$path"; then
+            [[ "$add" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + add))
+            [[ "$del" =~ ^[0-9]+$ ]] && lock_lines=$((lock_lines + del))
+            continue                                   # exempt from the scope budget
+        fi
+        nonlock_files=$((nonlock_files + 1))
+        [[ "$add" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + add)); sum_changed=$((sum_changed + add)); }
+        [[ "$del" =~ ^[0-9]+$ ]] && { nonlock_lines=$((nonlock_lines + del)); sum_changed=$((sum_changed + del)); }
+    done <<EOF
+$numstat
+EOF
+    # R1: scope budget on non-lockfile changes
+    if [[ "$nonlock_files" -gt "$max_files" || "$nonlock_lines" -gt "$max_lines" ]]; then
+        printf 'budget'; return 1
+    fi
+    # R3: no-op / empty — staged files exist but zero net line change anywhere (source AND lockfile)
+    if [[ "$sum_changed" -eq 0 && "$lock_lines" -eq 0 ]]; then
+        printf 'noop'; return 1
+    fi
+    return 0
+}
+
+# Opt-in gate for workflow autofix. DEFAULT OFF. Ralph's autofix is source-only, so a fix that can
+# live nowhere but .github/workflows/ is normally discarded after the agent has already found it
+# (a real, recurring dead-end: an action drops a CLI flag, and the workflow is the only place to
+# fix it). Enabling this lets those edits survive the churn filter and reach a PR. Everything else
+# is unchanged: still never pushed to a default branch, still opened as a PR for a human to merge.
+_triage_workflow_fix_enabled() {
+    case "${RALPH_TRIAGE_ALLOW_WORKFLOW:-0}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+    esac
+    return 1
+}
+
+# The scope sentence handed to the fix agent. It MUST track the filter below: telling the agent not
+# to touch workflows while the filter would keep them (or the reverse) wastes a whole agent run.
+_triage_workflow_prompt_clause() {
+    if _triage_workflow_fix_enabled; then
+        printf 'Prefer a MINIMAL source-code fix. If — and only if — the failure cannot be fixed anywhere but the GitHub Actions workflow itself (e.g. an action removed or renamed a CLI flag it is passed), you MAY edit files under .github/workflows/. Keep any such edit minimal and behaviour-preserving: do NOT touch `permissions:`, secrets, `if:` actor conditions, or which actions the workflow uses. Do NOT change dependency versions.'
+    else
+        printf 'Do NOT deliberately change dependency versions or CI/workflow files — fix it in the source.'
+    fi
+}
+
+# Git author identity for Ralph's automated commits. Configurable via RALPH_BOT_NAME /
+# RALPH_BOT_EMAIL so an operator can point it at a dedicated bot account they actually control
+# (e.g. an org machine user). The DEFAULT must never be a real third-party account: the email
+# uses the RFC-2606 reserved `.invalid` TLD so it can never map to or impersonate any GitHub user
+# (the previous hardcoded `ralph-bot@users.noreply.github.com` attributed every commit to the real
+# https://github.com/ralph-bot account). Usage: _triage_bot_identity name | _triage_bot_identity email
+_triage_bot_identity() {
+    case "${1:-name}" in
+        email) printf '%s\n' "${RALPH_BOT_EMAIL:-ralph-autofix@ralph.invalid}" ;;
+        *)     printf '%s\n' "${RALPH_BOT_NAME:-ralph-autofix}" ;;
+    esac
+}
+
+# Effective total tool timeout (seconds) for the autofix agent. Heavy repos (slow .NET/CI builds)
+# legitimately need longer than the main-loop default; RALPH_TRIAGE_TIMEOUT lets an operator raise
+# it for the patrol WITHOUT changing the main loop. Falls back to RALPH_TOOL_TIMEOUT, then 1800;
+# a non-numeric value falls back too.
+_triage_autofix_timeout() {
+    local t="${RALPH_TRIAGE_TIMEOUT:-${RALPH_TOOL_TIMEOUT:-1800}}"
+    [[ "$t" =~ ^[0-9]+$ ]] || t=1800
+    echo "$t"
+}
+
+# Keep a fix SOURCE-ONLY: discard the dep/lockfile/CI churn an agent picks up along the way, so a PR
+# opens only on a real, intended change. Under workflow autofix mode, .github/workflows/ is spared.
+_triage_filter_ci_churn() {
+    local work="${1:-}"
+    [[ -n "$work" && -d "$work" ]] || return 0
+    ( cd "$work" || exit 0
+      # Per-path, NOT one multi-pathspec checkout: `git checkout -- a b c` is all-or-nothing, so a
+      # repo without (say) yarn.lock would abort the whole revert and leak the real lockfile churn.
+      for _p in package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock; do
+          git checkout -- "$_p" 2>/dev/null || true
+      done
+      git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null
+      if _triage_workflow_fix_enabled; then
+          # Spare .github/workflows/** only. Every other .github/ path (CODEOWNERS, issue
+          # templates, dependabot config) stays churn — this mode is about CI definitions,
+          # not about handing the agent the whole repo-governance surface.
+          git checkout -- .github ':(exclude).github/workflows/*' 2>/dev/null
+          git clean -fd -- .github ':(exclude).github/workflows/*' 2>/dev/null
+      else
+          git checkout -- .github 2>/dev/null
+          git clean -fd -- .github 2>/dev/null
+      fi
+      # Generated cache files (link-checker etc.) are machine-rewritten churn, not a fix: an agent
+      # that only regenerates/reorders one yields a semantically-null PR (e.g. a reordered
+      # .lycheecache). Discard them like lockfile/CI churn, at ANY depth, per-path (bare + **/ glob
+      # separately so a no-match on one never aborts the other). Replace/extend the list via
+      # RALPH_TRIAGE_CACHE_FILES (space-separated basenames); set it empty to disable.
+      for _c in ${RALPH_TRIAGE_CACHE_FILES-.lycheecache}; do
+          git checkout -- "$_c" 2>/dev/null || true
+          git checkout -- ":(glob)**/$_c" 2>/dev/null || true
+          git clean -fd -- "$_c" ":(glob)**/$_c" 2>/dev/null || true
+      done ) || true
+    return 0
+}
+
+# Does BRANCH still exist on REPO's remote? Dependabot/renovate delete a branch the moment its PR
+# lands or closes, so a finding queued minutes ago can name a branch that is already gone — cloning
+# it fails with a scary ERROR for what is really just a stale finding.
+# rc 0 = exists · 1 = confirmed gone (skip cleanly) · 75 = couldn't tell (proceed, let clone decide).
+_triage_remote_branch_exists() {
+    local repo="${1:-}" branch="${2:-}" out="" rc=0
+    [[ -n "$repo" && -n "$branch" ]] || return 75
+    out=$(gh api "repos/$repo/branches/$branch" --jq '.name' 2>&1) || rc=$?
+    [[ "$rc" -eq 0 && -n "$out" ]] && return 0
+    printf '%s' "$out" | grep -qiE 'not found|404|no commit found for' && return 1
+    return 75
+}
+
+# Reclaim throwaway autofix workspaces orphaned by SIGKILL/reboot: _triage_apply_fix's RETURN-trap
+# cleanup cannot run when the process is killed outright, so shallow clones (tens of MB each) pile
+# up in the cache. Only mktemp-shaped dirs directly under the base, and only past the TTL, so a
+# concurrently-running triage is never disturbed.
+_triage_gc_workdirs() {
+    local hours="${RALPH_TRIAGE_WORKDIR_TTL_HOURS:-6}"
+    [[ "$hours" =~ ^[0-9]+$ && "$hours" -gt 0 ]] || hours=6
+    local base="${RALPH_TRIAGE_WORKDIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ralph/work}"
+    [[ -n "$base" && -d "$base" ]] || return 0
+    local d n=0
+    while IFS= read -r d; do
+        [[ -n "$d" && -d "$d" ]] || continue
+        rm -rf "$d" 2>/dev/null && n=$((n + 1))
+    done <<EOF
+$(find "$base" -mindepth 1 -maxdepth 1 -type d -name 'tmp.*' -mmin "+$((hours * 60))" 2>/dev/null)
+EOF
+    [[ "$n" -gt 0 ]] && log_info "triage: reclaimed $n orphaned autofix workspace(s) under $base"
+    return 0
+}
+
 _triage_apply_fix() {
     local repo="$1" base_branch="$2" branch="$3" prompt="$4" title="$5" body="$6" apply="${7:-0}" filter_context="${8:-}" finding_key="${9:-}"
     prompt=$(_triage_ground_prompt "$title" "$prompt")
@@ -655,7 +839,12 @@ _triage_apply_fix() {
         printf '    branch  %s (off %s)\n' "$branch" "$base_branch"
         printf '    model   %s\n' "${RALPH_LOCAL_MODEL:-<resolved at run; local-first if configured>}"
         printf '    on diff git push origin %s ; gh pr create --base %s --head %s\n' "$branch" "$base_branch" "$branch"
-        if [[ "$filter_context" == workflow:* ]]; then
+        if _triage_workflow_fix_enabled; then
+            printf '    scope   source + .github/workflows/ (RALPH_TRIAGE_ALLOW_WORKFLOW is on)\n'
+        else
+            printf '    scope   source only (.github/ discarded; set RALPH_TRIAGE_ALLOW_WORKFLOW=1 to allow workflow fixes)\n'
+        fi
+        if [[ "$filter_context" == workflow:* ]] && ! _triage_workflow_fix_enabled; then
             printf '    note    likely workflow-backed alert (%s); source-only apply may produce a no-change diagnostic\n' "${filter_context#workflow:}"
         fi
         printf '    will NEVER push to %s. Re-run with --apply to execute.\n' "$default_branch"
@@ -663,6 +852,15 @@ _triage_apply_fix() {
     fi
 
     command_exists git || { log_error "git is required for --apply."; return 1; }
+    # A finding can name a branch Dependabot/renovate already deleted. Check before spending a
+    # clone (and before the RETURN trap exists, so this stays a plain early return). Only a
+    # CONFIRMED 404 skips; an inconclusive answer proceeds and lets the clone be the judge.
+    local _br_rc=0
+    _triage_remote_branch_exists "$repo" "$base_branch" || _br_rc=$?
+    if [[ "$_br_rc" -eq 1 ]]; then
+        log_info "[$repo] branch '$base_branch' no longer exists on the remote (stale finding) — skipping."
+        return 0
+    fi
     # Keep temp cleanup explicit: RETURN traps outlive local scope in bash, so every
     # early-return path must clear the trap before the locals disappear under set -u.
     local work="" lf="" of=""
@@ -695,6 +893,12 @@ _triage_apply_fix() {
         log_warning "[$repo] deferred autofix: clone unavailable due to transient GitHub failure."
         _triage_apply_fix_return 0; return $?
     elif [[ "$clone_rc" -ne 0 ]]; then
+        # The branch can vanish between the pre-check and the clone (Dependabot merges are fast).
+        # Same stale-finding case, so treat it the same way rather than reporting a failure.
+        if printf '%s' "$clone_out" | grep -qiE "remote branch .* not found|couldn't find remote ref"; then
+            log_info "[$repo] branch '$base_branch' vanished before the clone completed (stale finding) — skipping."
+            _triage_apply_fix_return 0; return $?
+        fi
         log_error "[$repo] clone of branch '$base_branch' failed: $clone_out"; _triage_apply_fix_return 1; return $?
     fi
     # Default to the tool's OWN model self-selection (opencode) unless a local model / pin is set:
@@ -702,7 +906,7 @@ _triage_apply_fix() {
     local fix_model_source="fallback"
     [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]] && fix_model_source="selfselect"
     local ai_rc=0
-    ( cd "$work" && export PROJECT_DIR="$work"
+    ( cd "$work" && export PROJECT_DIR="$work" RALPH_TOOL_TIMEOUT="$(_triage_autofix_timeout)"
       git checkout -b "$branch" >/dev/null 2>&1   # already on $base_branch from the clone
       if [[ "$fix_model_source" == "selfselect" ]]; then
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool "${TOOL:-opencode}" "" "$prompt" "$lf" "$of"
@@ -711,17 +915,14 @@ _triage_apply_fix() {
       fi ) || ai_rc=$?
     if [[ "$ai_rc" -ne 0 ]]; then
         _triage_write_autofix_failure_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$ai_rc" "$filter_context"
-        _triage_apply_fix_return 1; return $?
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_PROVIDER_FAILURE"; return $?
     fi
 
-    # Keep the fix SOURCE-ONLY: discard dep/lockfile/workflow churn (tracked + untracked) so a PR
-    # opens only on a real source change.
+    # Keep the fix SOURCE-ONLY: discard dep/lockfile/CI churn (tracked + untracked) so a PR opens
+    # only on a real intended change. Workflow autofix mode spares .github/workflows/.
     local pre_filter_status="" post_filter_status=""
     pre_filter_status=$(cd "$work" && git status --porcelain 2>/dev/null || true)
-    ( cd "$work" \
-        && git checkout -- package.json package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
-        git clean -f -- package-lock.json yarn.lock pnpm-lock.yaml bun.lock 2>/dev/null; \
-        git checkout -- .github 2>/dev/null; git clean -fd -- .github 2>/dev/null ) || true
+    _triage_filter_ci_churn "$work"
     _triage_strip_self_control_surface "$work" "$repo"
     post_filter_status=$(cd "$work" && git status --porcelain 2>/dev/null || true)
 
@@ -730,13 +931,29 @@ _triage_apply_fix() {
         _triage_write_autofix_nochange_diag "$repo" "$base_branch" "$branch" "$lf" "$of" "$pre_filter_status" "$post_filter_status" "$filter_context"
         _triage_apply_fix_return 0; return $?
     fi
+    # A workflow edit changes what CI itself runs, so it must never slip past a reviewer unnoticed.
+    if printf '%s' "$post_filter_status" | grep -q '\.github/workflows/'; then
+        log_warning "[$repo] this fix edits GitHub Actions workflow files — review the CI diff carefully."
+        body="$body
+
+> ⚠️ **This PR edits \`.github/workflows/\`.** It was produced with workflow autofix mode enabled
+> (\`RALPH_TRIAGE_ALLOW_WORKFLOW\`). Changes to CI definitions alter what runs on every future
+> commit — please read the workflow diff line by line before merging."
+    fi
+    local gate_reason=""
+    gate_reason=$(_triage_quality_gate "$work" "$repo") || {
+        log_warning "[$repo] autofix rejected by quality gate ($gate_reason) — no PR opened."
+        declare -F record_signal >/dev/null 2>&1 && \
+            record_signal autofix_rejected "Ralph autofix produced a low-quality diff for $repo" "quality gate: $gate_reason" "inspect the rejected diff; tighten the fix prompt or adjust RALPH_AUTOFIX_MAX_FILES/LINES" "triage,autofix" medium "triage" >/dev/null 2>&1 || true
+        _triage_apply_fix_return "$RALPH_TRIAGE_RC_QUALITY_REJECT"; return $?
+    }
     local cur; cur=$(cd "$work" && git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     if ! _triage_safe_push_branch "$cur" "$default_branch"; then
         log_error "[$repo] refusing to push: '$cur' is not a ralph/fix-*/ralph/mine-fix-* branch off '$default_branch'."
         _triage_apply_fix_return 1; return $?
     fi
     if ! ( cd "$work" \
-            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git config user.name "$(_triage_bot_identity name)" && git config user.email "$(_triage_bot_identity email)" \
             && git add -A && git commit -q -m "$title" \
             && git push -u origin "$cur" >/dev/null 2>&1 ); then
         log_error "[$repo] commit/push failed."; _triage_apply_fix_return 1; return $?
@@ -791,7 +1008,7 @@ triage_autofix_ci() {
         fi
         # CI logs are attacker-influenceable (a malicious test can print anything) — fence them.
         logs=$(_triage_sanitize_untrusted "ci-failure-log" "$logs")
-        prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL source-code change (e.g. a type annotation, an import, or a renamed API) to the source files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do NOT deliberately change dependency versions or CI/workflow files — fix it in the source. (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs")
+        prompt=$(printf 'The GitHub Actions CI run %s failed for %s.\n\nKey error lines:\n%s\n\nReproduce and fix this with a MINIMAL change (e.g. a type annotation, an import, or a renamed API) to the files named in the errors. You MAY install dependencies and run the failing check (typecheck/test/lint) to verify your fix actually passes. Do ALL work inside the current directory; do NOT create scratch directories or clones under /tmp (it is a small RAM disk that fills up). %s (Incidental lockfile updates from installing are fine; they are discarded automatically.)' "$run_url" "$repo" "$logs" "$(_triage_workflow_prompt_clause)")
     fi
     _triage_apply_fix "$repo" "$base_branch" "$branch" "$prompt" \
         "fix: resolve failing CI (run $run_id)" \
@@ -912,7 +1129,7 @@ triage_resolve_reviews() {
     # can write anything into an agent that then pushes) — fence them as data.
     comments=$(_triage_sanitize_untrusted "pr-review-comments" "$comments")
     prompt=$(printf 'Address these unresolved pull-request review comments with MINIMAL source-code changes (one fix per comment):\n%s\n\nEdit only the source files referenced. Do NOT change dependency versions, lockfiles, or CI/workflow files.' "$comments")
-    ( cd "$work" && export PROJECT_DIR="$work"
+    ( cd "$work" && export PROJECT_DIR="$work" RALPH_TOOL_TIMEOUT="$(_triage_autofix_timeout)"
       if [[ -z "${RALPH_LOCAL_MODEL:-}" && -z "${SELECTED_MODEL:-}" && "${TOOL:-opencode}" == "opencode" ]]; then
           RALPH_ROLE=engineer retry_with_backoff "${AI_RETRY_ATTEMPTS:-2}" "${AI_RETRY_BASE_DELAY:-5}" -- run_ai_tool opencode "" "$prompt" "$lf" "$of"
       else
@@ -931,7 +1148,7 @@ triage_resolve_reviews() {
         log_error "[$repo#$pr] refusing to push '$head'."; return 1
     fi
     if ! ( cd "$work" \
-            && git config user.name "ralph-bot" && git config user.email "ralph-bot@users.noreply.github.com" \
+            && git config user.name "$(_triage_bot_identity name)" && git config user.email "$(_triage_bot_identity email)" \
             && git add -A && git commit -q -m "fix: address review comments on #$pr (automated)" \
             && git push origin HEAD >/dev/null 2>&1 ); then
         log_error "[$repo#$pr] commit/push failed."; return 1
@@ -1253,7 +1470,23 @@ _triage_map_targets() {
     [[ "$conc" =~ ^[0-9]+$ && "$conc" -ge 1 ]] || conc=1
     local r
     if [[ "$conc" -eq 1 ]]; then
-        for r in "${targets[@]}"; do "$fn" "$r" ${extra[@]+"${extra[@]}"} || true; done
+        local _consec=0 _rc _thr="${RALPH_AUTOFIX_BREAKER_THRESHOLD:-3}"
+        [[ "$_thr" =~ ^[0-9]+$ && "$_thr" -ge 1 ]] || _thr=3
+        for r in "${targets[@]}"; do
+            _rc=0
+            "$fn" "$r" ${extra[@]+"${extra[@]}"} || _rc=$?
+            if [[ "$_rc" -eq "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-69}" ]]; then
+                _consec=$((_consec + 1))
+                if [[ "$_consec" -ge "$_thr" ]]; then
+                    log_error "autofix circuit-breaker: $_consec consecutive provider failures — likely environmental (e.g. exhausted scratch fs, auth, connectivity), not a per-repo bug. Skipping remaining autofix targets this run."
+                    declare -F record_signal >/dev/null 2>&1 && \
+                        record_signal autofix_circuit_open "autofix circuit-breaker tripped after $_consec consecutive provider failures" "the agent provider failed to produce a usable result on $_consec repos in a row" "inspect the provider/environment (scratch filesystem, auth, connectivity) before the next run" "triage,autofix" high "triage" >/dev/null 2>&1 || true
+                    break
+                fi
+            else
+                _consec=0
+            fi
+        done
         return 0
     fi
     local tmpdir
@@ -1293,6 +1526,7 @@ handle_triage_command() {
             --run)             run_override="${2:-}"; shift ;;
             --resolve-reviews) mode="resolve-reviews"; resolve_pr="${2:-}"; shift ;;
             --verify-fixes)    mode="verify-fixes" ;;
+            --allow-workflow-fix) RALPH_TRIAGE_ALLOW_WORKFLOW=1; export RALPH_TRIAGE_ALLOW_WORKFLOW ;;
         esac
         shift
     done
@@ -1300,6 +1534,8 @@ handle_triage_command() {
         log_error "triage needs the GitHub CLI (gh, authenticated) and jq installed."
         return 1
     fi
+    # Sweep workspaces a previous run was killed before it could clean up (reboot/OOM/SIGKILL).
+    _triage_gc_workdirs
     local -a targets=(); mapfile -t targets < <(triage_load_targets)
     if [[ ${#targets[@]} -eq 0 ]]; then
         log_error "No triage targets. Set RALPH_TARGETS=\"owner/repo,owner/repo\" or create a ralph.targets file (one owner/repo per line)."

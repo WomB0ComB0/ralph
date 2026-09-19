@@ -1124,6 +1124,17 @@ _apply_tool_env() {
             : ;;
         opencode)
             export CI=true
+            # Keep opencode's scratch OFF a RAM tmpfs. opencode writes every session's
+            # temp under $TMPDIR/opencode (node os.tmpdir()); where /tmp is a RAM tmpfs
+            # these accumulate (sessions are not always reaped) until /tmp exhausts, at
+            # which point opencode's writes fail with ENOSPC and it dies emitting zero
+            # output -> autofix records "provider_failure: tool exited 74". Point TMPDIR
+            # at a disk-backed dir with room (mirrors the disk-clone workdir fix in
+            # triage). Fail-open: if the dir can't be made writable, leave TMPDIR as-is.
+            local _tmpbase="${RALPH_TMPDIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ralph/tmp}"
+            if mkdir -p "$_tmpbase" 2>/dev/null && [[ -d "$_tmpbase" && -w "$_tmpbase" ]]; then
+                export TMPDIR="$_tmpbase"
+            fi
             ;;
     esac
 }

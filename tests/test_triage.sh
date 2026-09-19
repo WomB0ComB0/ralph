@@ -478,7 +478,7 @@ SEC_FAIL_DIAG_DIR="$TMP/sec-fail-diags"
     }
     triage_autofix_security "o/r" 1 8
 ) >"$SEC_FAIL_OUT" 2>&1
-eq "fix-security executor failure returns nonzero" "1" "$?"
+eq "fix-security executor failure returns the classified provider-failure rc" "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" "$?"
 if printf '%s\n' "$(cat "$GHLOG_SEC_FAIL")" | grep -q 'pr create'; then bad "executor failure opened PR: $(cat "$GHLOG_SEC_FAIL")"; else ok "executor failure opens no PR"; fi
 grep -q 'autofix failed before producing a usable agent result: executor_failure: executor sandbox startup failure' "$SEC_FAIL_OUT" && ok "executor failure emits explicit diagnostic reason" || bad "missing executor failure reason: $(cat "$SEC_FAIL_OUT")"
 SEC_FAIL_DIAG_PATH=$(find "$SEC_FAIL_DIAG_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)
@@ -833,6 +833,263 @@ w3=$(RALPH_TRIAGE_WORKDIR="/proc/nope/cannot-create" _triage_mktemp_workdir)
 [[ -d "$w3" ]] && rm -rf "$w3" 2>/dev/null
 rm -rf "$_wd_base" 2>/dev/null
 unset _wd_base w w2 w3
+
+echo "== classified provider-failure rc =="
+eq "provider-failure rc constant is 69" 69 "${RALPH_TRIAGE_RC_PROVIDER_FAILURE:-unset}"
+eq "quality-reject rc constant is 65" 65 "${RALPH_TRIAGE_RC_QUALITY_REJECT:-unset}"
+# Drive _triage_apply_fix down the agent-failure branch: stub clone (git-init the work dir) + a failing agent.
+prov_rc=0
+(  # subshell isolates the stubs; empty SELECTED_MODEL/RALPH_LOCAL_MODEL forces the selfselect path
+  gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "repo view") echo main ;; esac; return 0; }
+  run_ai_tool() { return 3; }
+  TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+    _triage_apply_fix "o/r" main ralph/fix-ci-1 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+) || prov_rc=$?
+eq "agent failure returns the classified provider-failure rc" "69" "$prov_rc"
+
+echo "== autofix circuit-breaker (sequential) =="
+_bk_all_fail() { printf 'call %s\n' "$1" >>"$BK_LOG"; return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}"; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+eq "breaker stops after the threshold (3 calls, not 4)" 3 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_mixed() { printf 'call %s\n' "$1" >>"$BK_LOG"; case "$1" in o/c) return 0;; *) return "${RALPH_TRIAGE_RC_PROVIDER_FAILURE}";; esac; }
+targets=(o/a o/b o/c o/d o/e); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_mixed >/dev/null 2>&1
+eq "a success resets the consecutive counter (all 5 run)" 5 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+_bk_err() { printf 'call %s\n' "$1" >>"$BK_LOG"; return 1; }
+targets=(o/a o/b o/c o/d); BK_LOG=$(mktemp)
+RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_err >/dev/null 2>&1
+eq "non-provider errors do not trip the breaker (all 4 run)" 4 "$(wc -l <"$BK_LOG" | tr -d ' ')"
+rm -f "$BK_LOG"
+
+targets=(o/a o/b o/c o/d); BK_SIG=$(mktemp -d)
+SIGNAL_DIR="$BK_SIG" RALPH_AUTOFIX_BREAKER_THRESHOLD=3 RALPH_TRIAGE_CONCURRENCY=1 _triage_map_targets _bk_all_fail >/dev/null 2>&1
+grep -rql 'autofix_circuit_open' "$BK_SIG" 2>/dev/null && ok "breaker records an autofix_circuit_open signal" || bad "no autofix_circuit_open signal in $BK_SIG"
+rm -rf "$BK_SIG"; unset -f _bk_all_fail _bk_mixed _bk_err
+
+echo "== quality-gate path classifiers =="
+_triage_is_lockfile "src/app/uv.lock"          && ok "uv.lock is a lockfile"            || bad "uv.lock not detected"
+_triage_is_lockfile "a/b/bun.lock"             && ok "nested bun.lock is a lockfile"    || bad "nested bun.lock not detected"
+_triage_is_lockfile "Cargo.lock"               && ok "Cargo.lock is a lockfile"         || bad "Cargo.lock not detected"
+_triage_is_lockfile "src/main.rs"              && bad "main.rs wrongly a lockfile"      || ok "main.rs is not a lockfile"
+RALPH_AUTOFIX_LOCKFILE_NAMES="my.lock" _triage_is_lockfile "x/my.lock" && ok "env-added lockfile name honored" || bad "RALPH_AUTOFIX_LOCKFILE_NAMES ignored"
+_triage_is_artifact_path "tests/T/bin/Release/net9.0/x.dll" && ok "bin/ path is an artifact"    || bad "bin/ not detected"
+_triage_is_artifact_path "obj/Release/a.json"               && ok "obj/ path is an artifact"    || bad "obj/ not detected"
+_triage_is_artifact_path "node_modules/x/y.js"             && ok "node_modules is an artifact" || bad "node_modules not detected"
+_triage_is_artifact_path "src/app/main.ts"                 && bad "source wrongly an artifact" || ok "source is not an artifact"
+_triage_is_artifact_path "build/lib.o"                     && ok ".o extension is an artifact" || bad ".o not detected"
+
+echo "== _triage_quality_gate =="
+_qg_repo() {
+    local d; d=$(mktemp -d)
+    ( cd "$d" && git init -q && git config user.email t@t && git config user.name t \
+      && mkdir -p src && printf 'base\n' > src/keep.txt && git add -A && git commit -q -m base ) >/dev/null 2>&1
+    printf '%s' "$d"
+}
+# PASS: small source edit
+d=$(_qg_repo); ( cd "$d" && printf 'fix\n' >> src/keep.txt )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "small source edit passes (rc 0)" 0 "$rc"; eq "small source edit no reason" "" "$reason"; rm -rf "$d"
+# PASS: large lockfile-only diff (the #79 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "line $i"; done; } > pkg/uv.lock )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "3000-line uv.lock-only diff passes" 0 "$rc"; rm -rf "$d"
+# REJECT: artifact path (the #84 shape)
+d=$(_qg_repo); ( cd "$d" && mkdir -p tests/T/bin/Release/net9.0 && printf 'x\n' > tests/T/bin/Release/net9.0/a.json )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "bin/ artifact rejected (rc 1)" 1 "$rc"; eq "artifact reason" "artifact" "$reason"; rm -rf "$d"
+# REJECT: over line budget (non-lockfile)
+d=$(_qg_repo); ( cd "$d" && { for i in $(seq 1 900); do echo "l$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "over line budget rejected" 1 "$rc"; eq "budget reason" "budget" "$reason"; rm -rf "$d"
+# REJECT: no-op / empty new file (the #116 shape)
+d=$(_qg_repo); ( cd "$d" && : > .lycheecache )
+reason=$(_triage_quality_gate "$d" o/r); rc=$?
+eq "empty-file-only diff rejected" 1 "$rc"; eq "noop reason" "noop" "$reason"; rm -rf "$d"
+# lockfile exemption does NOT rescue an over-budget NON-lockfile change alongside a big lockfile
+d=$(_qg_repo); ( cd "$d" && mkdir -p pkg && { for i in $(seq 1 3000); do echo "l$i"; done; } > pkg/uv.lock && { for i in $(seq 1 900); do echo "s$i"; done; } > src/big.txt )
+reason=$(RALPH_AUTOFIX_MAX_LINES=800 _triage_quality_gate "$d" o/r); rc=$?
+eq "big lockfile + over-budget source still rejected" 1 "$rc"; rm -rf "$d"
+unset -f _qg_repo
+
+echo "== quality gate wired into _triage_apply_fix =="
+GATE_LOG=$(mktemp); export SIGNAL_DIR=$(mktemp -d)
+_tt_gate() {
+    gh() { case "$1 $2" in "repo clone") ( cd "$4" 2>/dev/null && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base ) >/dev/null 2>&1 ;; "pr create") echo "PR-CREATED" >>"$GATE_LOG" ;; esac; return 0; }
+    run_ai_tool() { mkdir -p "$PROJECT_DIR/bin/Release" && printf 'junk\n' > "$PROJECT_DIR/bin/Release/x.dll"; return 0; }
+    _triage_safe_push_branch() { echo "PUSHED" >>"$GATE_LOG"; return 0; }
+    _triage_default_branch() { echo main; }
+    TOOL=opencode AI_RETRY_ATTEMPTS=1 AI_RETRY_BASE_DELAY=0 SELECTED_MODEL= RALPH_LOCAL_MODEL= \
+      _triage_apply_fix "o/r" main ralph/fix-ci-9 "prompt" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1
+    echo "rc=$?"
+}
+gate_rc=$( _tt_gate | sed -n 's/^rc=//p' )
+eq "artifact fix returns the quality-reject rc" "65" "$gate_rc"
+grep -q 'PR-CREATED' "$GATE_LOG" 2>/dev/null && bad "rejected fix still opened a PR" || ok "rejected fix opened no PR"
+grep -rql 'autofix_rejected' "$SIGNAL_DIR" 2>/dev/null && ok "rejected fix records autofix_rejected signal" || bad "no autofix_rejected signal"
+[[ "$RALPH_TRIAGE_RC_QUALITY_REJECT" != "$RALPH_TRIAGE_RC_PROVIDER_FAILURE" ]] && ok "reject rc != provider-failure rc (won't trip breaker)" || bad "reject rc collides with provider-failure rc"
+rm -f "$GATE_LOG"; rm -rf "$SIGNAL_DIR"; unset SIGNAL_DIR; unset -f _tt_gate
+
+echo "== _triage_workflow_fix_enabled: opt-in gate, default OFF =="
+unset RALPH_TRIAGE_ALLOW_WORKFLOW
+eq "unset -> disabled" "1" "$(_triage_workflow_fix_enabled; echo $?)"
+for v in 1 true TRUE yes on ON; do
+    eq "RALPH_TRIAGE_ALLOW_WORKFLOW=$v -> enabled" "0" "$(RALPH_TRIAGE_ALLOW_WORKFLOW=$v _triage_workflow_fix_enabled; echo $?)"
+done
+for v in 0 false no off wat ""; do
+    eq "RALPH_TRIAGE_ALLOW_WORKFLOW='$v' -> disabled" "1" "$(RALPH_TRIAGE_ALLOW_WORKFLOW="$v" _triage_workflow_fix_enabled; echo $?)"
+done
+
+echo "== _triage_filter_ci_churn: source-only vs opt-in workflow mode =="
+# Build a repo whose HEAD has a workflow, a non-workflow .github file, a lockfile and a source file,
+# then dirty all four + add an untracked workflow — exactly the shape a real autofix produces.
+_tt_churn_repo() {
+    local d="$1"
+    mkdir -p "$d/.github/workflows" "$d/src"
+    printf 'name: ci\n'      > "$d/.github/workflows/ci.yml"
+    printf '* @owner\n'      > "$d/.github/CODEOWNERS"
+    printf '{"v":1}\n'       > "$d/package-lock.json"
+    printf 'let a = 1\n'     > "$d/src/a.js"
+    git -C "$d" init -q 2>/dev/null
+    git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    git -C "$d" add -A >/dev/null 2>&1; git -C "$d" commit -qm base >/dev/null 2>&1
+    # the agent's edits
+    printf 'name: ci\n# fixed flag\n'    > "$d/.github/workflows/ci.yml"
+    printf '* @owner\n* @other\n'        > "$d/.github/CODEOWNERS"
+    printf '{"v":2}\n'                   > "$d/package-lock.json"
+    printf 'let a: number = 1\n'         > "$d/src/a.js"
+    printf 'name: new\n'                 > "$d/.github/workflows/added.yml"   # untracked
+}
+CH_OFF="$TMP/churn-off"; _tt_churn_repo "$CH_OFF"
+( unset RALPH_TRIAGE_ALLOW_WORKFLOW; _triage_filter_ci_churn "$CH_OFF" )
+off_status=$(git -C "$CH_OFF" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)
+eq "mode OFF: only the source file survives" "src/a.js" "$off_status"
+
+CH_ON="$TMP/churn-on"; _tt_churn_repo "$CH_ON"
+( RALPH_TRIAGE_ALLOW_WORKFLOW=1; export RALPH_TRIAGE_ALLOW_WORKFLOW; _triage_filter_ci_churn "$CH_ON" )
+on_status=$(git -C "$CH_ON" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)
+eq "mode ON: workflows (incl. untracked) + source survive; CODEOWNERS/lockfile reverted" \
+   ".github/workflows/added.yml|.github/workflows/ci.yml|src/a.js" "$on_status"
+
+echo "== _triage_filter_ci_churn: generated cache files (.lycheecache) are churn =="
+_tt_cache_repo() {
+    local d="$1"
+    mkdir -p "$d/src"
+    printf 'a\nb\nc\n'   > "$d/.lycheecache"
+    printf 'let a = 1\n' > "$d/src/a.js"
+    git -C "$d" init -q 2>/dev/null
+    git -C "$d" config user.email t@t; git -C "$d" config user.name t
+    git -C "$d" add -A >/dev/null 2>&1; git -C "$d" commit -qm base >/dev/null 2>&1
+}
+# reordered cache + a real source edit -> source survives, cache reverted
+CC1="$TMP/cache-mixed"; _tt_cache_repo "$CC1"
+printf 'c\na\nb\n' > "$CC1/.lycheecache"; printf 'let a: number = 1\n' > "$CC1/src/a.js"
+( _triage_filter_ci_churn "$CC1" )
+eq "cache reverted, source survives" "src/a.js" "$(git -C "$CC1" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)"
+# cache-only change (the #122 shape) -> filtered to a no-op
+CC2="$TMP/cache-only"; _tt_cache_repo "$CC2"
+printf 'c\nb\na\n' > "$CC2/.lycheecache"
+( _triage_filter_ci_churn "$CC2" )
+eq "cache-only change filtered to no-op" "" "$(git -C "$CC2" status --porcelain 2>/dev/null)"
+# nested tracked cache file -> reverted (the **/ glob catches any depth)
+CC3="$TMP/cache-nested"; mkdir -p "$CC3/sub"
+printf 'a\n' > "$CC3/sub/.lycheecache"; printf 'x\n' > "$CC3/keep.txt"
+git -C "$CC3" init -q 2>/dev/null; git -C "$CC3" config user.email t@t; git -C "$CC3" config user.name t
+git -C "$CC3" add -A >/dev/null 2>&1; git -C "$CC3" commit -qm base >/dev/null 2>&1
+printf 'b\n' > "$CC3/sub/.lycheecache"
+( _triage_filter_ci_churn "$CC3" )
+eq "nested tracked cache reverted" "" "$(git -C "$CC3" status --porcelain 2>/dev/null)"
+# opt-out: RALPH_TRIAGE_CACHE_FILES empty -> cache survives
+CC4="$TMP/cache-optout"; _tt_cache_repo "$CC4"
+printf 'c\na\nb\n' > "$CC4/.lycheecache"
+( RALPH_TRIAGE_CACHE_FILES=""; export RALPH_TRIAGE_CACHE_FILES; _triage_filter_ci_churn "$CC4" )
+eq "opt-out keeps the cache change" ".lycheecache" "$(git -C "$CC4" status --porcelain 2>/dev/null | awk '{print $2}')"
+unset -f _tt_cache_repo
+
+echo "== _triage_bot_identity: configurable, never impersonates the real ralph-bot account =="
+eq "default name is not 'ralph-bot'" "ralph-autofix" "$(_triage_bot_identity name)"
+eq "default email cannot map to any real GitHub account (.invalid TLD)" "ralph-autofix@ralph.invalid" "$(_triage_bot_identity email)"
+[[ "$(_triage_bot_identity email)" != *"ralph-bot@users.noreply.github.com"* ]] && ok "default email is NOT the real ralph-bot noreply" || bad "default still impersonates ralph-bot"
+eq "RALPH_BOT_NAME override wins" "resq-sw-bot" "$(RALPH_BOT_NAME=resq-sw-bot _triage_bot_identity name)"
+eq "RALPH_BOT_EMAIL override wins" "bot@resq.software" "$(RALPH_BOT_EMAIL=bot@resq.software _triage_bot_identity email)"
+grep -q 'user.name "ralph-bot"' "$R/lib/triage.sh" && bad "a hardcoded ralph-bot identity still remains in triage.sh" || ok "no hardcoded ralph-bot identity remains in triage.sh"
+
+echo "== _triage_autofix_timeout: RALPH_TRIAGE_TIMEOUT knob for heavy repos =="
+eq "RALPH_TRIAGE_TIMEOUT wins" 2700 "$(RALPH_TRIAGE_TIMEOUT=2700 _triage_autofix_timeout)"
+eq "falls back to RALPH_TOOL_TIMEOUT" 900 "$(unset RALPH_TRIAGE_TIMEOUT; RALPH_TOOL_TIMEOUT=900 _triage_autofix_timeout)"
+eq "default is 1800" 1800 "$(unset RALPH_TRIAGE_TIMEOUT RALPH_TOOL_TIMEOUT; _triage_autofix_timeout)"
+eq "non-numeric falls back to 1800" 1800 "$(RALPH_TRIAGE_TIMEOUT=abc _triage_autofix_timeout)"
+
+echo "== _triage_strip_self_control_surface: workflows are part of Ralph's own control surface =="
+SELF="$TMP/selfwf"; mkdir -p "$SELF/lib" "$SELF/.github/workflows"
+printf '#!/bin/bash\n' > "$SELF/ralph.sh"; printf 'execute_iteration() { :; }\n' > "$SELF/lib/engine.sh"
+printf 'name: ok\n' > "$SELF/.github/workflows/ci.yml"
+git -C "$SELF" init -q 2>/dev/null; git -C "$SELF" config user.email t@t; git -C "$SELF" config user.name t
+git -C "$SELF" add -A >/dev/null 2>&1; git -C "$SELF" commit -qm base >/dev/null 2>&1
+printf 'name: pwned\n' > "$SELF/.github/workflows/ci.yml"
+printf 'name: backdoor\n' > "$SELF/.github/workflows/evil.yml"
+RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_strip_self_control_surface "$SELF" "o/ralph" >/dev/null 2>&1
+eq "self-repo: workflow edits discarded even in workflow mode" "" \
+   "$(git -C "$SELF" status --porcelain 2>/dev/null | awk '{print $2}' | sort | paste -sd'|' -)"
+
+echo "== _triage_remote_branch_exists: stale-finding pre-check =="
+gh() { case "$*" in *repos/o/r/branches/live*) echo "live" ;; *repos/o/r/branches/gone*) echo "gh: Not Found (HTTP 404)" >&2; return 1 ;; *) echo "HTTP 503: Service Unavailable" >&2; return 1 ;; esac; }
+eq "existing branch -> 0"                 "0"  "$(_triage_remote_branch_exists o/r live; echo $?)"
+eq "deleted branch (404) -> 1 (stale)"    "1"  "$(_triage_remote_branch_exists o/r gone; echo $?)"
+eq "transient failure -> 75 (proceed)"    "75" "$(_triage_remote_branch_exists o/r flaky; echo $?)"
+unset -f gh
+
+echo "== _triage_apply_fix: a vanished head branch is a clean skip, not an error =="
+SKIP_LOG="$TMP/skip.log"; : > "$SKIP_LOG"
+gh() {
+    echo "gh $*" >> "$SKIP_LOG"
+    case "$*" in
+        repo\ view*)                   echo "main" ;;
+        pr\ list*)                     printf '[]\n' ;;
+        api\ repos/o/r/branches/*)     echo "gh: Not Found (HTTP 404)" >&2; return 1 ;;
+        *)                             echo "unexpected gh args: $*" >&2; return 9 ;;
+    esac
+}
+skip_rc=0
+TOOL=opencode _triage_apply_fix "o/r" "dependabot/npm_and_yarn/gone" ralph/fix-ci-1 "p" "t" "b" 1 "" "ci:o/r" >/dev/null 2>&1 || skip_rc=$?
+eq "stale branch -> rc 0 (skip, not failure)" "0" "$skip_rc"
+grep -q 'repo clone' "$SKIP_LOG" 2>/dev/null && bad "stale branch still attempted a clone" || ok "stale branch skipped before cloning"
+unset -f gh; rm -f "$SKIP_LOG"
+
+echo "== _triage_gc_workdirs: reclaim workspaces orphaned by SIGKILL/reboot =="
+GCB="$TMP/gcwork"; mkdir -p "$GCB/tmp.old" "$GCB/tmp.young" "$GCB/keepme" "$GCB/tmp.old/nested"
+touch -d '30 hours ago' "$GCB/tmp.old" "$GCB/keepme" 2>/dev/null || touch -A -3000 "$GCB/tmp.old" "$GCB/keepme" 2>/dev/null
+RALPH_TRIAGE_WORKDIR="$GCB" _triage_gc_workdirs >/dev/null 2>&1
+eq "old tmp.* workspace reclaimed"        "0" "$([[ -d "$GCB/tmp.old"   ]] && echo 1 || echo 0)"
+eq "young tmp.* workspace kept"           "1" "$([[ -d "$GCB/tmp.young" ]] && echo 1 || echo 0)"
+eq "non-workspace dir never touched"      "1" "$([[ -d "$GCB/keepme"    ]] && echo 1 || echo 0)"
+eq "missing base dir is a clean no-op"    "0" "$(RALPH_TRIAGE_WORKDIR="$TMP/nope-gc" _triage_gc_workdirs >/dev/null 2>&1; echo $?)"
+eq "non-numeric TTL falls back to default" "0" "$(RALPH_TRIAGE_WORKDIR="$GCB" RALPH_TRIAGE_WORKDIR_TTL_HOURS=abc _triage_gc_workdirs >/dev/null 2>&1; echo $?)"
+
+echo "== fix-ci prompt clause tracks the mode =="
+unset RALPH_TRIAGE_ALLOW_WORKFLOW
+printf '%s' "$(_triage_workflow_prompt_clause)" | grep -q 'Do NOT' && ok "mode OFF: prompt forbids workflow edits" || bad "mode OFF: prompt lost the workflow prohibition"
+printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -qi 'workflow' && ok "mode ON: prompt mentions workflow files" || bad "mode ON: prompt missing workflow guidance"
+printf '%s' "$(RALPH_TRIAGE_ALLOW_WORKFLOW=1 _triage_workflow_prompt_clause)" | grep -q 'Do NOT change dependency versions' && ok "mode ON: dependency prohibition retained" || bad "mode ON: lost the dependency prohibition"
+
+echo "== CI-autofix prompt tells the agent to work in-place (no /tmp scratch) =="
+CIP="$TMP/ci-prompt.txt"
+(
+    gh() { case "$*" in
+             run\ list*) printf '[{"databaseId":42,"url":"https://x/run/42","headBranch":"main"}]\n' ;;
+             run\ view*--log-failed*) printf 'ERROR: build failed\nTS2304: cannot find name X\n' ;;
+             repo\ view*) echo "main" ;;
+             *) printf '' ;;
+           esac; }
+    _triage_apply_fix() { printf '%s' "$4" > "$CIP"; return 0; }
+    triage_autofix_ci "o/r" 1 >/dev/null 2>&1
+)
+grep -qiE 'not create.*under /tmp|work inside the current director' "$CIP" 2>/dev/null && ok "CI-autofix prompt forbids /tmp scratch" || bad "no-/tmp instruction missing from CI-autofix prompt: $(cat "$CIP" 2>/dev/null)"
+rm -f "$CIP"
 
 printf '\n== TOTAL: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

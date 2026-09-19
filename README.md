@@ -4,6 +4,11 @@ Ralph is a long-running autonomous agent loop for software projects. It keeps an
 
 Use Ralph when you want an agent to keep working from a persistent plan instead of a single prompt.
 
+> **Contributing or curious about the *why*?** See [docs/DESIGN.md](docs/DESIGN.md) — the
+> design decisions, the reasoning, the recurring principles (fail-open vs fail-closed,
+> verification gates, the "autonomous up to the merge" trust boundary), and the lessons
+> learned the hard way.
+
 ## What Ralph Does
 
 - Runs an iterative agent loop through tools such as `opencode`, `claude`, `amp`, `agy`, `codex`, `jules`, `jules-cli`, and GitHub Copilot.
@@ -149,6 +154,22 @@ jq '{run_id, status, reason, phase, heartbeat_at, heartbeat_sequence, current_it
 | `failed` | A model, provider, stall, budget, or unexpected process failure stopped the run. |
 | `interrupted` | HUP, INT, TERM, or a stale active manifest from an unclean exit. |
 
+```mermaid
+stateDiagram-v2
+    [*] --> initializing
+    initializing --> running
+    running --> completed: gates passed / backlog drained
+    running --> paused: --once handoff
+    running --> incomplete: iteration ceiling reached
+    running --> failed: model / provider / stall / budget failure
+    running --> interrupted: HUP / INT / TERM / stale manifest
+    paused --> running: resumed
+    completed --> [*]
+    incomplete --> [*]
+    failed --> [*]
+    interrupted --> [*]
+```
+
 Writes use same-directory temporary files and atomic renames. Heartbeat replacements are serialized, and `heartbeat_sequence` starts at `0` and increments exactly once for each persisted heartbeat. If a process dies before its EXIT trap can finalize, the next singleton run marks the prior active manifest `interrupted` with reason `unclean_exit_detected`, preserves its final heartbeat sequence, and records the recovering run ID.
 
 ### Executor Boundaries
@@ -216,6 +237,22 @@ Supported AI tools:
 ```
 
 ### Signals, Skills, and Lint
+
+Ralph's memory is a **ratchet**: recurring problems compound into deduped *signals*,
+signals that stay resolved become *candidate* skills, candidates that survive a probation
+window become **verified** skills, and failure themes are mined across the whole run
+ledger. Verified knowledge grounds every future run — so Ralph gets better at your project
+the longer it runs.
+
+```mermaid
+flowchart LR
+    P["Recurring problem"] --> S["Signal<br/>(deduped by theme)"]
+    S -->|"stays resolved"| K["Candidate skill"]
+    K -->|"survives probation"| V["Verified skill"]
+    LG["Run ledger"] --> M["Mine<br/>(cross-run failure themes)"]
+    M --> S
+    V -->|"grounds the next run"| P
+```
 
 ```bash
 ./ralph.sh signal ls
@@ -289,6 +326,46 @@ It can also prepare opt-in fixes:
 ./ralph.sh triage --resolve-reviews <pr>
 ./ralph.sh triage --suggest --apply
 ./ralph.sh triage --tidy --apply          # remove legacy full-body history comments from triage issues
+```
+
+**Workflow autofix (opt-in, off by default).** Autofix is *source-only*: everything under
+`.github/` is discarded before a PR is opened. That is the right default, but it makes one class
+of failure unfixable — when an action changes its own CLI (a removed or renamed flag), the
+workflow file is the *only* place a fix can live, so the agent finds the correct fix and Ralph
+throws it away. `--allow-workflow-fix` (or `RALPH_TRIAGE_ALLOW_WORKFLOW=1`) lets edits under
+`.github/workflows/` survive the filter and reach a PR:
+
+```bash
+./ralph.sh triage --fix-ci --allow-workflow-fix --apply
+```
+
+The safety model is unchanged — allowlist-scoped, never pushed to a default branch, opened as a
+PR for a human to merge. On top of that, the mode is deliberately narrow:
+
+- only `.github/workflows/` is spared; the rest of `.github/` (CODEOWNERS, issue templates,
+  Dependabot config) is still discarded as churn,
+- the agent is told to keep such edits behaviour-preserving and to leave `permissions:`, secrets,
+  `if:` actor conditions, and the set of actions alone,
+- Ralph's **own** workflows stay off-limits even with the mode on — `.github/` is part of the
+  self-control surface that is stripped when triage is pointed at the Ralph repo,
+- any PR that does touch a workflow is logged as a warning and carries a ⚠️ banner in its body,
+  because a CI change alters what runs on every future commit.
+
+Leave it off for unattended patrols unless you specifically want CI definitions in scope.
+
+**Autonomous up to the merge.** In apply modes (typically on the [org patrol](#public-org-patrol)),
+Ralph opens verified `ralph/fix-*` PRs unattended and labels the green, mergeable ones
+`ralph-ready` — then **stops**. It never merges, never touches a default branch, and only
+ever writes source-only changes on an allowlist. The merge stays your call.
+
+```mermaid
+flowchart LR
+    subgraph auto["🤖 Autonomous — allowlisted, unattended"]
+        direction LR
+        O["Observe<br/>red CI"] --> X["Fix on ralph/fix-*<br/>(source-only)"]
+        X --> V["Verify<br/>green + mergeable"] --> R["Label<br/>ralph-ready"]
+    end
+    R ==>|"⛔ never merges"| H["👤 You<br/>review + merge"]
 ```
 
 `--suggest` keeps ONE idempotent digest issue per repo: it edits the body in place when findings change and, only then, posts a compact `+N new, -M resolved` delta comment (never the full digest), so the issue stays quiet when nothing changes. `--tidy` is a one-time cleanup that deletes Ralph's own pre-delta full-body history comments (dry-run by default; leaves human and delta comments untouched).
@@ -465,6 +542,8 @@ Common environment variables:
 | `RALPH_TARGETS` | Comma-separated GitHub triage allowlist. |
 | `RALPH_TRIAGE_CONCURRENCY` | Repos triaged in parallel per run (default `1` = sequential). Higher values fan out across the allowlist and flush each repo's output in order; for `--apply`/autofix modes this means concurrent clones + agent runs, so raise it knowingly. |
 | `RALPH_TRIAGE_WORKDIR` | Parent directory for autofix clone workspaces. Defaults to `$XDG_CACHE_HOME/ralph/work` (else `~/.cache/ralph/work`) — a **disk-backed** location, since clone + agent builds (`npm install`, `tsc`, `cargo`) are disk-heavy and a full RAM-backed `/tmp` (tmpfs) makes checkouts fail with ENOSPC. Falls back to the system temp dir if the base can't be created. |
+| `RALPH_TRIAGE_WORKDIR_TTL_HOURS` | Age past which an orphaned autofix clone workspace is reclaimed, default `6`. Triage sweeps `RALPH_TRIAGE_WORKDIR` at startup because the per-run cleanup trap cannot fire when a patrol is SIGKILLed (reboot, OOM), leaving tens of MB per clone behind. Only `tmp.*` directories directly under the base are removed, and only past the TTL, so a concurrent triage is never disturbed. |
+| `RALPH_TRIAGE_ALLOW_WORKFLOW` | Set to `1`/`true`/`yes`/`on` (or pass `--allow-workflow-fix`) to let autofix edit `.github/workflows/`. **Default off** — autofix is otherwise source-only. See [workflow autofix](#cross-repo-github-triage). Ralph's own `.github/` is stripped regardless. |
 | `RALPH_TRIAGE_EXPECT_DISABLED_ISSUES_REPOS` | Optional comma/space/newline-separated `owner/repo` list whose disabled GitHub Issues setting is expected, such as public forks; `--suggest --apply` logs an info skip instead of a warning for those repos. |
 | `RALPH_ORG_CODE_WRITE_TARGETS` | Comma, space, or newline-separated `owner/repo` list required by `scripts/org-patrol` code-changing apply modes (`fix-ci-apply`, `fix-security-apply`); the list is intersected with discovered public org targets before PR-writing triage runs. |
 | `RALPH_ORG_LOG_RETENTION` | Number of `scripts/org-patrol` logs to keep per org, default `48`; set `0` to keep all logs. |
