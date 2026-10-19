@@ -11,7 +11,8 @@
 #   SYNAPSE_URL        default http://127.0.0.1:8080
 #   SYNAPSE_TENANT     default ralph-dev            tenant_id / X-Tenant-Id
 #   SYNAPSE_PRINCIPAL  default agent:ralph          default X-Principal-Id when none is passed
-#   SYNAPSE_TOKEN      optional                     Bearer JWT; when set, sent as Authorization (X-* then ignored server-side)
+#   SYNAPSE_TOKEN      optional                     Bearer JWT; when set, sent as Authorization (X-* then ignored server-side).
+#                                                   Handed to curl on a file descriptor, never on argv (see _syn_curl).
 #   BIND_ADDR / SYNAPSE_BIND_ADDR default 127.0.0.1  startup guard refuses non-loopback without AUTH_JWT_*
 #   SYNAPSE_TIMEOUT    default 10                   per-call seconds
 #   SYNAPSE_RETRIES    default 2                    retries on retriable status (5xx / 429 / network)
@@ -53,14 +54,28 @@ synapse_auth_guard() {
 # Millisecond clock with a portable fallback (GNU date has %N; BSD/macOS does not).
 _syn_ms()        { local n; n=$(date +%s%3N 2>/dev/null); [[ "$n" == *N* || -z "$n" ]] && n=$(( $(date +%s) * 1000 )); echo "$n"; }
 
-# Populate the global _SYN_HDR curl header array for a principal.
+# Populate the global _SYN_HDR curl header array for a principal. NON-secret headers only: every
+# element becomes a curl argv element, which any local user can read from /proc/<pid>/cmdline.
+# The bearer is added by _syn_curl instead.
 _syn_headers() {
     local principal="$1"
     _SYN_HDR=(-H "Content-Type: application/json"
               -H "X-Principal-Id: $principal"
               -H "X-Tenant-Id: $(_syn_tenant)")
-    [[ -n "${SYNAPSE_TOKEN:-}" ]] && _SYN_HDR+=(-H "Authorization: Bearer $SYNAPSE_TOKEN")
     return 0
+}
+
+# curl wrapper that adds the bearer (when SYNAPSE_TOKEN is set) WITHOUT putting it on any argv.
+# `-H @<(...)` makes curl read the header line from /dev/fd/N, and printf is a bash builtin, so the
+# token is never an argv element of curl, of the substitution subshell, or of any helper. The process
+# substitution must be created here, at the curl call: its fd closes when this command finishes, so it
+# cannot be pre-built into _SYN_HDR. Args: curl args, URL last. stdin is passed through untouched.
+_syn_curl() {
+    if [[ -n "${SYNAPSE_TOKEN:-}" ]]; then
+        curl -H @<(printf 'Authorization: Bearer %s\n' "$SYNAPSE_TOKEN") "$@"
+    else
+        curl "$@"
+    fi
 }
 
 #######################################
@@ -78,7 +93,7 @@ _synapse_call() {
     while :; do
         local args=(-sS -m "$(_syn_timeout)" -X "$method" "${_SYN_HDR[@]}" -w $'\n%{http_code}')
         [[ -n "$body" ]] && args+=(--data "$body")
-        out=$(curl "${args[@]}" "$url" 2>/dev/null)
+        out=$(_syn_curl "${args[@]}" "$url" 2>/dev/null)
         code="${out##*$'\n'}"; payload="${out%$'\n'*}"
         case "$code" in
             2*) printf '%s' "$payload"; return 0 ;;
@@ -163,7 +178,7 @@ _syn_lt_step() {
     local retries="${SYNAPSE_LIVETEST_RETRIES:-${SYNAPSE_RETRIES:-2}}" attempt=0 delay=1
     local t0 t1 ms out code
     while :; do
-        t0=$(_syn_ms); out=$(curl "${args[@]}" "${U}${path}" 2>/dev/null); t1=$(_syn_ms); ms=$((t1 - t0))
+        t0=$(_syn_ms); out=$(_syn_curl "${args[@]}" "${U}${path}" 2>/dev/null); t1=$(_syn_ms); ms=$((t1 - t0))
         code="${out##*$'\n'}"; out="${out%$'\n'*}"
         if [[ "$code" =~ ^2 ]] && jq -e "$test" >/dev/null 2>&1 <<<"$out"; then
             printf '  [PASS] %-16s %sms\n' "$name" "$ms"; return 0

@@ -90,8 +90,10 @@ AUTH_JWT_SECRET=dev-secret synapse_auth_guard >/dev/null 2>&1; eq "non-loopback 
 unset AUTH_JWT_SECRET
 AUTH_JWKS_URL=https://issuer.example/jwks.json synapse_auth_guard >/dev/null 2>&1; eq "non-loopback bind with JWKS passes" 0 "$?"
 unset AUTH_JWKS_URL BIND_ADDR
+# The bearer must never sit in the pre-built header array (it would become curl argv); _syn_curl
+# hands it to curl on a file descriptor. tests/test_synapse_auth_argv.sh proves it reaches curl.
 SYNAPSE_TOKEN=caller.jwt.token _syn_headers "agent:ralph"
-printf '%s\n' "${_SYN_HDR[@]}" | grep -q 'Authorization: Bearer caller.jwt.token' && ok "Ralph caller sends bearer token when SYNAPSE_TOKEN is set" || bad "missing Authorization header: ${_SYN_HDR[*]}"
+[[ "${_SYN_HDR[*]}" != *caller.jwt.token* ]] && ok "bearer token is kept out of the curl argv header array" || bad "bearer leaked into _SYN_HDR (curl argv)"
 unset SYNAPSE_TOKEN
 
 _calls() { wc -l < "$SYN_CALL_LOG" | tr -d ' '; }

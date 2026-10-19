@@ -34,6 +34,7 @@ working tree.
 | `test_triage.sh` | Cross-repo read-only GitHub triage: allowlist parsing (env + `ralph.targets`, dedup/comments), gh-JSON parsers for failing CI + Dependabot/code-scanning/secret-scanning, severity ranking, error-object guard, CI-autofix safety gates, opt-in workflow autofix, stale-branch skip, workspace GC (251) |
 | `test_memory.sh` | Genetic memory: `<memory>…</memory>` extraction from agent output, `store_lesson` dedup + defensive init, `recall_lessons` read-back, null-safety (13) |
 | `test_agents.sh` | Synapse client and per-agent live probes with hermetic HTTP and CLI fixtures (31) |
+| `test_synapse_auth_argv.sh` | Synapse bearer stays off argv: a fake `curl` on PATH records its argv, its `/proc` cmdline and the headers it received across `_synapse_call`, retries and the live test; the token must reach curl and appear in no process's argv (28) |
 | `test_ollama_agent.sh` | Local Ollama agent tool loop with a fake HTTP server, premature-finish rejection, and bounded file writes (4) |
 | `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 18 cases) |
 

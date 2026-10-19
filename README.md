@@ -526,7 +526,7 @@ Common environment variables:
 | `RALPH_SWARM_MAX_CONCURRENT` | Swarm concurrency cap. |
 | `SYNAPSE_ENABLED` | Set to `1` to retrieve bounded Synapse context during each main iteration and inject it into the prompt; failures are fail-open. |
 | `SYNAPSE_URL` / `SYNAPSE_TENANT` / `SYNAPSE_PRINCIPAL` | Synapse endpoint and identity used by the optional grounding hook and `ralph synapse` commands. |
-| `SYNAPSE_TOKEN` | Bearer JWT sent by Ralph callers when Synapse verifies JWT auth. |
+| `SYNAPSE_TOKEN` | Bearer JWT sent by Ralph callers when Synapse verifies JWT auth. Passed to curl on a file descriptor, never on the command line. |
 | `BIND_ADDR` / `SYNAPSE_BIND_ADDR` | Synapse bind address for operator checks. Non-loopback binds require verified JWT config. |
 | `AUTH_JWT_SECRET` / `AUTH_JWT_PUBLIC_KEY` / `AUTH_JWKS_URL` | Synapse JWT verification configuration; required before exposing Synapse beyond loopback. |
 | `SYNAPSE_GROUND_TOPK` / `SYNAPSE_GROUND_PROMPT_CHARS` | Bound in-loop Synapse retrieval result count and prompt-instruction excerpt size. |
