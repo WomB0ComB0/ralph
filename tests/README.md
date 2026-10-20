@@ -12,32 +12,35 @@ working tree.
 
 ## Suites
 
+Case counts are not listed here: they drift with nearly every change. `./tests/run_all.sh`
+prints each suite's live pass/fail count.
+
 | File | Covers |
 |------|--------|
-| `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args and explicit `flock` provisioning, name-only sandbox secret forwarding (no value in argv/logs), secret scan, flock singleton (42 cases) |
-| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping, and explicit sandbox CLI precedence (23) |
-| `test_run_manifest.sh` | Durable run lifecycle: allowlisted schema, permissions, atomic and serialized monotonic heartbeats, lock contention fallback, progress, explicit outcomes, resume lineage, stale-run reconciliation, unexpected exits, and HUP/INT/TERM handling (54) |
-| `test_processes.sh` | Supervised process boundaries: run-local mode-`600` identity handshake, session/group isolation, direct exit/output preservation, daemonized descendant completion, late-fork TERM/KILL escalation, PID-reuse guards, parent-death cleanup, and bounded sanitized evidence (48) |
-| `test_cleanup_stats.sh` | Read-only `cleanup-stats` aggregation across retained runs: valid aggregation, kind separation, nearest-rank p50/p95 edges, malformed-artifact skipping, empty/missing input, retention boundary (immediate children only), redaction, and symlink safety (49) |
-| `test_loop_guards.sh` | Pure loop guard predicates: stall ceilings, run budget ceilings, and backlog-drain completion gate enforcement (23) |
-| `test_runtime_verification.sh` | Runtime verification: safe declared command discovery/execution, timeout evidence, opt-in live smoke, cleanup evidence, and project-owned health-port checks (21) |
-| `test_lists.sh` | Configurable excludes + list defaults: `hash_exclude_names`, health-port / model-family / sandbox-env overrides, `gitdiff-exclude`, project-hash cache invalidates on uncommitted changes (14) |
-| `test_signals.sh` | Signal + LOG.md compounding: `theme_key` normalization/dedup, lifecycle (open/ack/resolved, regressed-reopen), bounded recall, prune, co-occurrence (`related`) links (39) |
-| `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** (32) |
-| `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history (9) |
-| `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode (13) |
-| `test_quality_gate.sh` | Durable `QUALITY.md` rubric creation, prompt injection, and `Quality Gate: pass` completion policy (11) |
-| `test_ai_tools.sh` | AI-tool command builder and execution lifecycle: per-tool invocation, headless flags, scoped env, timeout/quiescence behavior, output normalization, session resume, process-group isolation, no-survivor timeout/TERM cleanup, SIGKILL parent-death guarding, and singleton-lock release (122) |
-| `test_jules_provider.sh` | Jules remote executor: payload modes, persisted session reuse, PR completion output, and patch-mode local apply with fixture API calls (22) |
-| `test_jules_auth_argv.sh` | Jules API key stays off argv: a fake `curl` on PATH records its argv, its `/proc` cmdline and the headers it received across GET, POST, sequential calls and a failing call; the key must reach curl and appear in no process's argv (30) |
-| `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude alias, amp/codex self-select, agy `agy models`, determine_model source precedence, param-count guard, alias validation (18) |
-| `test_fallback.sh` | Smart model management: `classify_tool_failure` (rate-limit/overload/quota/auth/timeout), `build_model_chain` (primary + fallbacks, local-first, dedup), `preferred_local_model`, `run_ai_with_fallback` graceful degradation, non-sticky, stderr classify, real provider payloads + exit/signal codes (128+N range), rc guard (46) |
-| `test_triage.sh` | Cross-repo read-only GitHub triage: allowlist parsing (env + `ralph.targets`, dedup/comments), gh-JSON parsers for failing CI + Dependabot/code-scanning/secret-scanning, severity ranking, error-object guard, CI-autofix safety gates, opt-in workflow autofix, stale-branch skip, workspace GC (251) |
-| `test_memory.sh` | Genetic memory: `<memory>…</memory>` extraction from agent output, `store_lesson` dedup + defensive init, `recall_lessons` read-back, null-safety (13) |
-| `test_agents.sh` | Synapse client and per-agent live probes with hermetic HTTP and CLI fixtures (31) |
-| `test_synapse_auth_argv.sh` | Synapse bearer stays off argv: a fake `curl` on PATH records its argv, its `/proc` cmdline and the headers it received across `_synapse_call`, retries and the live test; the token must reach curl and appear in no process's argv (28) |
-| `test_ollama_agent.sh` | Local Ollama agent tool loop with a fake HTTP server, premature-finish rejection, and bounded file writes (4) |
-| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`, 18 cases) |
+| `test_now_tier.sh` | Durability + safety: retry/backoff, recovery state, failure-≠-done + circuit breaker, Docker sandbox args and explicit `flock` provisioning, name-only sandbox secret forwarding (no value in argv/logs), secret scan, flock singleton |
+| `test_next_tier.sh` | Triggers + observability + self-tuning: `--once`, backlog-drain, RUN_ID/run dirs, `review_run`, lazy-threshold recommendation, entry-point dep-gate deferral, `--version`, `RALPH_UNATTENDED` mapping, and explicit sandbox CLI precedence |
+| `test_run_manifest.sh` | Durable run lifecycle: allowlisted schema, permissions, atomic and serialized monotonic heartbeats, lock contention fallback, progress, explicit outcomes, resume lineage, stale-run reconciliation, unexpected exits, and HUP/INT/TERM handling |
+| `test_processes.sh` | Supervised process boundaries: run-local mode-`600` identity handshake, session/group isolation, direct exit/output preservation, daemonized descendant completion, late-fork TERM/KILL escalation, PID-reuse guards, parent-death cleanup, and bounded sanitized evidence |
+| `test_cleanup_stats.sh` | Read-only `cleanup-stats` aggregation across retained runs: valid aggregation, kind separation, nearest-rank p50/p95 edges, malformed-artifact skipping, empty/missing input, retention boundary (immediate children only), redaction, and symlink safety |
+| `test_loop_guards.sh` | Pure loop guard predicates: stall ceilings, run budget ceilings, and backlog-drain completion gate enforcement |
+| `test_runtime_verification.sh` | Runtime verification: safe declared command discovery/execution, timeout evidence, opt-in live smoke, cleanup evidence, and project-owned health-port checks |
+| `test_lists.sh` | Configurable excludes + list defaults: `hash_exclude_names`, health-port / model-family / sandbox-env overrides, `gitdiff-exclude`, project-hash cache invalidates on uncommitted changes |
+| `test_signals.sh` | Signal + LOG.md compounding: `theme_key` normalization/dedup, lifecycle (open/ack/resolved, regressed-reopen), bounded recall, prune, co-occurrence (`related`) links |
+| `test_skills.sh` | Guarded skill-authoring: candidate→approved guard, auto-capture, ranked recall, synthetic-note rejection, **cross-project (global) skills** |
+| `test_swarm.sh` | Bounded swarm scheduler: live-PID active count, dead-agent reaping, slot-gating, run-history |
+| `test_lint.sh` | Knowledge-lint curator pass: gaps / orphaned / stale / approval-backlog / high-severity, quiet mode |
+| `test_quality_gate.sh` | Durable `QUALITY.md` rubric creation, prompt injection, and `Quality Gate: pass` completion policy |
+| `test_ai_tools.sh` | AI-tool command builder and execution lifecycle: per-tool invocation, headless flags, scoped env, timeout/quiescence behavior, output normalization, session resume, process-group isolation, no-survivor timeout/TERM cleanup, SIGKILL parent-death guarding, and singleton-lock release |
+| `test_jules_provider.sh` | Jules remote executor: payload modes, persisted session reuse, PR completion output, and patch-mode local apply with fixture API calls |
+| `test_jules_auth_argv.sh` | Jules API key stays off argv: a fake `curl` on PATH records its argv, its `/proc` cmdline and the headers it received across GET, POST, sequential calls and a failing call; the key must reach curl and appear in no process's argv. Recording `printf`/`echo` stubs on PATH and a canary longer than the pipe buffer also catch the key being handed to an external program (`/usr/bin/printf`, `env printf`); a self-check proves both traps fire |
+| `test_models.sh` | Dynamic model resolution (`_pick_latest_model`/`resolve_model_for_tool`): newest-per-role from a live list, claude alias, amp/codex self-select, agy `agy models`, determine_model source precedence, param-count guard, alias validation |
+| `test_fallback.sh` | Smart model management: `classify_tool_failure` (rate-limit/overload/quota/auth/timeout), `build_model_chain` (primary + fallbacks, local-first, dedup), `preferred_local_model`, `run_ai_with_fallback` graceful degradation, non-sticky, stderr classify, real provider payloads + exit/signal codes (128+N range), rc guard |
+| `test_triage.sh` | Cross-repo read-only GitHub triage: allowlist parsing (env + `ralph.targets`, dedup/comments), gh-JSON parsers for failing CI + Dependabot/code-scanning/secret-scanning, severity ranking, error-object guard, CI-autofix safety gates, opt-in workflow autofix, stale-branch skip, workspace GC |
+| `test_memory.sh` | Genetic memory: `<memory>…</memory>` extraction from agent output, `store_lesson` dedup + defensive init, `recall_lessons` read-back, null-safety |
+| `test_agents.sh` | Synapse client and per-agent live probes with hermetic HTTP and CLI fixtures |
+| `test_synapse_auth_argv.sh` | Synapse bearer stays off argv: a fake `curl` on PATH records its argv, its `/proc` cmdline and the headers it received across `_synapse_call`, retries and the live test; the token must reach curl and appear in no process's argv, with the same external-`printf` traps and self-check |
+| `test_ollama_agent.sh` | Local Ollama agent tool loop with a fake HTTP server, premature-finish rejection, and bounded file writes |
+| `run_internal_tests.sh` | Wrapper for the native `ralph --test` (the suite embedded in `lib/tools.sh`) |
 
 ## Writing tests
 
