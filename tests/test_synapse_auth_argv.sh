@@ -6,6 +6,15 @@
 # /proc cmdline is the real argv the kernel exposes. It records that argv, every header
 # it was handed (literal -H values and the contents of -H @file), every --data body, and
 # answers like Synapse. No network, no real Synapse.
+#
+# The fake curl alone cannot see a helper process that has already exited, so two more traps
+# catch the token being handed to an EXTERNAL program (e.g. /usr/bin/printf or `env printf`
+# writing the header) instead of the printf builtin:
+#   - recording `printf`/`echo` stubs go first on PATH. The builtins never reach them, so a stub
+#     runs only when something execs an external one, and it logs whether the token was on its argv.
+#   - the token canary is longer than the 64 KiB pipe buffer, so an external writer of the
+#     -H @fd header (absolute path included) is still blocked mid-write, alive with the token on
+#     its argv, when the fake curl scans every process.
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export VERBOSE=false
 # shellcheck disable=SC1090
@@ -27,6 +36,7 @@ mkdir -p "$TMP/bin"
 cat >"$TMP/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 log="${FAKE_CURL_LOG:?}"
+args=("$@"); n=${#args[@]}; url="${args[n-1]}"
 printf 'CALL\n' >>"$log.argv"
 printf 'ARG %s\n' "$@" >>"$log.argv"
 # The argv the kernel exposes for THIS process (what another local user would read).
@@ -36,13 +46,20 @@ if [[ -r "/proc/$$/cmdline" ]]; then
 fi
 # Every live process's argv while curl runs: the token must be in none of them.
 if [[ -n "${FAKE_CURL_NEEDLE:-}" && -d /proc/self ]]; then
+    # Wait (bounded) until each -H @file pipe has data first. From then until the header is read
+    # below, an external writer of the over-pipe-buffer canary is blocked mid-write, still alive.
+    for ((i = 0; i + 1 < n; i++)); do
+        [[ "${args[i]}" == -H && "${args[i+1]}" == @* ]] || continue
+        exec {w}<"${args[i+1]#@}" || continue
+        for ((t = 0; t < 500; t++)); do read -t 0 -u "$w" && break; sleep 0.01; done
+        exec {w}<&-
+    done
     for f in /proc/[0-9]*/cmdline; do
         c=""
         { while IFS= read -r -d '' a; do c+="$a "; done <"$f"; } 2>/dev/null
         [[ "$c" == *"$FAKE_CURL_NEEDLE"* ]] && printf 'LEAK %s\n' "${f%/cmdline}" >>"$log.leaks"
     done
 fi
-args=("$@"); n=${#args[@]}; url="${args[n-1]}"
 for ((i = 0; i < n; i++)); do
     case "${args[i]}" in
         -H)
@@ -65,28 +82,65 @@ case "${url##*/}" in
 esac
 FAKE
 chmod +x "$TMP/bin/curl"
+
+# --- recording printf/echo stubs on PATH --------------------------------------
+# The builtins always win over PATH, so these run only when something execs an EXTERNAL
+# printf/echo (env printf, exec printf, xargs, ...). Each one logs whether the token was
+# on its argv, then behaves like the real command.
+for helper in printf echo; do
+    cat >"$TMP/bin/$helper" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+    if [[ -n "${FAKE_CURL_NEEDLE:-}" && "$a" == *"$FAKE_CURL_NEEDLE"* ]]; then
+        builtin printf 'LEAK %s\n' "${0##*/}" >>"${FAKE_CURL_LOG:?}.helpers"
+        break
+    fi
+done
+builtin "${0##*/}" "$@"
+STUB
+    chmod +x "$TMP/bin/$helper"
+done
 export PATH="$TMP/bin:$PATH"
 export FAKE_CURL_LOG="$TMP/curl"
 sleep() { :; }   # instant retry backoff
 
-reset_logs() { rm -f "$FAKE_CURL_LOG".*; touch "$FAKE_CURL_LOG".{argv,cmdline,headers,data,leaks}; }
+reset_logs() { rm -f "$FAKE_CURL_LOG".*; touch "$FAKE_CURL_LOG".{argv,cmdline,headers,data,leaks,helpers}; }
 count() { local n; n=$(grep -cF -- "$2" "$1" 2>/dev/null); printf '%s' "${n:-0}"; }
 
 export SYNAPSE_URL="http://synapse.test:8080" SYNAPSE_TENANT="ralph-dev" SYNAPSE_RETRIES=2
-# A unique canary with a printf directive in it, so format-string mangling would show.
-NEEDLE="canary.%s.$$.${RANDOM}${RANDOM}.argv"
-export FAKE_CURL_NEEDLE="$NEEDLE"
+# A unique canary with a printf directive in it, so format-string mangling would show. Padded
+# past the 64 KiB pipe buffer (and kept under the 128 KiB single-argument limit) so an external
+# writer of the header blocks until curl reads it: see the header comment. The leak checks look
+# for its unique HEAD: any process holding the token holds the head, and glob-matching the whole
+# 96 KiB canary against every process on the host is slow.
+NEEDLE_HEAD="canary.%s.$$.${RANDOM}${RANDOM}."
+printf -v pad '%098304d' 0   # 96 KiB of zeros, one builtin call
+NEEDLE="${NEEDLE_HEAD}${pad}.argv"
+export FAKE_CURL_NEEDLE="$NEEDLE_HEAD"
 HAVE_PROC=0; [[ -r /proc/self/cmdline ]] && HAVE_PROC=1
 
 assert_no_argv_leak() {   # $1 = label
-    eq "$1: token absent from curl's argv" 0 "$(count "$FAKE_CURL_LOG.argv" "$NEEDLE")"
+    eq "$1: token absent from curl's argv" 0 "$(count "$FAKE_CURL_LOG.argv" "$NEEDLE_HEAD")"
+    eq "$1: no external printf/echo was handed the token" 0 "$(count "$FAKE_CURL_LOG.helpers" "LEAK")"
     if [[ $HAVE_PROC -eq 1 ]]; then
-        eq "$1: token absent from curl's /proc cmdline" 0 "$(count "$FAKE_CURL_LOG.cmdline" "$NEEDLE")"
+        eq "$1: token absent from curl's /proc cmdline" 0 "$(count "$FAKE_CURL_LOG.cmdline" "$NEEDLE_HEAD")"
         eq "$1: token absent from every process's cmdline" 0 "$(count "$FAKE_CURL_LOG.leaks" "LEAK")"
     else
         ok "$1: SKIP /proc checks (no procfs)"
     fi
 }
+
+echo "== self-check: the traps catch a token handed to an external program =="
+# The regression the traps exist for, done on purpose: an external printf writes the header.
+# If either trap stopped working, every later "absent" assertion would pass vacuously.
+reset_logs
+curl -H @<(env printf 'Authorization: Bearer %s\n' "$NEEDLE") "$SYNAPSE_URL/health" >/dev/null 2>&1
+eq "external printf stub logged the token on its argv" 1 "$(count "$FAKE_CURL_LOG.helpers" "LEAK printf")"
+if [[ $HAVE_PROC -eq 1 ]]; then
+    eq "process scan caught the blocked external writer" 1 "$(( $(count "$FAKE_CURL_LOG.leaks" "LEAK") > 0 ))"
+else
+    ok "self-check: SKIP process scan (no procfs)"
+fi
 
 echo "== _synapse_call (synapse_ping) with SYNAPSE_TOKEN set =="
 export SYNAPSE_TOKEN="$NEEDLE"
