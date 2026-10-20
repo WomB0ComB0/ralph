@@ -11,6 +11,12 @@ jules_api_base() {
     printf '%s\n' "${JULES_API_BASE:-https://jules.googleapis.com/v1alpha}"
 }
 
+# One Jules REST call. Args: METHOD PATH [JSON_BODY]. Prints the response body; returns curl's rc.
+# The API key is handed to curl on a file descriptor, never on argv: every argv element is readable
+# by any local user through /proc/<pid>/cmdline. `-H @<(...)` makes curl read the header line from
+# /dev/fd/N, and printf is a bash builtin, so the key is never an argv element of curl, of the
+# substitution subshell, or of any helper (same approach as _syn_curl in lib/synapse.sh). The process
+# substitution is created at the curl call because its fd closes when that command finishes.
 jules_api_request() {
     local method="$1" path="$2" body="${3:-}" base url
     base="$(jules_api_base)"
@@ -19,18 +25,12 @@ jules_api_request() {
         log_error "JULES_API_KEY is required for tool=jules"
         return 1
     fi
+    # NON-secret arguments only from here on: each one becomes a curl argv element.
+    local args=(-fsS -X "$method" -H "Content-Type: application/json")
     if [[ -n "$body" ]]; then
-        curl -fsS -X "$method" \
-            -H "x-goog-api-key: $JULES_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$body" \
-            "$url"
-    else
-        curl -fsS -X "$method" \
-            -H "x-goog-api-key: $JULES_API_KEY" \
-            -H "Content-Type: application/json" \
-            "$url"
+        args+=(-d "$body")
     fi
+    curl -H @<(printf 'x-goog-api-key: %s\n' "$JULES_API_KEY") "${args[@]}" "$url"
 }
 
 jules_state_file() {
